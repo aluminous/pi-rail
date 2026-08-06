@@ -8,8 +8,7 @@
   },
   "network": {
     "enabled": true,
-    "allowedDomains": [],
-    "deniedDomains": ["*"]
+    "allowedDomains": []
   },
   "classifier": {
     "enabled": true,

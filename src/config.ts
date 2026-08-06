@@ -330,7 +330,12 @@ const DEFAULTS_SANS_PROVENANCE: Omit<ResolvedRailConfig, "provenance"> = {
   network: {
     enabled: true,
     allowedDomains: defaultAllowedNetworkDomains(),
-    deniedDomains: ["*"],
+    // Deliberately empty: sandbox-runtime checks denies BEFORE allows, so a
+    // "*" backstop here vetoes the entire allowlist (every sandboxed CONNECT
+    // 403s). Default-deny for unmatched hosts comes from strictAllowlist in
+    // the seatbelt runtime config instead; this list is for users carving
+    // explicit denials out of an allowed wildcard.
+    deniedDomains: [],
   },
   commands: {
     allow: [...DEFAULT_COMMAND_ALLOWLIST],

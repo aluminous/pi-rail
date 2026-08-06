@@ -174,8 +174,7 @@ Example `.pi/rail.json`:
   },
   "network": {
     "enabled": true,
-    "allowedDomains": ["github.com", "*.github.com", "*.githubusercontent.com", "ghcr.io", "*.ghcr.io", "docker.io", "*.docker.io", "registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "quay.io", "*.quay.io", "gcr.io", "*.gcr.io", "*.pkg.dev", "registry.k8s.io", "mcr.microsoft.com", "public.ecr.aws"],
-    "deniedDomains": ["*"]
+    "allowedDomains": ["github.com", "*.github.com", "*.githubusercontent.com", "ghcr.io", "*.ghcr.io", "docker.io", "*.docker.io", "registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "quay.io", "*.quay.io", "gcr.io", "*.gcr.io", "*.pkg.dev", "registry.k8s.io", "mcr.microsoft.com", "public.ecr.aws"]
   },
   "dispositions": {
     "off-machine-effects": "ask",
@@ -617,11 +616,17 @@ enabled and use an empty allowlist:
 {
   "network": {
     "enabled": true,
-    "allowedDomains": [],
-    "deniedDomains": ["*"]
+    "allowedDomains": []
   }
 }
 ```
+
+Hosts that match no rule are denied by default (the profile runs the proxy in
+strict-allowlist mode), so an empty allowlist blocks everything. Do NOT write
+`"deniedDomains": ["*"]` for this: denies are checked before allows, so a
+deny-all entry silently vetoes the allowlist itself. `deniedDomains` is for
+carving explicit exceptions out of an allowed wildcard — for example allowing
+`*.github.com` while denying `gist.github.com`.
 
 ## What is protected
 

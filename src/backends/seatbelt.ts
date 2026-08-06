@@ -113,6 +113,16 @@ export function getSeatbeltRuntimeConfig(config: ResolvedRailConfig, cwd = proce
   const network = {
     allowedDomains: config.network.allowedDomains,
     deniedDomains: config.network.deniedDomains,
+    // Default-deny for hosts matching neither list. This is the backstop, NOT
+    // a "*" in deniedDomains: sandbox-runtime checks denies before allows, so
+    // a deny-all entry would veto the allowlist itself.
+    strictAllowlist: true,
+    // TLS certificate verification. Go binaries on macOS (gh, glab, docker,
+    // most cloud CLIs) verify through Security.framework, which XPCs to
+    // trustd; without the lookup every chain build fails (OSStatus -26276)
+    // and tools misreport it — gh says "the token in keyring is invalid".
+    // Read-only trust evaluation, so granting it does not widen egress.
+    allowMachLookup: ["com.apple.trustd", "com.apple.trustd.agent"],
     ...((seatbelt.network ?? {}) as Record<string, unknown>),
   } as Record<string, unknown>;
   if (!config.network.enabled) {

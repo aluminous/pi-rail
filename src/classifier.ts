@@ -289,7 +289,7 @@ async function completeText(params: {
     } catch (error) {
       const terminal = error instanceof ClassifierModelUnavailableError || !isRetryableClassifierError(error) || attempt >= params.budget.maxAttempts;
       if (terminal) throw tagClassifierFailure(error, { attempts: attempt, maxAttempts: params.budget.maxAttempts, model: modelSpec(params.model) });
-      const delayMs = 250 * 2 ** (attempt - 1);
+      const delayMs = 250 * 4 ** (attempt - 1);
       params.io.notify(
         `Rail classifier attempt ${attempt}/${params.budget.maxAttempts} failed (${retryFailureKind(error)}): ${formatError(error)}. Retrying in ${delayMs}ms.`,
         "warning",

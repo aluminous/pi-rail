@@ -85,7 +85,7 @@ export const BUILTIN_CAPABILITY_CLASSES: CapabilityClass[] = [
     id: "modify-project",
     name: "Modify project",
     definition:
-      "Creating, editing, or appending files inside the session working directory, together with the content being written. Ordinary source, test, documentation, and configuration edits. Deleting or overwriting existing work is local-destructive instead; content that grants standing permissions, addresses future reviewers, or installs hooks is persistence instead.",
+      "Creating, editing, or appending files inside the session working directory, together with the content being written. Ordinary source, test, documentation, and configuration edits. Deleting or overwriting existing work is local-destructive instead; content that grants standing permissions, addresses future reviewers, or installs hooks is persistence instead. Managing git worktrees — add, remove, prune — is this class when the worktree directory is inside the session working directory or a temp directory: the checkout is scratch space the project owns, and an unforced remove cannot discard work because git refuses it while the worktree holds modified or untracked files. A worktree placed anywhere else is modify-system, and a forced remove is local-destructive.",
     default: "allow",
   },
   {
@@ -99,7 +99,7 @@ export const BUILTIN_CAPABILITY_CLASSES: CapabilityClass[] = [
     id: "off-machine-effects",
     name: "Off-machine effects",
     definition:
-      "Any effect that leaves this machine: pushing, publishing, or otherwise writing to a remote; opening, commenting on, or closing issues and pull requests; sending mail or chat messages; deploying; calling a remote API that changes state; changing remote infrastructure or cloud accounts. The MACHINE BOUNDARY decides, not the tool name: kubectl, docker, and similar tools pointed at a LOCAL cluster or daemon (kind, minikube, k3d, docker-desktop, colima, rancher-desktop, a localhost/127.0.0.1 context) stay local and are NOT off-machine-effects; the same commands against a remote or cloud context are. Retrieving remote data without changing it is network-fetch instead.",
+      "Any effect that leaves this machine: pushing, publishing, or otherwise writing to a remote; filing, commenting on, merging, or closing issues and pull requests; sending mail or chat messages; deploying; calling a remote API that changes state; changing remote infrastructure or cloud accounts. Only a CHANGE to remote state counts: viewing, listing, diffing, or checking the status of an issue or pull request changes nothing and is network-fetch, not this. The MACHINE BOUNDARY decides the rest, not the tool name: kubectl, docker, and similar tools pointed at a LOCAL cluster or daemon (kind, minikube, k3d, docker-desktop, colima, rancher-desktop, a localhost/127.0.0.1 context) stay local and are NOT off-machine-effects; the same commands against a remote or cloud context are. Retrieving remote data without changing it is network-fetch instead.",
     default: "ask",
   },
   {
@@ -120,7 +120,7 @@ export const BUILTIN_CAPABILITY_CLASSES: CapabilityClass[] = [
     id: "local-destructive",
     name: "Local destructive",
     definition:
-      "Destroying or irreversibly overwriting local state: deleting or truncating existing files and directories, git operations that discard or rewrite work (reset --hard, clean, checkout over changes, rebase, amend, branch -D), dropping local databases, containers, or volumes. Creating a local git commit is also this class: it is a local state change the user is expected to re-scope per session.",
+      "Destroying or irreversibly overwriting local state: deleting or truncating existing files and directories, git operations that discard or rewrite work (reset --hard, clean, checkout over changes, rebase, amend, branch -D), dropping local databases, containers, or volumes. Creating a local git commit is also this class: it is a local state change the user is expected to re-scope per session. Removing or pruning a git worktree under the session working directory is modify-project rather than this, because git refuses an unforced remove that would delete modified or untracked files — a FORCED remove (--force/-f) overrides exactly that refusal and is this class.",
     default: "judge",
   },
   {

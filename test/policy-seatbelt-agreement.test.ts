@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { getSeatbeltRuntimeConfig } from "../src/backends/seatbelt.ts";
-import { mergeConfig } from "../src/config.ts";
+import { DEFAULT_CONFIG, mergeConfig } from "../src/config.ts";
 import { compileFilesystemPolicy, decidePathAccess, resolveConfigPath, type FilesystemListName } from "../src/policy.ts";
 import { makeFixtureDir, testConfig } from "./helpers.ts";
 
@@ -113,6 +113,30 @@ describe("policy and seatbelt agree on default deny paths", () => {
     assert.equal(Object.hasOwn(runtime.network, "allowedDomains"), true);
     assert.deepEqual(runtime.network.allowedDomains, []);
     assert.deepEqual(runtime.network.deniedDomains, ["*"]);
+  });
+
+  it("backstops unmatched hosts with strictAllowlist, never a deny-all entry", () => {
+    // Regression: sandbox-runtime checks denies BEFORE allows, so the old
+    // default of deniedDomains ["*"] denied every host — including the 26
+    // allowed ones. gh surfaced it as "the token in keyring is invalid" after
+    // the proxy 403'd its api.github.com validation call.
+    assert.deepEqual(DEFAULT_CONFIG.network.deniedDomains, []);
+    const runtime = getSeatbeltRuntimeConfig(testConfig(), cwd);
+    assert.equal(runtime.network.strictAllowlist, true);
+    assert.deepEqual(runtime.network.deniedDomains, []);
+    // A seatbelt.network override can still loosen the backstop deliberately.
+    const loosened = testConfig((c) => {
+      c.seatbelt = { network: { strictAllowlist: false } };
+    });
+    assert.equal(getSeatbeltRuntimeConfig(loosened, cwd).network.strictAllowlist, false);
+  });
+
+  it("grants the trustd mach-lookups TLS verification needs", () => {
+    // Go binaries on macOS (gh and most cloud CLIs) verify certificates via
+    // Security.framework → trustd XPC; denying the lookup fails every chain
+    // build with OSStatus -26276, which tools then misreport.
+    const runtime = getSeatbeltRuntimeConfig(testConfig(), cwd);
+    assert.deepEqual(runtime.network.allowMachLookup, ["com.apple.trustd", "com.apple.trustd.agent"]);
   });
 });
 
