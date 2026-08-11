@@ -1,5 +1,5 @@
 import path from "node:path";
-import { getPackageDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getPackageDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { askRailApproval } from "./approvals.ts";
 import {
   capabilityName,
@@ -33,7 +33,7 @@ import { describeSegmentMatch, explainCommandMatch, matchedCapabilities } from "
 import { configSourceLabel, type ResolvedRailConfig } from "./config.ts";
 import { screenToolCall, type ContentScreenVerdict } from "./content-screen.ts";
 import { addTraceStage, type DecisionTrace } from "./decision-trace.ts";
-import { describeAction, INTERCEPTED_TOOLS, type InterceptedToolSpec } from "./intercepted-tools.ts";
+import { actionTarget, describeAction, INTERCEPTED_TOOLS, type InterceptedToolSpec } from "./intercepted-tools.ts";
 import { classifierExemptReadReason, decidePathAccess, denyReadMatch, normalizeUserPath, type AccessKind } from "./policy.ts";
 import { appendRailTelemetry, type RailJudgeTelemetry } from "./telemetry.ts";
 import {
@@ -74,11 +74,49 @@ function isApprovedPath(approvedRoots: string[], target: string): boolean {
   return approvedRoots.some((root) => target === root || target.startsWith(`${root}/`));
 }
 
+/**
+ * Swap pi's streaming-spinner text for the duration of a reviewer call, so the
+ * wait reads as the rail's ("Classifying", "Judging") instead of the agent
+ * model's default. Deliberately terse: the spinner is a heartbeat, not a
+ * report — the action under review is never echoed there. Restored in a
+ * finally so a thrown classifier failure cannot leave the message stuck, and
+ * optional-chained because RPC and headless contexts have no working row.
+ */
+export async function withWorkingMessage<T>(ctx: ExtensionContext, message: string, run: () => Promise<T>): Promise<T> {
+  const ui = ctx.ui as { setWorkingMessage?(message?: string): void };
+  ui.setWorkingMessage?.(message);
+  try {
+    return await run();
+  } finally {
+    ui.setWorkingMessage?.();
+  }
+}
+
 function isPiPackageDocsOrExamplePath(target: string): boolean {
   const packageDir = path.resolve(getPackageDir());
   const relative = path.relative(packageDir, target);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
   return relative === "README.md" || relative.startsWith("docs/") || relative.startsWith("examples/");
+}
+
+/**
+ * User-skills reads skip the namer. Invoking a pi skill IS a read: the system
+ * prompt lists SKILL.md paths and tells the model to load one with the read
+ * tool, so naming those reads taxes every skill invocation. Project skills
+ * (cwd/.pi/skills) are already exempt as in-cwd reads; this covers the user
+ * skills directory, which lives under the agent dir and is as user-installed
+ * as the config that enables the rail.
+ *
+ * Only the read is exempt. The actions a skill's instructions produce are
+ * ordinary tool calls, each reviewed on its own — a skill that says to
+ * exfiltrate still loses at the call that tries. And denyRead still wins:
+ * classifyRead checks it (canonicalized, so symlinks don't launder) before
+ * any exemption, so a skills-dir symlink at a secret labels credentials.
+ */
+function isUserSkillPath(target: string): boolean {
+  const skillsDir = path.resolve(getAgentDir(), "skills");
+  const relative = path.relative(skillsDir, target);
+  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 async function askPathApproval(params: {
@@ -227,6 +265,7 @@ export function exemptReadCallReason(spec: InterceptedToolSpec, input: Record<st
   if (typeof target !== "string") return undefined;
   const canonicalTarget = allowedReadPath ?? normalizeUserPath(cwd, target);
   if (isPiPackageDocsOrExamplePath(canonicalTarget)) return "pi package docs/examples";
+  if (isUserSkillPath(canonicalTarget)) return "user skills directory";
   return classifierExemptReadReason(config, cwd, target);
 }
 
@@ -255,7 +294,7 @@ function classifyRead(
   }
   const reason = exemptReadCallReason(spec, input, cwd, config, allowedReadPath);
   if (reason === undefined) {
-    addTraceStage(trace, "read-exemption", "not exempt", "not in cwd, allowRead, or pi docs — naming required");
+    addTraceStage(trace, "read-exemption", "not exempt", "not in cwd, allowRead, pi docs, or user skills — naming required");
     return { labels: [], needsNaming: true };
   }
   const label: CapabilityId = reason.startsWith("matches allowRead") ? "read-system" : "read-project";
@@ -421,7 +460,9 @@ async function runInterceptStages(
     const startedAt = performance.now();
     namerModel = describeModel(() => resolveClassifierModel(ctx, config, state.classifier));
     try {
-      named = await nameToolCall({ ctx, config, state: state.classifier, toolName: event.toolName, input: event.input, completeFn, capabilities: state.capabilities });
+      named = await withWorkingMessage(ctx, "Classifying", () =>
+        nameToolCall({ ctx, config, state: state.classifier, toolName: event.toolName, input: event.input, completeFn, capabilities: state.capabilities }),
+      );
       namerLatencyMs = Math.round(performance.now() - startedAt);
       recordModelCall(state, { role: "namer", model: namerModel, latencyMs: namerLatencyMs, usage: named.tokenUsage });
       state.classifier.lastError = undefined;
@@ -575,6 +616,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     // deterministic label that escalated or prompted is not an exemption.
     if (!params.reviewed && resolution.disposition === "allow") recordClassifierSkip(state);
     recordCapabilityDecision(state, event.toolName, {
+      target: actionTarget(event.toolName, event.input),
       labels: resolution.labels,
       decision,
       disposition: resolution.disposition,
@@ -706,24 +748,27 @@ async function runJudgeStage(
   const model = describeModel(() => resolveJudgeModel(ctx, config, state.classifier));
   const startedAt = performance.now();
   try {
-    const judge = await judgeToolCall({
-      ctx,
-      config,
-      state: state.classifier,
-      toolName: event.toolName,
-      input: event.input,
-      labels: resolution.labels,
-      authorizationEvidence: params.named?.authorizationEvidence,
-      recentGuardDecisions: recentDecisionsForJudge(state),
-      completeFn: params.completeFn,
-      capabilities: state.capabilities,
-    });
+    const judge = await withWorkingMessage(ctx, "Judging", () =>
+      judgeToolCall({
+        ctx,
+        config,
+        state: state.classifier,
+        toolName: event.toolName,
+        input: event.input,
+        labels: resolution.labels,
+        authorizationEvidence: params.named?.authorizationEvidence,
+        recentGuardDecisions: recentDecisionsForJudge(state),
+        completeFn: params.completeFn,
+        capabilities: state.capabilities,
+      }),
+    );
     const latencyMs = Math.round(performance.now() - startedAt);
     addTraceStage(trace, "judge", judge.decision, `${judge.decision} · ${judge.reason} (model ${model ?? "unknown"}, ${latencyMs}ms)`);
     recordModelCall(state, { role: "judge", model, latencyMs, usage: judge.tokenUsage });
     recordJudgement(state, {
       at: Date.now(),
       toolName: event.toolName,
+      target: actionTarget(event.toolName, event.input),
       labels: resolution.labels,
       verdict: judge.decision,
       reason: judge.reason,

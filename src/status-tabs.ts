@@ -356,6 +356,9 @@ function namerTab(view: StatusView): string[] {
     ...renderTable(theme, CLASSIFICATION_COLUMNS, rows, width, {
       empty: "(nothing named yet)",
       styleRow: (text, row) => theme.fg(decisionColor(row[4] ?? ""), text),
+      // The command or path, wrapped under the row like a judge reason — an
+      // eighth column would squeeze the seven that are already there.
+      rowNote: (_row, index) => state.recentClassifications[index]?.target || undefined,
     }),
     "",
     ...note(theme, width, "table = what the disposition table resolved over the labels; a `judge` row means the escalation reviewer then decided"),
@@ -391,8 +394,13 @@ function judgeTab(view: StatusView): string[] {
       empty: "(nothing escalated yet)",
       styleRow: (text, row) => theme.fg(decisionColor(row[3] ?? ""), text),
       // The verdict's reason is a sentence, so it gets its own wrapped line
-      // under the row rather than a column that would squeeze every other one.
-      rowNote: (_row, index) => judgements[index]?.reason,
+      // under the row rather than a column that would squeeze every other one;
+      // the judged command or path leads so the reason has a referent.
+      rowNote: (_row, index) => {
+        const entry = judgements[index];
+        if (!entry) return undefined;
+        return entry.target ? `${entry.target} — ${entry.reason}` : entry.reason;
+      },
     }),
     "",
     ...note(theme, width, `judge model: ${judgeModelSpec(config, state.classifier)}${judgements[0]?.model ? ` (last call ${judgements[0].model})` : ""}`),

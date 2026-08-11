@@ -46,9 +46,9 @@ describe("decision recording", () => {
 
   it("derives review counters from capability decisions", () => {
     const state = createRuntimeState();
-    recordCapabilityDecision(state, "bash", { labels: ["run-dev-tools"], decision: "allow", disposition: "allow", reason: "ok", reviewed: true, tokenUsage: { input: 100, output: 20 } });
-    recordCapabilityDecision(state, "bash", { labels: ["credentials"], decision: "deny", disposition: "judge", reason: "no", reviewed: true, tokenUsage: { input: 50, output: 10 } });
-    recordCapabilityDecision(state, "bash", { labels: ["off-machine-effects"], decision: "ask", disposition: "ask", reason: "confirm", reviewed: true });
+    recordCapabilityDecision(state, "bash", { target: "", labels: ["run-dev-tools"], decision: "allow", disposition: "allow", reason: "ok", reviewed: true, tokenUsage: { input: 100, output: 20 } });
+    recordCapabilityDecision(state, "bash", { target: "", labels: ["credentials"], decision: "deny", disposition: "judge", reason: "no", reviewed: true, tokenUsage: { input: 50, output: 10 } });
+    recordCapabilityDecision(state, "bash", { target: "", labels: ["off-machine-effects"], decision: "ask", disposition: "ask", reason: "confirm", reviewed: true });
     assert.equal(state.stats.reviewed, 3);
     assert.equal(state.stats.classifierHits, 3);
     assert.equal(state.stats.turnClassifierHits, 3);
@@ -65,7 +65,7 @@ describe("decision recording", () => {
 
   it("counts a deterministic table hit as a rule hit, not a review", () => {
     const state = createRuntimeState();
-    recordCapabilityDecision(state, "read", { labels: ["read-project"], decision: "allow", disposition: "allow", reason: "in cwd", reviewed: false });
+    recordCapabilityDecision(state, "read", { target: "", labels: ["read-project"], decision: "allow", disposition: "allow", reason: "in cwd", reviewed: false });
     assert.equal(state.stats.ruleHits, 1);
     assert.equal(state.stats.turnRuleHits, 1);
     assert.equal(state.stats.classifierHits, 0);
@@ -187,6 +187,7 @@ describe("per-model accumulation", () => {
 describe("recent review rings", () => {
   function classify(state: ReturnType<typeof createRuntimeState>, n: number) {
     recordCapabilityDecision(state, "bash", {
+      target: "npm test",
       labels: ["run-dev-tools"],
       decision: "allow",
       disposition: "allow",
@@ -216,7 +217,7 @@ describe("recent review rings", () => {
 
   it("leaves the model and latency empty for a deterministic decision", () => {
     const state = createRuntimeState();
-    recordCapabilityDecision(state, "read", { labels: ["read-project"], decision: "allow", disposition: "allow", reason: "in cwd", reviewed: false });
+    recordCapabilityDecision(state, "read", { target: "", labels: ["read-project"], decision: "allow", disposition: "allow", reason: "in cwd", reviewed: false });
     assert.equal(state.recentClassifications[0]?.model, undefined);
     assert.equal(state.recentClassifications[0]?.latencyMs, 0);
   });
@@ -225,7 +226,7 @@ describe("recent review rings", () => {
     const state = createRuntimeState();
     for (let i = 0; i < REVIEW_RING_LIMIT + 5; i++) {
       classify(state, i);
-      recordJudgement(state, { at: Date.now(), toolName: "bash", labels: ["credentials"], verdict: "ask", reason: `judge ${i}`, latencyMs: i, inputTokens: i, outputTokens: i });
+      recordJudgement(state, { at: Date.now(), toolName: "bash", target: "", labels: ["credentials"], verdict: "ask", reason: `judge ${i}`, latencyMs: i, inputTokens: i, outputTokens: i });
     }
     assert.equal(state.recentClassifications.length, REVIEW_RING_LIMIT);
     assert.equal(state.recentJudgements.length, REVIEW_RING_LIMIT);
@@ -241,6 +242,7 @@ describe("decided-by counting", () => {
   it("credits only the label that produced the winning disposition", () => {
     const state = createRuntimeState();
     recordCapabilityDecision(state, "bash", {
+      target: "git push origin main",
       labels: ["read-project", "off-machine-effects"],
       decision: "ask",
       disposition: "ask",
@@ -256,7 +258,7 @@ describe("decided-by counting", () => {
 
   it("leaves every class undecided when the caller resolved no winner", () => {
     const state = createRuntimeState();
-    recordCapabilityDecision(state, "bash", { labels: ["read-project"], decision: "allow", disposition: "allow", reason: "ok", reviewed: false });
+    recordCapabilityDecision(state, "bash", { target: "", labels: ["read-project"], decision: "allow", disposition: "allow", reason: "ok", reviewed: false });
     assert.equal(capabilityStats(state.capabilities, "read-project").decided, 0);
   });
 });

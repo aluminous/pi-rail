@@ -58,6 +58,8 @@ export const REVIEW_RING_LIMIT = 20;
 export interface ClassificationRecord {
   at: number;
   toolName: string;
+  /** The command or path the call was about (truncated); "" when the tool has neither. */
+  target: string;
   labels: CapabilityId[];
   /** What the table resolved over those labels, before a judge or the user answered. */
   disposition: Disposition;
@@ -75,6 +77,8 @@ export interface ClassificationRecord {
 export interface JudgementRecord {
   at: number;
   toolName: string;
+  /** The command or path the call was about (truncated); "" when the tool has neither. */
+  target: string;
   labels: CapabilityId[];
   verdict: RailDecision;
   reason: string;
@@ -343,6 +347,8 @@ export function recordApprovalDenied(state: RuntimeState): void {
 }
 
 export interface CapabilityDecisionRecord {
+  /** The command or path the call was about, for the recent-classifications ring. */
+  target: string;
   labels: CapabilityId[];
   decision: RailDecision;
   /** The resolved table disposition that produced this decision. */
@@ -386,6 +392,7 @@ export function recordCapabilityDecision(state: RuntimeState, toolName: string, 
   state.recentClassifications.unshift({
     at,
     toolName,
+    target: record.target,
     labels: record.labels,
     disposition: record.disposition,
     decision: record.decision,

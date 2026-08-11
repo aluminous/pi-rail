@@ -30,6 +30,20 @@ export function describeAction(toolName: string, inputSummary: Record<string, un
   return toolName;
 }
 
+/**
+ * The command or path a call is about, without the tool-name prefix — the
+ * recent-decision rings show the tool in its own column. Truncated like
+ * telemetry's minimal tier: the status page is user-only, but the rings
+ * outlive the call and a full command line would dominate the state dump.
+ */
+export function actionTarget(toolName: string, input: unknown): string {
+  const record = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  const projected = INTERCEPTED_TOOLS[toolName]?.project(record) ?? {};
+  if (typeof projected.command === "string" && projected.command) return textPrefix(projected.command, 120);
+  if (typeof projected.path === "string" && projected.path) return textPrefix(projected.path, 120);
+  return "";
+}
+
 export const INTERCEPTED_TOOLS: Record<string, InterceptedToolSpec> = {
   bash: {
     access: [],

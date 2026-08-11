@@ -6,7 +6,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RailBackend } from "../src/backends/types.ts";
 import { capabilityStats } from "../src/capabilities.ts";
 import type { CompleteFn } from "../src/classifier.ts";
-import { interceptToolCall, stopTurnForClassifierFailure } from "../src/interceptor.ts";
+import { interceptToolCall, stopTurnForClassifierFailure, withWorkingMessage } from "../src/interceptor.ts";
 import { createRuntimeState, modelUsageRows } from "../src/state.ts";
 import type { RailErrorTelemetry } from "../src/telemetry.ts";
 import { makeFixtureDir, testConfig } from "./helpers.ts";
@@ -48,6 +48,33 @@ function railState(config: ReturnType<typeof testConfig>) {
   return state;
 }
 
+describe("withWorkingMessage", () => {
+  function spinnerCtx() {
+    const calls: (string | undefined)[] = [];
+    return { calls, ctx: { ui: { setWorkingMessage: (message?: string) => calls.push(message) } } as unknown as ExtensionContext };
+  }
+
+  it("sets the message around the call and restores the default after", async () => {
+    const { calls, ctx } = spinnerCtx();
+    const result = await withWorkingMessage(ctx, "Judging", async () => "verdict");
+    assert.equal(result, "verdict");
+    assert.deepEqual(calls, ["Judging", undefined]);
+  });
+
+  it("restores the default even when the call throws", async () => {
+    const { calls, ctx } = spinnerCtx();
+    await assert.rejects(withWorkingMessage(ctx, "Classifying", async () => {
+      throw new Error("provider down");
+    }));
+    assert.deepEqual(calls, ["Classifying", undefined], "a thrown classifier failure must not leave the spinner text stuck");
+  });
+
+  it("is a no-op on contexts without a working row (RPC, headless)", async () => {
+    const ctx = { ui: {} } as unknown as ExtensionContext;
+    assert.equal(await withWorkingMessage(ctx, "Judging", async () => 7), 7);
+  });
+});
+
 describe("classifier read exemption", () => {
   mkdirSync(path.join(fixture.dir, "project", "src"), { recursive: true });
   writeFileSync(path.join(fixture.dir, "project", "src", "app.ts"), "ok");
@@ -75,6 +102,35 @@ describe("classifier read exemption", () => {
     const result = await interceptToolCall({ toolName: "read", input: { path: path.join(fixture.dir, "outside.txt") } }, fakeCtx(cwd), state);
     assert.equal(result?.block, true);
     assert.equal(state.stats.classifierSkips, 0);
+  });
+
+  it("skips classifier review for user-skills reads (a skill invocation is a read)", async () => {
+    // getAgentDir() reads PI_CODING_AGENT_DIR at call time, so the fixture can
+    // stand in for ~/.pi/agent without touching the real one.
+    const agentDir = path.join(fixture.dir, "agent");
+    mkdirSync(path.join(agentDir, "skills", "demo"), { recursive: true });
+    writeFileSync(path.join(agentDir, "skills", "demo", "SKILL.md"), "# demo skill");
+    writeFileSync(path.join(agentDir, "auth.json"), "{}");
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      const config = testConfig((c) => {
+        c.filesystem.enabled = false;
+        c.classifier.enabled = true;
+      });
+      const state = railState(config);
+      const result = await interceptToolCall({ toolName: "read", input: { path: path.join(agentDir, "skills", "demo", "SKILL.md") } }, fakeCtx(cwd), state);
+      assert.equal(result, undefined);
+      assert.equal(state.stats.classifierSkips, 1);
+      // The exemption is the skills subtree, not the agent dir: a sibling like
+      // auth.json still needs naming (and blocks here, with no classifier model).
+      const outside = await interceptToolCall({ toolName: "read", input: { path: path.join(agentDir, "auth.json") } }, fakeCtx(cwd), state);
+      assert.equal(outside?.block, true);
+      assert.equal(state.stats.classifierSkips, 1);
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    }
   });
 
   it("labels deny-matching reads credentials instead of exempting them", async () => {

@@ -74,7 +74,7 @@ describe("StatusPage tabs", () => {
   it("shows the active tab's own content", () => {
     const state = createRuntimeState();
     recordModelCall(state, { role: "namer", model: "openrouter/haiku", latencyMs: 400, usage: { input: 1200, output: 40, costUsd: 0.0012 } });
-    recordJudgement(state, { at: Date.now(), toolName: "bash", labels: ["credentials"], verdict: "deny", reason: "credential exfiltration", latencyMs: 900, inputTokens: 10, outputTokens: 2 });
+    recordJudgement(state, { at: Date.now(), toolName: "bash", target: "", labels: ["credentials"], verdict: "deny", reason: "credential exfiltration", latencyMs: 900, inputTokens: 10, outputTokens: 2 });
     const { page, text } = openPage(state);
     assert.match(text(), /Decisions/, "session tab");
     assert.doesNotMatch(text(), /openrouter\/haiku/);
