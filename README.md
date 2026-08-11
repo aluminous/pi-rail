@@ -640,7 +640,7 @@ carving explicit exceptions out of an allowed wildcard — for example allowing
 - While a reviewer call is in flight, pi's streaming spinner reads `Classifying` (namer) or `Judging` (judge), so a rail wait is distinguishable from the agent model thinking.
 - A `read` matching `denyRead` is **not** hard-blocked any more: it is labelled `credentials`, which defaults to `judge`. Reading a test-fixture key and reading toward exfiltration are different actions, and telling them apart is a judgment call. `denyWrite` matches stay hard blocks — writes to secret and config paths are containment, not policy.
 - Writes and edits are never exempted by path alone: their content goes through the deterministic content screen, and anything it trips on goes to the namer.
-- Reviewer timeouts/network failures are retried with bounded exponential backoff up to five attempts and surfaced to the user. If no usable namer model is available, or fail-closed naming still fails after retries, Pi Rail stops the current turn for user intervention without exiting Pi. A judge failure instead degrades to asking you.
+- Reviewer timeouts/network failures are retried with bounded exponential backoff (250ms, growing 4x) up to five attempts and surfaced to the user. `classifier.timeoutMs` is an idle timeout, not a total deadline: the reviewer streams its response and the clock resets on every token, so a slow-but-progressing model can take as long as it needs while a stalled request still fails fast. If no usable namer model is available, or fail-closed naming still fails after retries, Pi Rail stops the current turn for user intervention without exiting Pi. A judge failure instead degrades to asking you.
 
 ## Approval prompts and session guidance
 

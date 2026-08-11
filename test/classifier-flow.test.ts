@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import { ClassifierModelUnavailableError, describeClassifierFailure } from "../src/classifier-protocol.ts";
 import { runJudging, runNaming, type ClassifierIO, type CompleteFn } from "../src/classifier.ts";
+import { IdleTimeoutError } from "../src/streaming-complete.ts";
 import { testConfig } from "./helpers.ts";
 
 const model = { provider: "test", id: "fake-model" } as Model<Api>;
@@ -156,7 +157,7 @@ describe("retry behavior", () => {
     const result = await name(io);
     assert.deepEqual(result.labels, ["read-project"]);
     assert.equal(calls.length, 3);
-    assert.deepEqual(sleeps, [250, 500]);
+    assert.deepEqual(sleeps, [250, 1000]);
     assert.equal(notifications.filter((n) => n.includes("Retrying")).length, 2);
   });
 
@@ -238,6 +239,41 @@ describe("retry behavior", () => {
     const result = await name(io, { timeoutMs: 30 });
     assert.deepEqual(result.labels, ["read-project"]);
     assert.equal(calls.length, 2);
+  });
+
+  it("treats a self-timing complete's IdleTimeoutError as a retryable timeout", async () => {
+    const { io, notifications } = makeIO([NAME_READ]);
+    let calls = 0;
+    const streamingIo: ClassifierIO = {
+      ...io,
+      completeSelfTimes: true,
+      complete: (async () => {
+        calls++;
+        if (calls === 1) throw new IdleTimeoutError(8000);
+        return makeResponse(NAME_READ);
+      }) as CompleteFn,
+    };
+    const result = await name(streamingIo);
+    assert.deepEqual(result.labels, ["read-project"]);
+    assert.equal(calls, 2);
+    assert.match(notifications[0]!, /\(timeout after 8000ms\): reviewer stream stalled for 8000ms\. Retrying in 250ms\./);
+  });
+
+  it("imposes no total deadline on a self-timing complete", async () => {
+    const { io } = makeIO([]);
+    const streamingIo: ClassifierIO = {
+      ...io,
+      completeSelfTimes: true,
+      // Resolves well past the configured 30ms: with the old total timeout
+      // this attempt would be aborted; a self-timing complete is trusted to
+      // bound itself.
+      complete: (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return makeResponse(NAME_READ);
+      }) as CompleteFn,
+    };
+    const result = await name(streamingIo, { timeoutMs: 30 });
+    assert.deepEqual(result.labels, ["read-project"]);
   });
 });
 

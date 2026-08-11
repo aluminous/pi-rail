@@ -1,4 +1,4 @@
-import { complete, type Message, type Model, type Api } from "@earendil-works/pi-ai/compat";
+import { complete, type Message, type Model, type Api, type ProviderHeaders } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   capabilityRegistry,
@@ -29,6 +29,7 @@ import {
 } from "./classifier-protocol.ts";
 import { resolveAutoClassifierModel } from "./classifier-models.ts";
 import { screenLexiconSummary } from "./content-screen.ts";
+import { IdleTimeoutError, streamingComplete } from "./streaming-complete.ts";
 import { formatError, textPrefix } from "./util.ts";
 
 export {
@@ -102,7 +103,9 @@ export type CompleteFn = typeof complete;
 export interface ClassifierAuthResult {
   ok: boolean;
   apiKey?: string;
-  headers?: Record<string, string>;
+  // ProviderHeaders values may be null (header-deletion markers); pi-ai 0.84+
+  // wants them passed through unchanged so it can suppress provider defaults.
+  headers?: ProviderHeaders;
   error?: string;
 }
 
@@ -115,6 +118,13 @@ export interface ClassifierIO {
   cwd: string;
   signal: AbortSignal | undefined;
   complete: CompleteFn;
+  /**
+   * When true, `complete` enforces its own per-call deadline (the streaming
+   * idle timeout) and rejects with IdleTimeoutError on a stall; the request
+   * flow must not wrap it in a total-request timeout, or slow-but-progressing
+   * responses would still be cut off.
+   */
+  completeSelfTimes?: boolean;
   getAuth(model: Model<Api>): Promise<ClassifierAuthResult>;
   notify(message: string, level: "info" | "warning" | "error"): void;
   recentUserMessages(): string[];
@@ -192,11 +202,17 @@ export async function defaultSleep(ms: number, signal: AbortSignal | undefined):
   });
 }
 
-export function createClassifierIO(ctx: ExtensionContext, completeFn: CompleteFn = complete): ClassifierIO {
+export function createClassifierIO(ctx: ExtensionContext, completeFn?: CompleteFn, timeoutMs = 8000): ClassifierIO {
+  // An injected complete fn (tests, the eval runner) is treated as a plain
+  // completion API and gets the total-request timeout in completeTextOnce.
+  // The default path streams instead, bounding each call with an idle
+  // timeout that resets on every token (see streaming-complete.ts).
+  const streaming = completeFn === undefined;
   return {
     cwd: ctx.cwd,
     signal: ctx.signal,
-    complete: completeFn,
+    complete: completeFn ?? streamingComplete({ idleTimeoutMs: timeoutMs }),
+    completeSelfTimes: streaming,
     getAuth: async (model) => {
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
       return auth.ok ? { ok: true, apiKey: auth.apiKey, headers: auth.headers } : { ok: false, error: auth.error };
@@ -218,11 +234,16 @@ async function completeTextOnce(params: {
   if (!auth.ok || !auth.apiKey) throw new ClassifierModelUnavailableError(auth.ok ? `No API key for ${params.model.provider}` : auth.error ?? "auth failed");
   const message: Message = { role: "user", content: [{ type: "text", text: params.text }], timestamp: Date.now() };
   const controller = new AbortController();
+  // A self-timing complete (the streaming idle timeout) must not also get a
+  // total deadline here — that would reintroduce the cap it exists to remove.
+  const selfTiming = params.io.completeSelfTimes === true;
   let didTimeout = false;
-  const timeout = setTimeout(() => {
-    didTimeout = true;
-    controller.abort();
-  }, params.timeoutMs);
+  const timeout = selfTiming
+    ? undefined
+    : setTimeout(() => {
+        didTimeout = true;
+        controller.abort();
+      }, params.timeoutMs);
   const onParentAbort = () => controller.abort();
   params.io.signal?.addEventListener("abort", onParentAbort, { once: true });
   try {
@@ -247,10 +268,11 @@ async function completeTextOnce(params: {
   } catch (error) {
     if (didTimeout) throw new ClassifierRetryableError(`reviewer timed out after ${params.timeoutMs}ms`, params.timeoutMs);
     if (params.io.signal?.aborted) throw new Error("classifier review aborted");
+    if (error instanceof IdleTimeoutError) throw new ClassifierRetryableError(`reviewer stream stalled for ${error.timeoutMs}ms`, error.timeoutMs);
     if (isModelUnavailableError(error)) throw new ClassifierModelUnavailableError(formatError(error));
     throw error;
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== undefined) clearTimeout(timeout);
     params.io.signal?.removeEventListener("abort", onParentAbort);
   }
 }
@@ -420,7 +442,7 @@ export async function nameToolCall(params: {
   const model = resolveClassifierModel(params.ctx, params.config, params.state);
   if (!model) throw new ClassifierModelUnavailableError(`Classifier model not found: ${params.state.modelOverride ?? params.config.classifier.model}`);
   return runNaming({
-    io: createClassifierIO(params.ctx, params.completeFn),
+    io: createClassifierIO(params.ctx, params.completeFn, params.config.classifier.timeoutMs),
     model,
     config: params.config,
     toolName: params.toolName,
@@ -445,7 +467,7 @@ export async function judgeToolCall(params: {
   const model = resolveJudgeModel(params.ctx, params.config, params.state);
   if (!model) throw new ClassifierModelUnavailableError(`Judge model not found: ${judgeModelSpec(params.config, params.state)}`);
   return runJudging({
-    io: createClassifierIO(params.ctx, params.completeFn),
+    io: createClassifierIO(params.ctx, params.completeFn, params.config.classifier.timeoutMs),
     model,
     config: params.config,
     toolName: params.toolName,

@@ -47,9 +47,9 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.3",
-    "@earendil-works/pi-coding-agent": "^0.80.3",
-    "@earendil-works/pi-tui": "^0.80.3",
+    "@earendil-works/pi-ai": "^0.84.0",
+    "@earendil-works/pi-coding-agent": "^0.84.0",
+    "@earendil-works/pi-tui": "^0.84.0",
     "@types/node": "^26.1.0",
     "typescript": "^6.0.3"
   }
