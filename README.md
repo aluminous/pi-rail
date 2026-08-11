@@ -1,26 +1,6 @@
 # Pi Rail Extension
 
-> **Formerly pi-guard.** The project was renamed to Pi Rail to avoid a clash
-> with an unrelated `pi-guard` package. The slash command is `/rail`, the
-> config file is `rail.json`, and the flag is `--no-rail`. An existing
-> `guard.json` is still loaded (with a one-line advisory asking you to rename
-> it) and is still written back to, so nothing breaks before you get to it —
-> see [Configuration](#configuration).
-
 Defense-in-depth command and file-tool guardrails for Pi. Today Pi Rail uses macOS Seatbelt for contained shell execution, deterministic path policy for Pi file tools, environment scrubbing, and an optional LLM reviewer that names actions against a small capability taxonomy which your own [disposition table](#capability-mode) then decides on. The extension is structured around a backend interface so a container backend can be added later.
-
-## Relationship to pi-sandbox
-
-Pi Rail is inspired by Chris Arderne's [`pi-sandbox`](https://github.com/carderne/pi-sandbox), which provides OS-level sandboxing for Pi with interactive permission prompts. Both extensions wrap shell execution in an OS sandbox and intercept Pi's direct `read`, `write`, and `edit` tools because those file operations do not run inside subprocess containment.
-
-The main differences are:
-
-- Pi Rail adds an optional AI reviewer that names `bash`, `read`, `write`, and `edit` calls with capability classes after deterministic policy checks; a user-owned disposition table then decides.
-- Pi Rail currently targets macOS Seatbelt via `@anthropic-ai/sandbox-runtime`; `pi-sandbox` supports macOS `sandbox-exec` and Linux `bubblewrap` through `@carderne/sandbox-runtime`.
-- Pi Rail treats configured deny-write paths as hard blocks and keeps path approvals session-local; `pi-sandbox` emphasizes interactive prompts that can persist allowances to project or global config.
-- Pi Rail includes environment scrubbing and capability critique/model selection commands in addition to sandbox status controls.
-
-If you do not need semantic review and want the mature prompt-oriented sandbox, especially on Linux, start with `pi-sandbox`.
 
 ## Scope
 
@@ -749,6 +729,11 @@ path approvals, and errors.
 `npm run telemetry -- --cases` dumps denied/rejected reviews as eval-case
 candidates, flagging ones where the same command was executed later in the
 session (false-positive candidates worth adding to `eval/cases.ts`).
+
+## Related extensions
+
+- [`pi-sandbox`](https://github.com/carderne/pi-sandbox) (Chris Arderne) — the inspiration for Pi Rail: OS-level sandboxing for Pi with interactive permission prompts, on macOS `sandbox-exec` and Linux `bubblewrap`. Pi Rail adds the semantic layer on top of similar containment — capability naming, the disposition table, the judge; if you want a mature prompt-oriented sandbox without model review, especially on Linux, start there.
+- [`pi-guard`](https://github.com/jdiamond/pi-guard) (Jason Diamond) — a deterministic permission system for pi tools: allow/ask/deny rules with extensible matchers, no OS sandbox. Pi Rail's command allowlist plays a similar role, but its decisions sit inside Seatbelt containment and fall through to the classifier instead of rules alone. (This project was itself named pi-guard before being renamed to avoid the clash; an existing `guard.json` still loads — see [Configuration](#configuration).)
 
 ## Limitations
 
