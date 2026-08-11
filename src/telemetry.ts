@@ -69,6 +69,8 @@ export interface RailReviewTelemetry extends RailTelemetryBase {
   userApproved?: boolean;
   /** User comment attached to an allow/deny answer, if any. */
   userComment?: string;
+  /** True when the answer came from the parent session via the approval mailbox (this session was a headless child). */
+  forwarded?: boolean;
   usage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
   projection?: ReviewProjection;
 }
@@ -86,6 +88,8 @@ export interface RailApprovalTelemetry extends RailTelemetryBase {
   reason: string;
   /** User comment attached to an allow/deny answer, if any. */
   userComment?: string;
+  /** True when the answer came from the parent session via the approval mailbox (this session was a headless child). */
+  forwarded?: boolean;
 }
 
 export interface RailErrorTelemetry extends RailTelemetryBase {

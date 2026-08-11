@@ -62,6 +62,9 @@ export class RailApprovalDialog extends Container {
   private dynamic = new Container();
   private selectedIndex = 0;
   private _focused = false;
+  private decided = false;
+  /** Input arriving before this instant is dropped (see `inputGraceMs`). */
+  private readyAt = 0;
   private theme: Theme;
   private keybindings: Keybindings;
   private done: (answer: RailApprovalAnswer) => void;
@@ -75,11 +78,29 @@ export class RailApprovalDialog extends Container {
     this.commentInput.focused = value;
   }
 
-  constructor(params: { title: string; message: string; theme: Theme; keybindings: Keybindings; done: (answer: RailApprovalAnswer) => void }) {
+  constructor(params: {
+    title: string;
+    message: string;
+    theme: Theme;
+    keybindings: Keybindings;
+    done: (answer: RailApprovalAnswer) => void;
+    /** Start with Deny highlighted — for dialogs popped by background work, where a stray Enter must not approve. */
+    defaultDeny?: boolean;
+    /** Drop input for this long after mount, so a keystroke aimed at the editor can't decide a dialog that stole focus. */
+    inputGraceMs?: number;
+    /** Hands the caller a cancel that resolves the dialog as a plain deny (e.g. when the requester died). */
+    onCancelHandle?: (cancel: () => void) => void;
+  }) {
     super();
     this.theme = params.theme;
     this.keybindings = params.keybindings;
     this.done = params.done;
+    if (params.defaultDeny) {
+      const deny = APPROVAL_OPTIONS.findIndex((option) => !option.approved);
+      if (deny >= 0) this.selectedIndex = deny;
+    }
+    if (params.inputGraceMs) this.readyAt = Date.now() + params.inputGraceMs;
+    params.onCancelHandle?.(() => this.finish({ approved: false }));
     this.addChild(new Text(params.theme.fg("accent", params.title), 0, 0));
     this.addChild(new Text(params.message, 0, 0));
     this.addChild(new Spacer(1));
@@ -92,11 +113,18 @@ export class RailApprovalDialog extends Container {
     this.update();
   }
 
+  /** All exits funnel through here so a late cancel can't double-resolve. */
+  private finish(answer: RailApprovalAnswer): void {
+    if (this.decided) return;
+    this.decided = true;
+    this.done(answer);
+  }
+
   private decide(): void {
     const option = APPROVAL_OPTIONS[this.selectedIndex];
     if (!option) return;
     const comment = this.commentInput.getValue().trim();
-    this.done(comment ? { approved: option.approved, comment } : { approved: option.approved });
+    this.finish(comment ? { approved: option.approved, comment } : { approved: option.approved });
   }
 
   private update(): void {
@@ -113,6 +141,7 @@ export class RailApprovalDialog extends Container {
   }
 
   handleInput(keyData: string): void {
+    if (Date.now() < this.readyAt) return;
     if (this.keybindings.matches(keyData, "tui.select.up")) {
       this.selectedIndex = this.selectedIndex === 0 ? APPROVAL_OPTIONS.length - 1 : this.selectedIndex - 1;
       this.update();
@@ -128,7 +157,7 @@ export class RailApprovalDialog extends Container {
       return;
     }
     if (this.keybindings.matches(keyData, "tui.select.cancel")) {
-      this.done({ approved: false });
+      this.finish({ approved: false });
       return;
     }
     // Everything else edits the shared inline comment: printable characters,

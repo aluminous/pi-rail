@@ -133,25 +133,31 @@ async function askPathApproval(params: {
     return;
   }
   recordApprovalRequested(params.state, params.toolName, params.kind, params.path);
-  if (!params.ctx.hasUI) {
-    recordApprovalDenied(params.state);
-    addTraceStage(params.trace, "ask", "unanswerable", `${params.kind} ${params.path} needs approval but the session is headless`);
-    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, approved: false, reason: params.reason });
-    return {
-      block: true,
-      reason: `${params.kind} requires approval for ${params.path}: ${params.reason}. This is a headless session with no user to ask; rerun interactively or pre-approve the path in rail config.`,
-    };
-  }
-  const answer = await askRailApproval(
+  const outcome = await askRailApproval(
     params.ctx,
     params.state,
     "Rail path approval",
     `${params.toolName} wants ${params.kind} access outside the configured roots:\n\n${params.path}\n\nReason: ${params.reason}\n\nApprove this path for this session?`,
+    {
+      forwardMeta: { toolName: params.toolName, site: "path", access: params.kind, path: params.path },
+      signal: params.ctx.signal,
+    },
   );
+  if (outcome.kind === "unanswerable") {
+    recordApprovalDenied(params.state);
+    addTraceStage(params.trace, "ask", "unanswerable", `${params.kind} ${params.path} needs approval but ${outcome.detail}`);
+    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, approved: false, reason: params.reason });
+    return {
+      block: true,
+      reason: `${params.kind} requires approval for ${params.path}: ${params.reason}. The ask could not be answered — ${outcome.detail}. Rerun interactively or pre-approve the path in rail config.`,
+    };
+  }
+  const { answer, forwarded } = outcome;
+  const via = forwarded ? " via the parent session" : "";
   if (answer.comment) {
     addSessionGuidance(params.state.classifier, answer.approved ? "allowed" : "denied", params.toolName, `${params.kind} ${params.path}`, answer.comment);
   }
-  addTraceStage(params.trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"} ${params.kind} ${params.path}${answer.comment ? " with a comment" : ""}`);
+  addTraceStage(params.trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"} ${params.kind} ${params.path}${answer.comment ? " with a comment" : ""}${via}`);
   appendRailTelemetry(params.state, {
     kind: "approval",
     tool: params.toolName,
@@ -160,6 +166,7 @@ async function askPathApproval(params: {
     approved: answer.approved,
     reason: params.reason,
     userComment: answer.comment,
+    forwarded: forwarded || undefined,
   });
   if (answer.approved) {
     params.state.approvals[params.kind].push(params.path);
@@ -611,7 +618,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     else reason = `${outcome.fallbackReason} — asking instead`;
   }
 
-  const finish = (decision: RailDecision, outcome: CapabilityOutcome, block?: ToolCallBlock, userApproved?: boolean, userComment?: string): ToolCallBlock | undefined => {
+  const finish = (decision: RailDecision, outcome: CapabilityOutcome, block?: ToolCallBlock, userApproved?: boolean, userComment?: string, forwarded?: boolean): ToolCallBlock | undefined => {
     // "Exempt" means the action resolved to allow with no model consulted; a
     // deterministic label that escalated or prompted is not an exemption.
     if (!params.reviewed && resolution.disposition === "allow") recordClassifierSkip(state);
@@ -645,6 +652,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       reason,
       userApproved,
       userComment,
+      forwarded,
       usage: totalUsage(params.named, judge),
       projection,
     });
@@ -681,29 +689,34 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     return approval;
   }
 
-  if (!ctx.hasUI) {
-    addTraceStage(trace, "ask", "unanswerable", "approval needed but the session is headless");
-    return finish("deny", "ask-denied", {
-      block: true,
-      reason: `Rail needs approval, but this headless session has no user to ask: ${reason}. Rerun interactively, or set ${resolution.decidedBy.id} to allow in rail config.`,
-    });
-  }
-
   const evidence = params.named?.authorizationEvidence;
   const evidenceLine = evidence ? `\n\nReviewer notes: user said "${textPrefix(evidence, 200)}"` : "";
   const capabilityLine = `Capabilities: ${resolution.labels.join(", ")}`;
-  const answer = await askRailApproval(
+  const outcome = await askRailApproval(
     ctx,
     state,
     judge ? "Rail judge asks for approval" : "Rail asks for approval",
     `${subject}\n\n${capabilityLine}\n\n${reason}${evidenceLine}\n\nAllow?`,
+    {
+      forwardMeta: { toolName: event.toolName, site: "capability", labels: resolution.labels },
+      signal: ctx.signal,
+    },
   );
+  if (outcome.kind === "unanswerable") {
+    addTraceStage(trace, "ask", "unanswerable", `approval needed but ${outcome.detail}`);
+    return finish("deny", "ask-denied", {
+      block: true,
+      reason: `Rail needs approval, but ${outcome.detail}: ${reason}. Rerun interactively, or set ${resolution.decidedBy.id} to allow in rail config.`,
+    });
+  }
+  const { answer, forwarded } = outcome;
+  const via = forwarded ? " via the parent session" : "";
   if (answer.comment) {
     const guidanceSubject = subject.startsWith(`${event.toolName}: `) ? subject.slice(event.toolName.length + 2) : subject;
     addSessionGuidance(state.classifier, answer.approved ? "allowed" : "denied", event.toolName, guidanceSubject, answer.comment);
   }
-  addTraceStage(trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"}${answer.comment ? " with a comment" : ""}`);
-  if (answer.approved) return finish("allow", judge ? "judge-ask" : "ask-approved", undefined, true, answer.comment);
+  addTraceStage(trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"}${answer.comment ? " with a comment" : ""}${via}`);
+  if (answer.approved) return finish("allow", judge ? "judge-ask" : "ask-approved", undefined, true, answer.comment, forwarded || undefined);
   const commentSuffix = answer.comment ? ` User comment: ${answer.comment}` : "";
   return finish(
     "deny",
@@ -711,6 +724,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     { block: true, reason: `Rail asked and the user denied: ${reason}.${commentSuffix} Do not work around this denial; choose a safer path or ask the user.` },
     false,
     answer.comment,
+    forwarded || undefined,
   );
 }
 

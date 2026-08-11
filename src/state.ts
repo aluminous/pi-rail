@@ -1,3 +1,5 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ApprovalMailbox } from "./approval-mailbox.ts";
 import type { RailBackend } from "./backends/types.ts";
 import {
   applyReadOnlyPreset,
@@ -170,6 +172,21 @@ export interface RuntimeState {
   subagentAckWarned: Set<string>;
   /** Writes a custom entry to pi's session log (pi.appendEntry). Undefined in tests without session wiring. */
   appendEntry?: (customType: string, data: unknown) => void;
+  /**
+   * This process's approval mailbox for forwarded subagent asks. Process-
+   * lifetime, not session-lifetime — detached children outlive `/new` — so
+   * resetSessionState leaves it alone; index.ts owns start and stop.
+   */
+  approvalMailbox?: ApprovalMailbox;
+  /**
+   * The freshest ExtensionContext seen by any event handler. The mailbox
+   * servicer pulls this at dialog time instead of capturing a ctx at start:
+   * contexts are invalidated between sessions, and a pulled slot degrades to
+   * "one event stale" rather than "frozen on the first session's ctx".
+   */
+  lastUiContext?: ExtensionContext;
+  /** Serializes approval dialogs (the session's own and forwarded ones); see withDialogLock. */
+  dialogQueue: Promise<void>;
 }
 
 export function createRailStats(): RailStats {
@@ -217,6 +234,7 @@ export function createRuntimeState(): RuntimeState {
     traces: [],
     availableModelSpecs: [],
     subagentAckWarned: new Set(),
+    dialogQueue: Promise.resolve(),
   };
 }
 
@@ -240,6 +258,7 @@ export function resetSessionState(state: RuntimeState): void {
   state.traces = [];
   state.lastBashCommand = undefined;
   state.subagentAckWarned = new Set();
+  state.dialogQueue = Promise.resolve();
 }
 
 /**
@@ -344,6 +363,16 @@ export function recordApprovalGranted(state: RuntimeState, toolName: string, kin
 export function recordApprovalDenied(state: RuntimeState): void {
   state.stats.blocked++;
   state.stats.turnBlocked++;
+}
+
+/** A forwarded subagent ask the user answered here; recent ring only — the counters describe this session's own calls. */
+export function recordForwardedAsk(state: RuntimeState, params: { toolName: string; approved: boolean; from: string }): void {
+  pushRecent(state, {
+    at: Date.now(),
+    toolName: params.toolName,
+    decision: params.approved ? "allow" : "deny",
+    reason: `forwarded ask from ${params.from}: user ${params.approved ? "approved" : "denied"}`,
+  });
 }
 
 export interface CapabilityDecisionRecord {

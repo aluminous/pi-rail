@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { startApprovalMailbox } from "../src/approval-mailbox.ts";
 import type { RailBackend } from "../src/backends/types.ts";
 import { capabilityStats } from "../src/capabilities.ts";
 import type { CompleteFn } from "../src/classifier.ts";
 import { interceptToolCall, stopTurnForClassifierFailure, withWorkingMessage } from "../src/interceptor.ts";
 import { createRuntimeState, modelUsageRows } from "../src/state.ts";
 import type { RailErrorTelemetry } from "../src/telemetry.ts";
-import { makeFixtureDir, testConfig } from "./helpers.ts";
+import { makeFixtureDir, testConfig, withTempAgentDirAsync } from "./helpers.ts";
 
 const fixture = makeFixtureDir();
 after(() => fixture.cleanup());
@@ -637,6 +638,100 @@ describe("classifier failure handling", () => {
     assert.deepEqual(result, {
       block: true,
       reason: "Rail classifier failed closed: all attempts timed out. This turn was stopped for user intervention.",
+    });
+  });
+});
+
+describe("forwarded asks through the approval mailbox", () => {
+  const cwd = path.join(fixture.dir, "forward-project");
+  mkdirSync(cwd, { recursive: true });
+  const outsidePath = path.join(fixture.dir, "forward-outside.txt");
+  writeFileSync(outsidePath, "outside");
+
+  /**
+   * Runs fn with a live parent mailbox advertised in process.env (under a temp
+   * agent dir), serviced by an injected ask. This is the integration seam the
+   * interceptor actually uses: askRailApproval → forwardAskToParent reads
+   * process.env, the parent poller answers, and the blocked call resumes.
+   */
+  async function withServicedMailbox(
+    answer: { approved: boolean; comment?: string },
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    await withTempAgentDirAsync(async () => {
+      const parentState = createRuntimeState();
+      parentState.lastUiContext = { hasUI: true } as ExtensionContext;
+      const ask = (async () => ({ kind: "answered", answer, forwarded: false })) as unknown as Parameters<typeof startApprovalMailbox>[0]["ask"];
+      const mailbox = startApprovalMailbox({ state: parentState, ask, env: process.env, pollMs: 20 });
+      assert.ok(mailbox, "parent mailbox must start");
+      try {
+        await fn();
+      } finally {
+        mailbox.stop();
+      }
+    });
+  }
+
+  /** The deterministic route to the path dialog: an out-of-roots write under modify-system, classifier off. */
+  function forwardingState() {
+    return railState(testConfig((c) => {
+      c.filesystem.allowWrite = ["."];
+      c.classifier.enabled = false;
+    }));
+  }
+
+  it("resolves a headless out-of-roots write ask via the parent and remembers the path", async () => {
+    await withServicedMailbox({ approved: true }, async () => {
+      const telemetry: Array<{ customType: string; data: unknown }> = [];
+      const state = forwardingState();
+      state.appendEntry = (customType, data) => telemetry.push({ customType, data });
+      const result = await interceptToolCall({ toolName: "write", input: { path: outsidePath, content: "x" } }, fakeCtx(cwd), state);
+      assert.equal(result, undefined, "the forwarded approval unblocks the call");
+      assert.equal(state.approvals.write.length, 1, "the approved path lands in session memory");
+      const approval = telemetry.map((entry) => entry.data as { kind?: string; forwarded?: boolean }).find((data) => data.kind === "approval");
+      assert.equal(approval?.forwarded, true, "telemetry marks the answer as forwarded");
+    });
+  });
+
+  it("carries a forwarded deny comment into session guidance and the block reason", async () => {
+    await withServicedMailbox({ approved: false, comment: "wrong repo for that" }, async () => {
+      const state = forwardingState();
+      const result = await interceptToolCall({ toolName: "write", input: { path: outsidePath, content: "x" } }, fakeCtx(cwd), state);
+      assert.equal(result?.block, true);
+      assert.match(result?.reason ?? "", /wrong repo for that/, "the user's comment reaches the child model");
+      assert.match(state.classifier.sessionGuidance?.[0] ?? "", /wrong repo for that/, "the comment becomes classifier guidance");
+    });
+  });
+
+  it("blocks with a parent-session detail when the parent dies mid-ask", async () => {
+    await withTempAgentDirAsync(async (agentDir) => {
+      // A mailbox that looks alive but has no servicer: heartbeat goes stale
+      // after the first checks, so the forwarded wait fails parent-gone.
+      const dir = path.join(agentDir, "rail-approvals", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+      mkdirSync(path.join(dir, "requests"), { recursive: true });
+      mkdirSync(path.join(dir, "responses"), { recursive: true });
+      writeFileSync(path.join(dir, "mailbox.json"), JSON.stringify({ type: "rail-approval-mailbox", version: 1, pid: process.pid, createdAt: Date.now() }));
+      writeFileSync(path.join(dir, "heartbeat"), "");
+      const previous = process.env.PI_RAIL_APPROVAL_MAILBOX;
+      process.env.PI_RAIL_APPROVAL_MAILBOX = `${dir}#tok`;
+      const staleTimer = setTimeout(() => {
+        const then = new Date(Date.now() - 60_000);
+        try {
+          utimesSync(path.join(dir, "heartbeat"), then, then);
+        } catch {
+          /* dir removed */
+        }
+      }, 100);
+      try {
+        const state = forwardingState();
+        const result = await interceptToolCall({ toolName: "write", input: { path: outsidePath, content: "x" } }, fakeCtx(cwd), state);
+        assert.equal(result?.block, true);
+        assert.match(result?.reason ?? "", /parent session/, "the block reason names the parent session");
+      } finally {
+        clearTimeout(staleTimer);
+        if (previous === undefined) delete process.env.PI_RAIL_APPROVAL_MAILBOX;
+        else process.env.PI_RAIL_APPROVAL_MAILBOX = previous;
+      }
     });
   });
 });

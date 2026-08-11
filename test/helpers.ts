@@ -5,6 +5,13 @@ import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG, type ResolvedRailConfig } from "../src/config.ts";
 
+// Tests may run inside an interactive rail session whose approval mailbox is
+// advertised in the environment; inheriting it would make every "headless"
+// assertion forward its ask to the developer's own dialog. Same rationale as
+// the PI_CODING_AGENT_DIR redirect below: isolation must hold before anything
+// else runs.
+delete process.env.PI_RAIL_APPROVAL_MAILBOX;
+
 export function testConfig(overrides?: (config: ResolvedRailConfig) => void): ResolvedRailConfig {
   const config = structuredClone(DEFAULT_CONFIG);
   overrides?.(config);

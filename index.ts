@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
+import { startApprovalMailbox } from "./src/approval-mailbox.ts";
+import { askRailApproval } from "./src/approvals.ts";
 import { NoneBackend } from "./src/backends/none.ts";
 import { SeatbeltBackend } from "./src/backends/seatbelt.ts";
 import type { RailBackend } from "./src/backends/types.ts";
@@ -100,6 +102,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    state.lastUiContext = ctx;
     try {
       return await interceptToolCall(event, ctx, state);
     } finally {
@@ -115,11 +118,13 @@ export default function (pi: ExtensionAPI) {
 
   // turn_start/turn_end fire on every agent-loop iteration; per-turn stats span a whole user prompt, so reset on agent_start.
   pi.on("agent_start", (_event, ctx) => {
+    state.lastUiContext = ctx;
     resetTurnStats(state);
     updateRailStatus(ctx, state);
   });
 
   pi.on("turn_end", (_event, ctx) => {
+    state.lastUiContext = ctx;
     updateRailStatus(ctx, state);
   });
 
@@ -131,6 +136,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     try {
       resetSessionState(state);
+      state.lastUiContext = ctx;
+      // The approval mailbox serves headless children even when this session's
+      // own rail is disabled, so it starts before the early returns below. ??=
+      // keeps it process-lifetime: detached children outlive /new, and a new
+      // mailbox here would silently orphan their in-flight asks.
+      state.approvalMailbox ??= startApprovalMailbox({ state, ask: askRailApproval });
 
       const disabledByFlag = pi.getFlag("no-rail") as boolean;
       const config = loadConfig(ctx);
@@ -194,7 +205,14 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  pi.on("session_shutdown", async (event, ctx) => {
+    // Quit and reload really end this extension instance; a session switch
+    // (/new) does not, and the mailbox deliberately survives it.
+    const reason = (event as { reason?: string }).reason;
+    if (reason === "quit" || reason === "reload") {
+      state.approvalMailbox?.stop();
+      state.approvalMailbox = undefined;
+    }
     state.liveView?.close();
     if (state.backend && state.initialized) {
       try {

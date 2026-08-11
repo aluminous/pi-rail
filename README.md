@@ -662,18 +662,53 @@ authorization process.
   rules` narrows it to the policy tab, and `/rail policy` (the table)
   degrades to select dialogs, class editing included. Smoke and critique results arrive the same
   way, keyed `rail-report`.
-- **json / print modes** — truly headless: there is no one to ask. Ask
-  decisions and out-of-roots path approvals become blocks whose reason states
-  exactly that ("headless session with no user to ask"), so the agent — or a
-  parent process reading the transcript — knows the block is about approval
-  availability, not policy.
+- **json / print modes** — headless: there is no one here to ask. When a
+  parent rail session advertises its approval mailbox (below), ask decisions
+  are forwarded there and answered by the real user; otherwise they become
+  blocks whose reason states exactly that ("no user to ask"), so the agent —
+  or a parent process reading the transcript — knows the block is about
+  approval availability, not policy.
 
-Subagents spawned as `pi --mode json` subprocesses are therefore headless,
-and the denial reason is the propagation channel that exists today. To
-propagate the *question* instead, run subagents in RPC mode and forward the
-extension-UI requests to the parent's UI — that works with unmodified
-pi-rail. A rail-to-rail approval side channel was considered and deferred
-(see [docs/history/FEEDBACK_PLAN.md](docs/history/FEEDBACK_PLAN.md)).
+### Forwarded asks: the approval mailbox
+
+A pi-subagents child is headless, but the user is one process up. Every
+interactive rail session runs an approval mailbox — a private file
+request/reply inbox under the agent dir — and advertises it in the process
+environment, which pi-subagents children (and grandchildren) inherit. When a
+child rail hits an `ask`, it writes a request and blocks its tool call until
+you answer the normal approval dialog in the parent session, labeled with the
+subagent's identity ("Rail approval — subagent researcher"). Allow/deny and
+any comment flow back to the child; deny comments become the child's session
+guidance exactly as if the dialog had been local. Asks route to the nearest
+interactive ancestor at any nesting depth, and detached background children
+keep working across `/new` (the mailbox is process-lifetime).
+
+Design properties worth knowing:
+
+- **User consent only.** The channel never routes through a model —
+  deliberately not built on pi-subagents' `contact_supervisor`, whose replies
+  come from the parent *agent*. Forwarded dialogs also default-select Deny
+  and ignore the first ~400 ms of input, so an Enter aimed at the editor
+  cannot approve a subagent's action unseen.
+- **Forge-resistant.** The mailbox lives under the agent dir (not `$TMPDIR`,
+  which sandboxed bash can write), and the channel token exists only in the
+  environment variable — which the rail's environment scrubbing strips from
+  sandboxed commands. Forging an approval requires code execution outside the
+  sandbox.
+- **No hangs.** Children detect a dead parent by heartbeat (a pid check lies
+  after pid reuse) and fall back to the headless deny; the parent answers
+  every consumed request — even invalid ones get a rejection — and
+  auto-cancels a dialog whose requester died. There is deliberately no
+  wall-clock timeout: an unanswered ask waits for you, and pi-subagents'
+  own idle notices surface the quietly-blocked child.
+- **Zero configuration**, on by default; a bash-spawned `pi -p` child does
+  not inherit the channel (the env scrub drops it — the alternative would
+  hand the token to every sandboxed command).
+
+The protocol, options considered, and accepted risks are recorded in
+[SUBAGENT_ASKS_PLAN.md](SUBAGENT_ASKS_PLAN.md); the RPC-mode alternative
+remains viable for clients that drive pi over the protocol (see
+[docs/history/FEEDBACK_PLAN.md](docs/history/FEEDBACK_PLAN.md)).
 
 ### pi-subagents interop
 
