@@ -59,6 +59,21 @@ describe("RailApprovalDialog", () => {
     assert.deepEqual(answers, [{ approved: true, comment: "staging is fine" }]);
   });
 
+  it("renders a judge ask's two labeled lines as their own rows", () => {
+    // The interceptor threads a judge ask as two labeled lines in the message;
+    // the dialog must keep them as separate rows, not fold them into one.
+    const dialog = new RailApprovalDialog({
+      title: "Rail judge asks for approval",
+      message: "bash: cat ~/.ssh/id_rsa\n\nWhat it does: reads the private SSH key\nWhy it's an ask: credential material outside the project",
+      theme,
+      keybindings,
+      done: () => {},
+    });
+    const lines = dialog.render(80);
+    assert.equal(lines.some((line) => line.startsWith("What it does: reads the private SSH key")), true);
+    assert.equal(lines.some((line) => line.startsWith("Why it's an ask: credential material outside the project")), true);
+  });
+
   it("renders the comment inline on the highlighted option row", () => {
     const { dialog } = openDialog();
     for (const ch of "ok") dialog.handleInput(ch);

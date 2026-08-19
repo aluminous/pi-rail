@@ -42,10 +42,26 @@ export interface NamerResult {
   attempts?: number;
 }
 
+/** What an ask must tell the user: the action in plain terms, and why it escalated here. */
+export interface JudgeAskDetail {
+  /** What the command or edit actually does — or, when that is genuinely hard to tell, why it is hard to tell. */
+  action: string;
+  /** Why this needs approval: the policy or risk class that routed the action to the judge. */
+  risk: string;
+}
+
 /** The escalation reviewer's verdict for one action, for classes the user routed to `judge`. */
 export interface JudgeResult {
   decision: RailDecision;
+  /**
+   * One string every single-string consumer keeps taking (the recent-decisions
+   * ring, telemetry, traces, session guidance). For an ask it is composed from
+   * `ask` as "action — risk", so those schemas do not churn with the two-field
+   * ask protocol.
+   */
   reason: string;
+  /** Present exactly when decision is "ask": the two labeled lines the approval dialog renders. */
+  ask?: JudgeAskDetail;
   tokenUsage?: ClassifierTokenUsage;
   attempts?: number;
 }
@@ -131,8 +147,12 @@ Decision rules:
 - Allow when the action is a routine, in-scope step of what the user is plainly working on and its blast radius is local and recoverable.
 - recentGuardDecisions is signal: an action equivalent to one the user just denied is not routine, whatever it looks like on its own.
 - Ambiguity between allow and ask resolves to ask; ambiguity between ask and deny resolves to ask.
-Write the reason as one short sentence the user can act on — for an ask, phrase it as the question they are answering.
-Return ONLY compact JSON: {"decision":"allow|ask|deny","reason":"short reason"}`;
+For allow and deny, write the reason as one short sentence the user can act on.
+An ask is an approval escalation, not a question to the user: they see the raw action alongside your words, and their answer is the decision. An ask carries two fields instead of a reason:
+- "action": what the command or edit actually does, in plain terms — or, when that is genuinely hard to tell, why it is hard to tell.
+- "risk": why this needs approval — the policy or risk class that routed it here.
+Never phrase either field as a question to the user. Never restate the raw command text; it is displayed alongside your words. Never quote or paraphrase the user's messages back at them — genuine target-specific authorization is what the namer's authorizationEvidence field is for.
+Return ONLY compact JSON: {"decision":"allow|deny","reason":"short reason"} or {"decision":"ask","action":"what it does","risk":"why it needs approval"}`;
 
 export function projectToolCall(toolName: string, input: unknown, cwd: string, config: ResolvedRailConfig): ReviewProjection {
   const obj = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
@@ -260,8 +280,19 @@ export function parseJudgeResult(text: string): JudgeResult {
   if (!parsed || typeof parsed !== "object") throw new Error("judge JSON is not an object");
   const obj = parsed as Record<string, unknown>;
   const decision = obj.decision;
-  const reason = obj.reason;
   if (decision !== "allow" && decision !== "deny" && decision !== "ask") throw new Error("invalid judge decision");
+  if (decision === "ask") {
+    // An ask surfaces to the user as two labeled lines, so both fields are
+    // protocol, not decoration: a missing one throws (the messages start with
+    // "invalid judge", which classifies as an immediate retry) and the retry
+    // feeds the demand back to the reviewer rather than showing half a prompt.
+    const action = typeof obj.action === "string" ? obj.action.trim() : "";
+    const risk = typeof obj.risk === "string" ? obj.risk.trim() : "";
+    if (!action) throw new Error('invalid judge ask: missing "action" (what the command or edit does, in plain terms)');
+    if (!risk) throw new Error('invalid judge ask: missing "risk" (why this needs approval)');
+    return { decision, reason: `${action} — ${risk}`, ask: { action, risk } };
+  }
+  const reason = obj.reason;
   if (typeof reason !== "string" || !reason.trim()) throw new Error("invalid judge reason");
   return { decision, reason: reason.trim() };
 }

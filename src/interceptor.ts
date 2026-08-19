@@ -731,11 +731,16 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
   const evidence = params.named?.authorizationEvidence;
   const evidenceLine = evidence ? `\n\nReviewer notes: user said "${textPrefix(evidence, 200)}"` : "";
   const capabilityLine = `Capabilities: ${resolution.labels.join(", ")}`;
+  // A judge ask reaches the dialog as its two labeled lines, not as the
+  // composed "action — risk" string the ring and telemetry keep: the raw
+  // action is already displayed above, so the lines add what it does and why
+  // it escalated instead of restating it.
+  const explanation = judge?.ask ? `What it does: ${judge.ask.action}\nWhy it's an ask: ${judge.ask.risk}` : reason;
   const outcome = await askRailApproval(
     ctx,
     state,
     judge ? "Rail judge asks for approval" : "Rail asks for approval",
-    `${subject}\n\n${capabilityLine}\n\n${reason}${evidenceLine}\n\nAllow?`,
+    `${subject}\n\n${capabilityLine}\n\n${explanation}${evidenceLine}\n\nAllow?`,
     {
       forwardMeta: { toolName: event.toolName, site: "capability", labels: resolution.labels },
       signal: ctx.signal,
