@@ -120,6 +120,8 @@ export function formatTokensWithCache(stats: RailStats): string {
 function decisionColor(decision: string): string {
   if (decision === "allow") return "success";
   if (decision === "deny" || decision === "block") return "error";
+  // "stop" lands here with "ask" and "error": the user interrupted, which is
+  // not the rail refusing anything.
   return "warning";
 }
 
@@ -160,6 +162,9 @@ function counterRows(stats: RailStats): string[][] {
     ["allowed", String(stats.allowed), ""],
     ["asked", String(stats.asked), ""],
     ["denied", String(stats.denied), turn(stats.turnClassifierDenials)],
+    // Only shown once it has happened: a permanent "stopped 0" row invites the
+    // reading that stopping is a thing the rail does to you.
+    ...(stats.stopped > 0 ? [["stopped", String(stats.stopped), ""] as string[]] : []),
     ["policy blocks", String(stats.blocked), turn(stats.turnBlocked)],
     ["errors", String(stats.errors), ""],
   ];

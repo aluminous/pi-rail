@@ -200,6 +200,8 @@ export type CapabilityOutcome =
   | "allow"
   | "ask-approved"
   | "ask-denied"
+  /** The user stopped the turn at the ask instead of answering it — not a refusal of this class. */
+  | "ask-stopped"
   | "deny"
   | "judge-allow"
   | "judge-ask"
@@ -209,6 +211,7 @@ export const CAPABILITY_OUTCOMES: CapabilityOutcome[] = [
   "allow",
   "ask-approved",
   "ask-denied",
+  "ask-stopped",
   "deny",
   "judge-allow",
   "judge-ask",
@@ -265,7 +268,7 @@ export function createCapabilityStats(): CapabilityStats {
   return {
     hits: 0,
     decided: 0,
-    outcomes: { allow: 0, "ask-approved": 0, "ask-denied": 0, deny: 0, "judge-allow": 0, "judge-ask": 0, "judge-deny": 0 },
+    outcomes: { allow: 0, "ask-approved": 0, "ask-denied": 0, "ask-stopped": 0, deny: 0, "judge-allow": 0, "judge-ask": 0, "judge-deny": 0 },
     screenTripped: 0,
     screenClean: 0,
   };

@@ -138,7 +138,7 @@ describe("interceptor telemetry wiring", () => {
     assert.equal(result?.block, true);
     const approval = captured.find((r) => r.kind === "approval");
     assert.ok(approval, "expected an approval record");
-    assert.equal(approval.kind === "approval" && approval.approved, false);
+    assert.equal(approval.kind === "approval" && approval.outcome, "denied");
   });
 
   it("records nothing when telemetry is off", async () => {

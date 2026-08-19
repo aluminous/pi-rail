@@ -5,6 +5,11 @@ export interface RailApprovalAnswer {
   approved: boolean;
   /** Optional user comment, recorded as classifier session guidance. */
   comment?: string;
+  /**
+   * Escape: not a denial. The user reached for the stop key, so callers turn
+   * this into an aborted turn rather than a deny the agent would work around.
+   */
+  cancelled?: boolean;
 }
 
 interface ApprovalOption {
@@ -54,8 +59,9 @@ class InlineCommentRow implements Component {
  * inline comment. Typing while either option is highlighted edits a comment
  * rendered directly on that row; arrowing between the options keeps the
  * typed text. Enter resolves the highlighted option (attaching the trimmed
- * comment when non-empty, as classifier session guidance); Escape denies
- * without comment, matching the previous confirm-dialog semantics.
+ * comment when non-empty, as classifier session guidance); Escape resolves
+ * as a cancelled non-answer ({ approved: false, cancelled: true }), which
+ * the interceptor turns into a stopped turn rather than a denial.
  */
 export class RailApprovalDialog extends Container {
   private commentInput = new Input();
@@ -106,7 +112,7 @@ export class RailApprovalDialog extends Container {
     this.addChild(new Spacer(1));
     this.addChild(this.dynamic);
     this.addChild(new Spacer(1));
-    this.addChild(new Text(params.theme.fg("muted", "Enter decides · type to attach a comment · Esc denies"), 0, 0));
+    this.addChild(new Text(params.theme.fg("muted", "Enter decides · type to attach a comment · Esc stops the turn"), 0, 0));
     // Safety net: raw Enter reaching the Input (via its own keybindings)
     // decides too, instead of vanishing.
     this.commentInput.onSubmit = () => this.decide();
@@ -157,7 +163,7 @@ export class RailApprovalDialog extends Container {
       return;
     }
     if (this.keybindings.matches(keyData, "tui.select.cancel")) {
-      this.finish({ approved: false });
+      this.finish({ approved: false, cancelled: true });
       return;
     }
     // Everything else edits the shared inline comment: printable characters,

@@ -113,6 +113,8 @@ async function presentDialog(
   // RPC clients answer per-request by id, and get no cancel handle: a
   // forwarded ask serviced by an RPC parent stays open until answered.
   const picked = await ctx.ui.select(`${title}\n\n${message}`, [...OPTION_LABELS]);
+  // A dismissed select is the RPC form of Escape: stop the turn, don't deny.
+  if (picked === undefined) return { approved: false, cancelled: true };
   if (picked === "Allow") return { approved: true };
   if (picked === "Allow with comment" || picked === "Deny with comment") {
     const comment = (await ctx.ui.input("Comment for the rail (kept as session guidance)"))?.trim();

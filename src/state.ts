@@ -11,7 +11,7 @@ import {
   type CapabilityState,
   type Disposition,
 } from "./capabilities.ts";
-import type { ClassifierTokenUsage, RailDecision } from "./classifier-protocol.ts";
+import type { ClassifierTokenUsage, RailDecision, RailOutcome } from "./classifier-protocol.ts";
 import type { ClassifierState } from "./classifier.ts";
 import type { ResolvedRailConfig } from "./config.ts";
 import { TRACE_LIMIT, type DecisionTrace } from "./decision-trace.ts";
@@ -20,7 +20,7 @@ import type { AccessKind } from "./policy.ts";
 export interface RailEvent {
   at: number;
   toolName: string;
-  decision: "allow" | "deny" | "ask" | "block" | "error";
+  decision: RailOutcome | "block" | "error";
   /** Capability labels behind the decision, when it came from the table. */
   capabilities?: CapabilityId[];
   reason: string;
@@ -65,7 +65,7 @@ export interface ClassificationRecord {
   labels: CapabilityId[];
   /** What the table resolved over those labels, before a judge or the user answered. */
   disposition: Disposition;
-  decision: RailDecision;
+  decision: RailOutcome;
   /** The whole review's latency — namer plus judge; 0 when the labels were entirely deterministic. */
   latencyMs: number;
   /** The whole review's tokens, judge included; the judge tab breaks out its own share. */
@@ -95,6 +95,12 @@ export interface RailStats {
   allowed: number;
   denied: number;
   asked: number;
+  /**
+   * Asks the user answered with the stop key rather than with a decision. Kept
+   * apart from `denied` and `blocked`: the user interrupted the agent, which
+   * says nothing about whether they would have allowed the action.
+   */
+  stopped: number;
   blocked: number;
   errors: number;
   /** Classifier failures bucketed by cause ("timeout", "server error", "connection", …); only kinds actually seen appear. */
@@ -195,6 +201,7 @@ export function createRailStats(): RailStats {
     allowed: 0,
     denied: 0,
     asked: 0,
+    stopped: 0,
     blocked: 0,
     errors: 0,
     errorsByKind: {},
@@ -365,13 +372,24 @@ export function recordApprovalDenied(state: RuntimeState): void {
   state.stats.turnBlocked++;
 }
 
+/**
+ * The user answered a path ask with the stop key. Deliberately not a policy
+ * block: `blocked` is the "the rail refused this" counter the status page
+ * reports, and a stopped turn is the user refusing to be asked right now.
+ */
+export function recordApprovalStopped(state: RuntimeState, toolName: string, kind: AccessKind, path: string): void {
+  state.stats.stopped++;
+  pushRecent(state, { at: Date.now(), toolName, decision: "stop", reason: `user stopped the turn at the ${kind} approval for ${path}` });
+}
+
 /** A forwarded subagent ask the user answered here; recent ring only — the counters describe this session's own calls. */
-export function recordForwardedAsk(state: RuntimeState, params: { toolName: string; approved: boolean; from: string }): void {
+export function recordForwardedAsk(state: RuntimeState, params: { toolName: string; approved: boolean; cancelled?: boolean; from: string }): void {
+  const outcome = params.cancelled ? "stopped the turn" : params.approved ? "approved" : "denied";
   pushRecent(state, {
     at: Date.now(),
     toolName: params.toolName,
-    decision: params.approved ? "allow" : "deny",
-    reason: `forwarded ask from ${params.from}: user ${params.approved ? "approved" : "denied"}`,
+    decision: params.cancelled ? "stop" : params.approved ? "allow" : "deny",
+    reason: `forwarded ask from ${params.from}: user ${outcome}`,
   });
 }
 
@@ -379,7 +397,7 @@ export interface CapabilityDecisionRecord {
   /** The command or path the call was about, for the recent-classifications ring. */
   target: string;
   labels: CapabilityId[];
-  decision: RailDecision;
+  decision: RailOutcome;
   /** The resolved table disposition that produced this decision. */
   disposition: Disposition;
   /** The one label that produced that disposition, when the caller resolved it. */
@@ -414,6 +432,7 @@ export function recordCapabilityDecision(state: RuntimeState, toolName: string, 
     state.stats.turnClassifierDenials++;
   }
   if (record.decision === "ask") state.stats.asked++;
+  if (record.decision === "stop") state.stats.stopped++;
   recordCapabilityHits(state.capabilities, record.labels);
   if (record.decidedBy) recordCapabilityDecided(state.capabilities, record.decidedBy);
   const at = Date.now();

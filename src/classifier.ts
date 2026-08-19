@@ -13,6 +13,7 @@ import {
   buildNamerText,
   ClassifierModelUnavailableError,
   ClassifierRetryableError,
+  classifierRetryClass,
   isModelUnavailableError,
   isRetryableClassifierError,
   JUDGE_SYSTEM_PROMPT,
@@ -23,7 +24,7 @@ import {
   retryFailureKind,
   tagClassifierFailure,
   type ClassifierTokenUsage,
-  type RailDecision,
+  type RailOutcome,
   type JudgeResult,
   type NamerResult,
 } from "./classifier-protocol.ts";
@@ -36,6 +37,7 @@ export {
   isClassifierModelUnavailable,
   projectToolCall,
   type RailDecision,
+  type RailOutcome,
   type JudgeResult,
   type NamerResult,
   type ReviewProjection,
@@ -46,7 +48,7 @@ export interface LastRailDecision {
   toolName: string;
   at: number;
   labels: CapabilityId[];
-  decision: RailDecision;
+  decision: RailOutcome;
   reason: string;
 }
 
@@ -223,16 +225,19 @@ export function createClassifierIO(ctx: ExtensionContext, completeFn?: CompleteF
   };
 }
 
+function userMessage(text: string): Message {
+  return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+}
+
 async function completeTextOnce(params: {
   model: Model<Api>;
   io: ClassifierIO;
   systemPrompt: string;
-  text: string;
+  messages: Message[];
   timeoutMs: number;
 }): Promise<{ text: string; usage?: ClassifierTokenUsage }> {
   const auth = await params.io.getAuth(params.model);
   if (!auth.ok || !auth.apiKey) throw new ClassifierModelUnavailableError(auth.ok ? `No API key for ${params.model.provider}` : auth.error ?? "auth failed");
-  const message: Message = { role: "user", content: [{ type: "text", text: params.text }], timestamp: Date.now() };
   const controller = new AbortController();
   // A self-timing complete (the streaming idle timeout) must not also get a
   // total deadline here — that would reintroduce the cap it exists to remove.
@@ -249,7 +254,12 @@ async function completeTextOnce(params: {
   try {
     const response = await params.io.complete(
       params.model,
-      { systemPrompt: params.systemPrompt, messages: [message] },
+      { systemPrompt: params.systemPrompt, messages: params.messages },
+      // No temperature: pi-ai's Anthropic adapter is the only one that drops it
+      // when the model refuses it, so pinning it here 400s every reasoning model
+      // on every other provider — and it never bought determinism anyway. The
+      // retry loop below, which feeds a malformed reply back, is what makes the
+      // reviewer's output parseable.
       { apiKey: auth.apiKey, headers: auth.headers, signal: controller.signal },
     );
     if (response.stopReason === "aborted") {
@@ -294,37 +304,57 @@ export function modelSpec(model: Model<Api>): string {
  * Every error that leaves this function is tagged with how many attempts it
  * burned and against which model, because the surfaces that report it (the
  * block reason, lastError, telemetry) are frames away from the budget.
+ *
+ * The parse step runs inside the loop: a protocol violation is as retryable
+ * as a transport failure, but re-asking the identical prompt would court the
+ * same malformed reply, so the failed reply and the validation error are fed
+ * back to the reviewer on the next attempt. That retry is `immediate` — there
+ * is no remote condition waiting to clear, and making a confused reviewer cost
+ * 21s of backoff on every tool call is latency for nothing.
  */
-async function completeText(params: {
+async function completeText<T>(params: {
   model: Model<Api>;
   io: ClassifierIO;
   systemPrompt: string;
   text: string;
   timeoutMs: number;
   budget: RetryBudget;
-}): Promise<{ text: string; usage?: ClassifierTokenUsage }> {
+  /** Fail-closed validation of one reply; a throw is retried like a transport failure. */
+  parse: (text: string) => T;
+}): Promise<{ value: T; usage: ClassifierTokenUsage }> {
+  const messages: Message[] = [userMessage(params.text)];
+  // Every completed call is billed, including the ones whose reply failed to
+  // parse, so the total accrues per attempt rather than on the way out.
+  const usage: ClassifierTokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  // Counts only the attempts that actually slept, so a parse failure early in
+  // the budget does not advance the backoff schedule a later 503 depends on.
+  let delayedRetries = 0;
   while (params.budget.attempts < params.budget.maxAttempts) {
     params.budget.attempts++;
     const attempt = params.budget.attempts;
     try {
-      return await completeTextOnce(params);
+      const response = await completeTextOnce({ model: params.model, io: params.io, systemPrompt: params.systemPrompt, messages, timeoutMs: params.timeoutMs });
+      addUsage(usage, response.usage);
+      try {
+        return { value: params.parse(response.text), usage };
+      } catch (parseError) {
+        messages.push(userMessage(
+          `Your previous reply could not be parsed: ${formatError(parseError)}\n\nYour reply was:\n${textPrefix(response.text, 2000)}\n\nReply with ONLY the JSON object described above: no prose, no markdown fences.`,
+        ));
+        throw parseError;
+      }
     } catch (error) {
       const terminal = error instanceof ClassifierModelUnavailableError || !isRetryableClassifierError(error) || attempt >= params.budget.maxAttempts;
       if (terminal) throw tagClassifierFailure(error, { attempts: attempt, maxAttempts: params.budget.maxAttempts, model: modelSpec(params.model) });
-      const delayMs = 250 * 4 ** (attempt - 1);
+      const delayMs = classifierRetryClass(error) === "immediate" ? 0 : 250 * 4 ** delayedRetries++;
       params.io.notify(
-        `Rail classifier attempt ${attempt}/${params.budget.maxAttempts} failed (${retryFailureKind(error)}): ${formatError(error)}. Retrying in ${delayMs}ms.`,
+        `Rail classifier attempt ${attempt}/${params.budget.maxAttempts} failed (${retryFailureKind(error)}): ${formatError(error)}. ${delayMs > 0 ? `Retrying in ${delayMs}ms.` : "Retrying."}`,
         "warning",
       );
-      await params.io.sleep(delayMs, params.io.signal);
+      if (delayMs > 0) await params.io.sleep(delayMs, params.io.signal);
     }
   }
   throw new Error("classifier retry loop exhausted");
-}
-
-/** Tags a post-response failure (a protocol violation) with the same attempt context transport failures get. */
-function tagParseFailure<T>(error: T, model: Model<Api>, budget: RetryBudget): T {
-  return tagClassifierFailure(error, { attempts: budget.attempts, maxAttempts: budget.maxAttempts, model: modelSpec(model) });
 }
 
 /**
@@ -372,7 +402,6 @@ export async function runNaming(params: {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
   const registry = capabilityRegistry(params.config, params.capabilities);
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
-  const usage: ClassifierTokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const response = await completeText({
     model: params.model,
     io: params.io,
@@ -380,14 +409,9 @@ export async function runNaming(params: {
     text: buildNamerText(registry, params.io.recentUserMessages(), projection, params.sessionGuidance ?? []),
     timeoutMs: params.config.classifier.timeoutMs,
     budget,
+    parse: (text) => parseNamerResult(text, capabilityRegistryIds(registry)),
   });
-  addUsage(usage, response.usage);
-  try {
-    const named = parseNamerResult(response.text, capabilityRegistryIds(registry));
-    return { ...named, tokenUsage: usage, attempts: budget.attempts };
-  } catch (error) {
-    throw tagParseFailure(error, params.model, budget);
-  }
+  return { ...response.value, tokenUsage: response.usage, attempts: budget.attempts };
 }
 
 /** The judge: the escalation review the `judge` disposition delegates to. */
@@ -405,7 +429,6 @@ export async function runJudging(params: {
 }): Promise<JudgeResult> {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
-  const usage: ClassifierTokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const response = await completeText({
     model: params.model,
     io: params.io,
@@ -421,13 +444,9 @@ export async function runJudging(params: {
     }),
     timeoutMs: params.config.classifier.timeoutMs,
     budget,
+    parse: parseJudgeResult,
   });
-  addUsage(usage, response.usage);
-  try {
-    return { ...parseJudgeResult(response.text), tokenUsage: usage, attempts: budget.attempts };
-  } catch (error) {
-    throw tagParseFailure(error, params.model, budget);
-  }
+  return { ...response.value, tokenUsage: response.usage, attempts: budget.attempts };
 }
 
 export async function nameToolCall(params: {

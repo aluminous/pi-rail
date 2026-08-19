@@ -276,12 +276,14 @@ describe("read-only disposition preset", () => {
 describe("/rail readonly toggle", () => {
   function makeCommand() {
     const state = createRuntimeState();
+    const posted: string[] = [];
     const command = createRailCommand({
       state,
       enableRail: async () => {},
       disableRail: async () => {},
       runRailSmoke: async () => {},
       runCritique: async () => {},
+      postRailNotice: (content) => posted.push(content),
     });
     const ctx = {
       hasUI: true,
@@ -295,7 +297,7 @@ describe("/rail readonly toggle", () => {
         theme: { fg: (_name: string, text: string) => text },
       },
     };
-    return { state, command, ctx: ctx as unknown as ExtensionContext & { notifications: string[] } };
+    return { state, command, ctx: ctx as unknown as ExtensionContext & { notifications: string[] }, posted };
   }
 
   it("toggles read-only mode on and off, including the ro alias", async () => {
@@ -306,5 +308,15 @@ describe("/rail readonly toggle", () => {
     await command.handler("ro", ctx);
     assert.equal(state.readOnly, false);
     assert.match(ctx.notifications[1] ?? "", /read-only mode off/);
+  });
+
+  it("mirrors each read-only toggle into the agent's context via postRailNotice", async () => {
+    const { state, command, ctx, posted } = makeCommand();
+    await command.handler("readonly", ctx);
+    await command.handler("readonly", ctx);
+    assert.equal(state.readOnly, false);
+    assert.equal(posted.length, 2);
+    assert.match(posted[0]!, /read-only mode on/);
+    assert.match(posted[1]!, /read-only mode off/);
   });
 });

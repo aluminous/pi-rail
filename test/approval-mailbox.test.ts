@@ -13,6 +13,7 @@ import {
   type ApprovalMailbox,
 } from "../src/approval-mailbox.ts";
 import type { AskOptions, AskOutcome, RailAsk } from "../src/approvals.ts";
+import type { RailApprovalAnswer } from "../src/tui/approval-dialog.ts";
 import { createRuntimeState, type RuntimeState } from "../src/state.ts";
 import { withTempAgentDirAsync } from "./helpers.ts";
 
@@ -24,7 +25,7 @@ function interactiveState(): RuntimeState {
   return state;
 }
 
-function answering(answer: { approved: boolean; comment?: string }, log?: Array<{ title: string; message: string; options?: AskOptions }>): RailAsk {
+function answering(answer: RailApprovalAnswer, log?: Array<{ title: string; message: string; options?: AskOptions }>): RailAsk {
   return (async (_ctx, _state, title, message, options) => {
     log?.push({ title, message, options });
     return { kind: "answered", answer, forwarded: false } satisfies AskOutcome;
@@ -104,6 +105,22 @@ describe("approval mailbox round trips", () => {
       try {
         const result = await forward(env);
         assert.deepEqual(result, { ok: true, answer: { approved: false, comment: "not in this repo" } });
+      } finally {
+        mailbox.stop();
+      }
+    });
+  });
+
+  it("carries a stop across the round trip, so the child stops its turn instead of denying", async () => {
+    await withTempAgentDirAsync(async () => {
+      const { mailbox, env, state } = startMailbox({ ask: answering({ approved: false, cancelled: true }) });
+      try {
+        const result = await forward(env);
+        // Without `cancelled` surviving the envelope the child sees a plain
+        // deny, and the model is free to work around it.
+        assert.deepEqual(result, { ok: true, answer: { approved: false, cancelled: true } });
+        assert.equal(state.recent[0]?.decision, "stop", "the parent logs it as a stop, not a denial");
+        assert.match(state.recent[0]?.reason ?? "", /user stopped the turn/);
       } finally {
         mailbox.stop();
       }

@@ -42,10 +42,10 @@ describe("RailApprovalDialog", () => {
     assert.deepEqual(deny.answers, [{ approved: false }]);
   });
 
-  it("escape denies without a comment", () => {
+  it("escape cancels the ask (a stop-the-turn signal), it does not deny", () => {
     const { dialog, answers } = openDialog();
     dialog.handleInput("<esc>");
-    assert.deepEqual(answers, [{ approved: false }]);
+    assert.deepEqual(answers, [{ approved: false, cancelled: true }]);
   });
 
   it("typed text becomes the comment for the highlighted option", () => {

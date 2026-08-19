@@ -11,7 +11,7 @@
 // truncates projected values. "full" keeps complete projections and policy
 // summaries for eval-case extraction; "off" writes nothing.
 import type { CapabilityId, Disposition } from "./capabilities.ts";
-import type { RailDecision, ReviewProjection } from "./classifier-protocol.ts";
+import type { RailDecision, RailOutcome, ReviewProjection } from "./classifier-protocol.ts";
 import type { ResolvedRailConfig } from "./config.ts";
 import type { RuntimeState } from "./state.ts";
 import { textPrefix } from "./util.ts";
@@ -30,6 +30,9 @@ const MINIMAL_VALUE_LIMIT = 200;
 
 export type RailTelemetryMode = "off" | "minimal" | "full";
 
+/** How a user disposed of an approval prompt. "stopped" is the stop key, which is not an answer. */
+export type UserAnswer = "approved" | "denied" | "stopped";
+
 export interface RailTelemetryBase {
   kind: "review" | "block" | "approval" | "error";
   tool: string;
@@ -46,8 +49,8 @@ export interface RailJudgeTelemetry {
 
 export interface RailReviewTelemetry extends RailTelemetryBase {
   kind: "review";
-  /** What actually happened to the call after the table (and judge) decided. */
-  decision: RailDecision;
+  /** What actually happened to the call after the table (and judge) decided, and the user answered. */
+  decision: RailOutcome;
   /** Capability classes the action was named with, deterministic and model labels together. */
   labels: CapabilityId[];
   /** Severity-max result of the disposition table over those labels. */
@@ -65,8 +68,12 @@ export interface RailReviewTelemetry extends RailTelemetryBase {
   model?: string;
   judge?: RailJudgeTelemetry;
   reason: string;
-  /** Set for "ask" decisions: whether the user approved execution. */
-  userApproved?: boolean;
+  /**
+   * How the user answered an ask; absent when no ask was shown. "stopped" is
+   * its own value rather than `approved: false`, because a corpus that counts
+   * stops as refusals reads a jumpy user as a distrusted agent.
+   */
+  userAnswer?: UserAnswer;
   /** User comment attached to an allow/deny answer, if any. */
   userComment?: string;
   /** True when the answer came from the parent session via the approval mailbox (this session was a headless child). */
@@ -84,7 +91,8 @@ export interface RailApprovalTelemetry extends RailTelemetryBase {
   kind: "approval";
   access: string;
   path: string;
-  approved: boolean;
+  /** Tri-state for the same reason as {@link RailReviewTelemetry.userAnswer}: a stop is not a denial. */
+  outcome: UserAnswer;
   reason: string;
   /** User comment attached to an allow/deny answer, if any. */
   userComment?: string;

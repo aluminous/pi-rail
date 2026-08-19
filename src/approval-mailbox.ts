@@ -237,7 +237,11 @@ function readResponse(responseFile: string, token: string, requestId: string): F
     if (typeof parsed.rejected === "string") return { ok: false, failure: "rejected" };
     if (typeof parsed.approved !== "boolean") return { ok: false, failure: "rejected" };
     const comment = typeof parsed.comment === "string" ? textPrefix(parsed.comment, 2000) : undefined;
-    return { ok: true, answer: comment ? { approved: parsed.approved, comment } : { approved: parsed.approved } };
+    // The parent pressed Escape. Without this the child would read a stop as an
+    // ordinary denial and be free to work around it — which is exactly what the
+    // dialog's "Esc stops the turn" promises it will not do.
+    const cancelled = parsed.cancelled === true ? { cancelled: true as const } : {};
+    return { ok: true, answer: { approved: parsed.approved, ...(comment ? { comment } : {}), ...cancelled } };
   } catch {
     return { ok: false, failure: "rejected" };
   }
@@ -507,8 +511,9 @@ async function serviceOne(
     return;
   }
   if (outcome.kind !== "answered") return;
-  respond(outcome.answer.comment ? { approved: outcome.answer.approved, comment: outcome.answer.comment } : { approved: outcome.answer.approved });
-  recordForwardedAsk(params.state, { toolName: parsed.toolName, approved: outcome.answer.approved, from: parsed.from });
+  const { approved, comment, cancelled: stopped } = outcome.answer;
+  respond({ approved, ...(comment ? { comment } : {}), ...(stopped ? { cancelled: true } : {}) });
+  recordForwardedAsk(params.state, { toolName: parsed.toolName, approved, cancelled: stopped, from: parsed.from });
 }
 
 function latestUiContext(state: RuntimeState) {

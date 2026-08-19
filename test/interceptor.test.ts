@@ -293,6 +293,30 @@ describe("commands.classify labelling", () => {
     assert.equal(seen.calls, 0);
   });
 
+  it("escape on the ask stops the turn instead of denying", async () => {
+    const state = classifyState({ disposition: "ask" });
+    const { complete, seen } = reviewer();
+    const ctx = fakeCtx(fixture.dir) as unknown as Record<string, any>;
+    ctx.hasUI = true;
+    ctx.ui.select = async () => undefined; // Escape cancels the select
+    const result = await interceptToolCall(
+      { toolName: "bash", input: { command: "kubectl apply -f deploy.yaml" } },
+      ctx as unknown as ExtensionContext & { aborted: boolean },
+      state,
+      complete,
+    );
+    assert.equal(result?.block, true);
+    assert.match(result.reason, /stopped this turn at the rail approval prompt/);
+    assert.doesNotMatch(result.reason, /denied/);
+    assert.equal((ctx as unknown as { aborted: boolean }).aborted, true);
+    assert.equal(seen.calls, 0, "a deterministic ask still needs no model call");
+    assert.equal(state.stats.stopped, 1);
+    assert.equal(state.stats.denied, 0, "a stop is not a denial");
+    assert.equal(state.stats.blocked, 0, "nor a policy block");
+    assert.equal(state.classifier.lastDecision?.decision, "stop");
+    assert.equal(state.recent[0]?.decision, "stop", "the judge's recent-decision feed must not read this as a refusal");
+  });
+
   it("still runs the judge for a judge class — only the namer's label step is skipped", async () => {
     const state = classifyState({ disposition: "judge" });
     const { complete, seen } = reviewer(['{"decision":"deny","reason":"that context is the production cluster"}']);
@@ -367,22 +391,25 @@ describe("commands.classify labelling", () => {
 });
 
 /** Interactive fake: askRailApproval falls back to select+input outside the TUI. */
-function interactiveCtx(cwd: string, answers: string[]) {
+function interactiveCtx(cwd: string, answers: Array<string | undefined>) {
   const ctx = {
     cwd,
     hasUI: true,
     mode: "rpc",
-    abort() {},
+    aborted: false,
+    abort() {
+      ctx.aborted = true;
+    },
     ui: {
       notify() {},
-      select: async () => answers.shift() ?? "Deny",
+      select: async () => (answers.length > 0 ? answers.shift() : "Deny"),
       input: async () => undefined,
     },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
     sessionManager: { getBranch: () => [] },
     signal: undefined,
   };
-  return ctx as unknown as ExtensionContext;
+  return ctx as unknown as ExtensionContext & { aborted: boolean };
 }
 
 describe("out-of-roots writes resolve through modify-system", () => {
@@ -417,6 +444,24 @@ describe("out-of-roots writes resolve through modify-system", () => {
     assert.match(result.reason, /approval denied/);
     assert.equal(state.stats.asked, 1, "the path dialog owns the counters; the table must not double-count");
     assert.equal(state.stats.ruleHits, 1);
+  });
+
+  it("escape on the path ask stops the turn rather than denying", async () => {
+    const state = railState(testConfig((c) => {
+      c.filesystem.allowWrite = ["."];
+      c.classifier.enabled = false;
+    }));
+    // undefined from select is the RPC form of Escape.
+    const ctx = interactiveCtx(cwd, [undefined]);
+    const result = await interceptToolCall({ toolName: "write", input: { path: outside, content: "x" } }, ctx, state);
+    assert.equal(result?.block, true);
+    assert.match(result.reason, /stopped this turn at the rail approval prompt/);
+    assert.doesNotMatch(result.reason, /denied/);
+    assert.equal(ctx.aborted, true);
+    assert.equal(state.approvals.write.length, 0, "a cancelled ask approves nothing");
+    assert.equal(state.stats.stopped, 1);
+    assert.equal(state.stats.blocked, 0, "a stopped turn is not a policy block");
+    assert.equal(state.recent[0]?.decision, "stop");
   });
 });
 
@@ -465,13 +510,13 @@ describe("classifier failure diagnostics", () => {
   it("names the failure, the model, and the attempts in the failed-closed block reason", async () => {
     const state = reviewingState((c) => { c.classifier.failClosed = true; });
     const ctx = reviewingCtx();
-    const result = await interceptToolCall(bash, ctx, state, scripted(["Looks fine to me!"]));
+    const result = await interceptToolCall(bash, ctx, state, scripted(Array.from({ length: 5 }, () => "Looks fine to me!")));
     assert.equal(result?.block, true);
     assert.equal(
       result.reason,
-      `Rail classifier failed closed: invalid response on ${MODEL} after 1 attempt: reviewer did not return JSON. This turn was stopped for user intervention.`,
+      `Rail classifier failed closed: invalid response on ${MODEL} after 5 attempts: reviewer did not return JSON. This turn was stopped for user intervention.`,
     );
-    assert.equal(state.classifier.lastError, `invalid response on ${MODEL} after 1 attempt: reviewer did not return JSON`);
+    assert.equal(state.classifier.lastError, `invalid response on ${MODEL} after 5 attempts: reviewer did not return JSON`);
     assert.deepEqual(state.stats.errorsByKind, { "invalid response": 1 });
     assert.equal(ctx.aborted, true);
   });
@@ -517,12 +562,12 @@ describe("classifier failure diagnostics", () => {
     // credentials routes to the judge by default; the namer succeeds and the judge does not.
     const state = reviewingState();
     const ctx = reviewingCtx();
-    await interceptToolCall(bash, ctx, state, scripted(['{"labels":["credentials"]}', "sure, allow it"]));
+    await interceptToolCall(bash, ctx, state, scripted(['{"labels":["credentials"]}', ...Array.from({ length: 5 }, () => "sure, allow it")]));
     assert.equal(state.stats.errors, 1, "a judge failure counts as a classifier error");
     assert.deepEqual(state.stats.errorsByKind, { "invalid response": 1 });
-    assert.equal(state.classifier.lastError, `invalid response on ${MODEL} after 1 attempt: reviewer did not return JSON`);
+    assert.equal(state.classifier.lastError, `invalid response on ${MODEL} after 5 attempts: reviewer did not return JSON`);
     const errorEvent = state.recent.find((event) => event.decision === "error");
-    assert.equal(errorEvent?.reason, `judge: invalid response on ${MODEL} after 1 attempt: reviewer did not return JSON`);
+    assert.equal(errorEvent?.reason, `judge: invalid response on ${MODEL} after 5 attempts: reviewer did not return JSON`);
     const record = telemetry.map((entry) => entry.data as RailErrorTelemetry).find((data) => data.kind === "error");
     assert.equal(record?.failureKind, "invalid response");
     assert.equal(record?.model, MODEL);

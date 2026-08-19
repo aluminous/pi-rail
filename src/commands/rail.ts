@@ -25,6 +25,13 @@ export interface RailCommandDeps {
   runCritique(args: string, ctx: ExtensionContext): Promise<void>;
   /** Disposition persist boundary; defaults to the global config writers, overridden in tests. */
   persistDisposition?: Partial<DispositionPersistence>;
+  /**
+   * Posts a rail notice into the agent's conversation context (pi.sendMessage
+   * with the "pi-rail" custom type, delivered next turn so it never interrupts).
+   * Optional: absent in tests and headless contexts that have no session to
+   * message; toggleReadOnly degrades to a notify-only toast when it is unset.
+   */
+  postRailNotice?(content: string): void;
 }
 
 const SUBCOMMANDS: Array<{ value: string; description: string }> = [
@@ -113,10 +120,32 @@ export function createRailCommand(deps: RailCommandDeps) {
     show(ctx, "Pi Rail disabled for this session; bash and file-tool policy checks run without the rail.", "warning");
   }
 
+  /**
+   * Ctrl+R toggle. The common case flips the rail off for the upcoming agent
+   * turn (it re-enables itself at agent_end, exactly like `/rail off`). Pressing
+   * it again while that one-turn disable is armed re-enables immediately. And if
+   * the rail was off for the whole session (`/rail off session` or config), the
+   * toggle switches it back on rather than silently doing nothing.
+   */
+  async function toggleForTurn(ctx: ExtensionContext): Promise<void> {
+    // disabledForNextAgent (off next turn) or fully off for the session → re-enable.
+    if (state.disabledForNextAgent || !state.enabled) {
+      await enable(ctx);
+      return;
+    }
+    await disableTurn(ctx);
+  }
+
   function toggleReadOnly(ctx: ExtensionContext): void {
     state.readOnly = !state.readOnly;
-    if (state.readOnly) show(ctx, "Rail read-only mode on: write/edit are blocked and bash is restricted to read-only commands.");
-    else show(ctx, "Rail read-only mode off.");
+    const notice = state.readOnly
+      ? "Rail read-only mode on: write/edit are blocked and bash is restricted to read-only commands."
+      : "Rail read-only mode off: write/edit and bash are no longer restricted by read-only mode.";
+    show(ctx, notice);
+    // Mirror the toggle into the agent's context so the model knows the rail is
+    // locked down (or freed) before its next turn — the read-only policy changes
+    // what write/edit/bash it can get away with, so it is worth the context token.
+    deps.postRailNotice?.(notice);
   }
 
   /** Shows the nth-newest decision trace (1-based, default newest) through the report view. */
@@ -363,5 +392,5 @@ export function createRailCommand(deps: RailCommandDeps) {
     return items.length > 0 ? items : null;
   }
 
-  return { handler, getArgumentCompletions };
+  return { handler, getArgumentCompletions, toggleForTurn };
 }

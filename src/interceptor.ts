@@ -26,6 +26,7 @@ import {
   resolveJudgeModel,
   type CompleteFn,
   type RailDecision,
+  type RailOutcome,
   type JudgeResult,
   type NamerResult,
 } from "./classifier.ts";
@@ -35,11 +36,12 @@ import { screenToolCall, type ContentScreenVerdict } from "./content-screen.ts";
 import { addTraceStage, type DecisionTrace } from "./decision-trace.ts";
 import { actionTarget, describeAction, INTERCEPTED_TOOLS, type InterceptedToolSpec } from "./intercepted-tools.ts";
 import { classifierExemptReadReason, decidePathAccess, denyReadMatch, normalizeUserPath, type AccessKind } from "./policy.ts";
-import { appendRailTelemetry, type RailJudgeTelemetry } from "./telemetry.ts";
+import { appendRailTelemetry, type RailJudgeTelemetry, type UserAnswer } from "./telemetry.ts";
 import {
   recordApprovalDenied,
   recordApprovalGranted,
   recordApprovalRequested,
+  recordApprovalStopped,
   recordCapabilityDecision,
   recordClassifierError,
   recordClassifierSkip,
@@ -70,13 +72,28 @@ export function stopTurnForClassifierFailure(ctx: TurnAbortContext, reason: stri
   return { block: true, reason: `Rail classifier failed closed: ${reason}. This turn was stopped for user intervention.` };
 }
 
+/**
+ * Escape on an ask is not a "no": it is the key users reach for to stop the
+ * agent, so the turn aborts instead of continuing past a denial the model
+ * would read as "try something else". The block reason lands in the
+ * transcript even though the abort, not the reason, is what stops the turn.
+ */
+function stopTurnAtAsk(ctx: TurnAbortContext, subject: string): ToolCallBlock {
+  ctx.ui.notify("Rail approval dismissed: stopping this turn.", "info");
+  ctx.abort();
+  return {
+    block: true,
+    reason: `The user stopped this turn at the rail approval prompt for ${subject}. Do not retry the action or work around the rail; wait for the user's direction.`,
+  };
+}
+
 function isApprovedPath(approvedRoots: string[], target: string): boolean {
   return approvedRoots.some((root) => target === root || target.startsWith(`${root}/`));
 }
 
 /**
  * Swap pi's streaming-spinner text for the duration of a reviewer call, so the
- * wait reads as the rail's ("Classifying", "Judging") instead of the agent
+ * wait reads as the rail's ("Classifying...", "Judging...") instead of the agent
  * model's default. Deliberately terse: the spinner is a heartbeat, not a
  * report — the action under review is never echoed there. Restored in a
  * finally so a thrown classifier failure cannot leave the message stuck, and
@@ -119,6 +136,15 @@ function isUserSkillPath(target: string): boolean {
   return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
+/**
+ * Why this is not just `ToolCallBlock | undefined`: a denial and a stopped turn
+ * both block, and the capability path needs to tell them apart to record the
+ * right outcome. The block alone cannot say which happened.
+ */
+type PathApprovalResult =
+  | { answer: "approved"; block?: undefined }
+  | { answer: "denied" | "stopped"; block: ToolCallBlock };
+
 async function askPathApproval(params: {
   ctx: ExtensionContext;
   state: RuntimeState;
@@ -127,10 +153,10 @@ async function askPathApproval(params: {
   path: string;
   reason: string;
   trace: DecisionTrace;
-}): Promise<ToolCallBlock | undefined> {
+}): Promise<PathApprovalResult> {
   if (isApprovedPath(params.state.approvals[params.kind], params.path)) {
     addTraceStage(params.trace, "ask", "approved", `${params.kind} ${params.path} already approved this session`);
-    return;
+    return { answer: "approved" };
   }
   recordApprovalRequested(params.state, params.toolName, params.kind, params.path);
   const outcome = await askRailApproval(
@@ -146,14 +172,23 @@ async function askPathApproval(params: {
   if (outcome.kind === "unanswerable") {
     recordApprovalDenied(params.state);
     addTraceStage(params.trace, "ask", "unanswerable", `${params.kind} ${params.path} needs approval but ${outcome.detail}`);
-    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, approved: false, reason: params.reason });
+    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "denied", reason: params.reason });
     return {
-      block: true,
-      reason: `${params.kind} requires approval for ${params.path}: ${params.reason}. The ask could not be answered — ${outcome.detail}. Rerun interactively or pre-approve the path in rail config.`,
+      answer: "denied",
+      block: {
+        block: true,
+        reason: `${params.kind} requires approval for ${params.path}: ${params.reason}. The ask could not be answered — ${outcome.detail}. Rerun interactively or pre-approve the path in rail config.`,
+      },
     };
   }
   const { answer, forwarded } = outcome;
   const via = forwarded ? " via the parent session" : "";
+  if (answer.cancelled) {
+    recordApprovalStopped(params.state, params.toolName, params.kind, params.path);
+    addTraceStage(params.trace, "ask", "stopped", `user stopped the turn at the ${params.kind} approval for ${params.path}${via}`);
+    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "stopped", reason: params.reason, forwarded: forwarded || undefined });
+    return { answer: "stopped", block: stopTurnAtAsk(params.ctx, `${params.kind} access to ${params.path}`) };
+  }
   if (answer.comment) {
     addSessionGuidance(params.state.classifier, answer.approved ? "allowed" : "denied", params.toolName, `${params.kind} ${params.path}`, answer.comment);
   }
@@ -163,7 +198,7 @@ async function askPathApproval(params: {
     tool: params.toolName,
     access: params.kind,
     path: params.path,
-    approved: answer.approved,
+    outcome: answer.approved ? "approved" : "denied",
     reason: params.reason,
     userComment: answer.comment,
     forwarded: forwarded || undefined,
@@ -171,11 +206,14 @@ async function askPathApproval(params: {
   if (answer.approved) {
     params.state.approvals[params.kind].push(params.path);
     recordApprovalGranted(params.state, params.toolName, params.kind, params.path);
-    return;
+    return { answer: "approved" };
   }
   recordApprovalDenied(params.state);
   const commentSuffix = answer.comment ? ` User comment: ${answer.comment}` : "";
-  return { block: true, reason: `${params.kind} approval denied for ${params.path}.${commentSuffix} Do not work around the rail; ask the user.` };
+  return {
+    answer: "denied",
+    block: { block: true, reason: `${params.kind} approval denied for ${params.path}.${commentSuffix} Do not work around the rail; ask the user.` },
+  };
 }
 
 /** An out-of-roots write: the label goes to the table, and an `ask` reuses the path dialog and its session memory. */
@@ -251,7 +289,7 @@ async function enforcePathPolicy(
       // existing per-path approval rather than routing it through read-system.
       addTraceStage(trace, "path-policy", "ask", `${decision.reason} → approval`);
       const approval = await askPathApproval({ ctx, state, kind, toolName: event.toolName, path: decision.normalizedPath, reason: decision.reason, trace });
-      if (approval) return { outcome: "block", block: approval };
+      if (approval.block) return { outcome: "block", block: approval.block };
       continue;
     }
     addTraceStage(trace, "path-policy", "block", decision.reason);
@@ -467,7 +505,7 @@ async function runInterceptStages(
     const startedAt = performance.now();
     namerModel = describeModel(() => resolveClassifierModel(ctx, config, state.classifier));
     try {
-      named = await withWorkingMessage(ctx, "Classifying", () =>
+      named = await withWorkingMessage(ctx, "Classifying...", () =>
         nameToolCall({ ctx, config, state: state.classifier, toolName: event.toolName, input: event.input, completeFn, capabilities: state.capabilities }),
       );
       namerLatencyMs = Math.round(performance.now() - startedAt);
@@ -618,7 +656,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     else reason = `${outcome.fallbackReason} — asking instead`;
   }
 
-  const finish = (decision: RailDecision, outcome: CapabilityOutcome, block?: ToolCallBlock, userApproved?: boolean, userComment?: string, forwarded?: boolean): ToolCallBlock | undefined => {
+  const finish = (decision: RailOutcome, outcome: CapabilityOutcome, block?: ToolCallBlock, userAnswer?: UserAnswer, userComment?: string, forwarded?: boolean): ToolCallBlock | undefined => {
     // "Exempt" means the action resolved to allow with no model consulted; a
     // deterministic label that escalated or prompted is not an exemption.
     if (!params.reviewed && resolution.disposition === "allow") recordClassifierSkip(state);
@@ -650,7 +688,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       model: params.namerModel,
       judge: judgeTelemetry,
       reason,
-      userApproved,
+      userAnswer,
       userComment,
       forwarded,
       usage: totalUsage(params.named, judge),
@@ -683,10 +721,11 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     });
     // askPathApproval owns the counters, telemetry, and recent event for this
     // dialog; only the per-class stats are still ours to record.
+    const PATH_OUTCOMES = { approved: "ask-approved", denied: "ask-denied", stopped: "ask-stopped" } as const;
     recordCapabilityHits(state.capabilities, resolution.labels);
     recordCapabilityDecided(state.capabilities, resolution.decidedBy.id);
-    recordCapabilityOutcome(state.capabilities, resolution.labels, approval ? "ask-denied" : "ask-approved");
-    return approval;
+    recordCapabilityOutcome(state.capabilities, resolution.labels, PATH_OUTCOMES[approval.answer]);
+    return approval.block;
   }
 
   const evidence = params.named?.authorizationEvidence;
@@ -711,18 +750,23 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
   }
   const { answer, forwarded } = outcome;
   const via = forwarded ? " via the parent session" : "";
+  if (answer.cancelled) {
+    addTraceStage(trace, "ask", "stopped", `user stopped the turn at the approval prompt${via}`);
+    reason = `${reason} — the user stopped the turn at the approval prompt`;
+    return finish("stop", "ask-stopped", stopTurnAtAsk(ctx, subject), "stopped", undefined, forwarded || undefined);
+  }
   if (answer.comment) {
     const guidanceSubject = subject.startsWith(`${event.toolName}: `) ? subject.slice(event.toolName.length + 2) : subject;
     addSessionGuidance(state.classifier, answer.approved ? "allowed" : "denied", event.toolName, guidanceSubject, answer.comment);
   }
   addTraceStage(trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"}${answer.comment ? " with a comment" : ""}${via}`);
-  if (answer.approved) return finish("allow", judge ? "judge-ask" : "ask-approved", undefined, true, answer.comment, forwarded || undefined);
+  if (answer.approved) return finish("allow", judge ? "judge-ask" : "ask-approved", undefined, "approved", answer.comment, forwarded || undefined);
   const commentSuffix = answer.comment ? ` User comment: ${answer.comment}` : "";
   return finish(
     "deny",
     judge ? "judge-ask" : "ask-denied",
     { block: true, reason: `Rail asked and the user denied: ${reason}.${commentSuffix} Do not work around this denial; choose a safer path or ask the user.` },
-    false,
+    "denied",
     answer.comment,
     forwarded || undefined,
   );
@@ -762,7 +806,7 @@ async function runJudgeStage(
   const model = describeModel(() => resolveJudgeModel(ctx, config, state.classifier));
   const startedAt = performance.now();
   try {
-    const judge = await withWorkingMessage(ctx, "Judging", () =>
+    const judge = await withWorkingMessage(ctx, "Judging...", () =>
       judgeToolCall({
         ctx,
         config,

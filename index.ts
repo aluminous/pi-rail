@@ -227,7 +227,17 @@ export default function (pi: ExtensionAPI) {
 
   const runRailSmoke = createRailSmoke({ state, sandboxedOps });
   const runCritique = createCritiqueRunner({ state });
-  const railCommand = createRailCommand({ state, enableRail, disableRail, runRailSmoke, runCritique });
+  const railCommand = createRailCommand({
+    state,
+    enableRail,
+    disableRail,
+    runRailSmoke,
+    runCritique,
+    // Custom messages participate in LLM context; nextTurn queues for the next
+    // prompt so the notice never interrupts the current turn.
+    postRailNotice: (content) => pi.sendMessage({ customType: "pi-rail", content, display: true }, { deliverAs: "nextTurn" }),
+  });
+  const { toggleForTurn } = railCommand;
 
   pi.registerCommand("rail", {
     description: "Pi Rail control panel; or: status|policy [rules]|set <class> [disposition]|explain|test|why|on|off|off session|readonly|model|smoke|critique",
@@ -235,10 +245,17 @@ export default function (pi: ExtensionAPI) {
     handler: railCommand.handler,
   });
 
-  // No built-in binding uses ctrl+alt+r; conflicts with other extensions are
+  // No built-in binding uses these. Conflicts with other extensions are
   // reported by pi's extension runner as shortcut diagnostics.
-  pi.registerShortcut("ctrl+alt+r", {
+  // (ctrl+shift+d is hardcoded in pi-tui to write a debug log, so it is
+  // avoided; ctrl+shift+t is free of any default or hardcoded binding.)
+  pi.registerShortcut("ctrl+shift+t", {
     description: "Toggle rail read-only mode",
     handler: (ctx) => railCommand.handler("readonly", ctx),
+  });
+
+  pi.registerShortcut("ctrl+shift+r", {
+    description: "Toggle Pi Rail on/off for this turn",
+    handler: (ctx) => toggleForTurn(ctx),
   });
 }

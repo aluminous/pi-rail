@@ -100,7 +100,20 @@ const blocks = records.filter((r) => r.record.kind === "block");
 const approvals = records.filter((r) => r.record.kind === "approval");
 const errors = records.filter((r) => r.record.kind === "error");
 
-const decisions: Record<string, number> = { allow: 0, deny: 0, ask: 0 };
+const decisions: Record<string, number> = { allow: 0, deny: 0, ask: 0, stop: 0 };
+
+/**
+ * Reads the user's answer from either telemetry shape. Sessions recorded before
+ * stops became their own outcome carry `userApproved`/`approved` booleans, in
+ * which a stopped turn is indistinguishable from a denial — those corpora stay
+ * readable, they just cannot report a stop.
+ */
+function userAnswerOf(record: { userAnswer?: string; userApproved?: boolean; outcome?: string; approved?: boolean }): string | undefined {
+  const explicit = record.userAnswer ?? record.outcome;
+  if (explicit) return explicit;
+  const legacy = record.userApproved ?? record.approved;
+  return legacy === undefined ? undefined : legacy ? "approved" : "denied";
+}
 const models = new Map<string, number>();
 const labelCounts = new Map<string, number>();
 let judged = 0;
@@ -133,8 +146,11 @@ for (const { record } of reviews) {
 const totalPromptTokens = inputTokens + cacheReadTokens + cacheWriteTokens;
 const sortedLatencies = [...latencies].sort((a, b) => a - b);
 
-const asksRejected = reviews.filter((r) => r.record.kind === "review" && r.record.userApproved === false);
-const approvedPaths = approvals.filter((r) => r.record.kind === "approval" && r.record.approved).length;
+const asksRejected = reviews.filter((r) => r.record.kind === "review" && userAnswerOf(r.record) === "denied");
+const asksStopped = reviews.filter((r) => r.record.kind === "review" && userAnswerOf(r.record) === "stopped");
+const pathAnswers = approvals.map((r) => (r.record.kind === "approval" ? userAnswerOf(r.record) : undefined));
+const approvedPaths = pathAnswers.filter((answer) => answer === "approved").length;
+const stoppedPaths = pathAnswers.filter((answer) => answer === "stopped").length;
 
 const summary = {
   sessionsScanned: files.length,
@@ -148,6 +164,7 @@ const summary = {
     screenTripRate: screenApplied ? screenTripped / screenApplied : 0,
     retryRate: reviews.length ? retried / reviews.length : 0,
     asksRejectedByUser: asksRejected.length,
+    asksStoppedByUser: asksStopped.length,
     latencyMs: {
       p50: percentile(sortedLatencies, 50),
       p95: percentile(sortedLatencies, 95),
@@ -163,19 +180,21 @@ const summary = {
     models: Object.fromEntries([...models.entries()].sort((a, b) => b[1] - a[1])),
   },
   policyBlocks: blocks.length,
-  pathApprovals: { total: approvals.length, granted: approvedPaths, denied: approvals.length - approvedPaths },
+  pathApprovals: { total: approvals.length, granted: approvedPaths, stopped: stoppedPaths, denied: approvals.length - approvedPaths - stoppedPaths },
   errors: errors.length,
 };
 
 if (dumpCases) {
-  const candidates = [...reviews.filter((r) => r.record.kind === "review" && (r.record.decision === "deny" || r.record.userApproved === false))].map((r) => {
+  // Stops are deliberately not candidates: the user interrupted the agent
+  // without ever judging the action, so there is no verdict to learn from.
+  const candidates = [...reviews.filter((r) => r.record.kind === "review" && (r.record.decision === "deny" || userAnswerOf(r.record) === "denied"))].map((r) => {
     const record = r.record as Extract<RailTelemetryRecord, { kind: "review" }>;
     const command = commandOf(record);
     return {
       tool: record.tool,
       command,
       decision: record.decision,
-      userApproved: record.userApproved,
+      userAnswer: userAnswerOf(record),
       reason: record.reason,
       model: record.model,
       session: path.basename(r.file),
@@ -205,9 +224,13 @@ console.log(
   `  Tokens: ${totalPromptTokens} prompt (${summary.reviews.tokens.cacheRead} cached reads, ${pct(summary.reviews.tokens.cacheHitRate)} hit rate) / ${summary.reviews.tokens.output} out`,
 );
 if (summary.reviews.asksRejectedByUser > 0) console.log(`  Asks rejected by user: ${summary.reviews.asksRejectedByUser} (classifier hesitation was justified)`);
+// Reported apart from rejections: the user never judged the action, so this
+// says the ask arrived at a bad moment, not that the ask was right.
+if (summary.reviews.asksStoppedByUser > 0) console.log(`  Asks stopped by user: ${summary.reviews.asksStoppedByUser} (turn interrupted, action never judged)`);
 for (const [model, count] of Object.entries(summary.reviews.models)) console.log(`  Model: ${model} (${count} reviews)`);
 console.log(`Policy blocks: ${summary.policyBlocks}`);
-console.log(`Path approvals: ${summary.pathApprovals.total} (${summary.pathApprovals.granted} granted, ${summary.pathApprovals.denied} denied)`);
+const stoppedPart = summary.pathApprovals.stopped > 0 ? `, ${summary.pathApprovals.stopped} stopped` : "";
+console.log(`Path approvals: ${summary.pathApprovals.total} (${summary.pathApprovals.granted} granted, ${summary.pathApprovals.denied} denied${stoppedPart})`);
 console.log(`Classifier errors: ${summary.errors}`);
 if (summary.records === 0 || summary.reviews.total === 0) {
   console.log("");

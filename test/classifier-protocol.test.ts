@@ -7,6 +7,7 @@ import {
   NAMER_SYSTEM_PROMPT,
   buildJudgeText,
   buildNamerText,
+  classifierRetryClass,
   classifyClassifierFailure,
   describeClassifierFailure,
   isModelUnavailableError,
@@ -92,8 +93,13 @@ describe("parseNamerResult", () => {
   it("fails closed on schema violations", () => {
     assert.throws(() => parseStock('{"labels":"read-project"}'), /invalid namer labels/);
     assert.throws(() => parseStock('{"labels":[1,2]}'), /invalid namer labels/);
-    assert.throws(() => parseStock('{"labels":["read-project"],"authorizationEvidence":42}'), /invalid namer authorizationEvidence/);
     assert.throws(() => parseStock("looks safe to me"), /did not return JSON/);
+  });
+
+  it("drops a malformed authorizationEvidence instead of failing closed", () => {
+    const parsed = parseStock('{"labels":["read-project"],"authorizationEvidence":42}');
+    assert.deepEqual(parsed.labels, ["read-project"]);
+    assert.equal(parsed.authorizationEvidence, undefined);
   });
 });
 
@@ -117,8 +123,42 @@ describe("error classification", () => {
     assert.equal(isRetryableClassifierError(new Error("request timed out")), true);
   });
 
-  it("does not retry logic errors", () => {
-    assert.equal(isRetryableClassifierError(new Error("reviewer did not return JSON")), false);
+  it("retries invalid reviewer output: the retry feeds the reply back, so the reviewer can fix itself", () => {
+    assert.equal(isRetryableClassifierError(new Error("reviewer did not return JSON")), true);
+    assert.equal(isRetryableClassifierError(new Error("invalid namer labels: expected an array")), true);
+    assert.equal(isRetryableClassifierError(new Error("invalid judge decision")), true);
+  });
+
+  it("separates the retry that needs a delay from the one that does not", () => {
+    // Something remote has to clear before the next attempt can differ.
+    for (const message of ["503 Service Unavailable", "429 rate limit exceeded", "request timed out", "fetch failed: ECONNRESET", "getaddrinfo ENOTFOUND api.example.com"]) {
+      assert.equal(classifierRetryClass(new Error(message)), "delayed", message);
+    }
+    // The call already completed; only the reply was wrong, and the next
+    // attempt carries the correction. Sleeping would be latency for nothing.
+    for (const message of ["reviewer did not return JSON", "invalid namer labels: expected an array", "invalid judge decision"]) {
+      assert.equal(classifierRetryClass(new Error(message)), "immediate", message);
+    }
+    // A second identical attempt fails identically.
+    for (const message of ["400 invalid request body", "401 Unauthorized", "model not found: foo/bar", "classifier review aborted"]) {
+      assert.equal(classifierRetryClass(new Error(message)), "fatal", message);
+    }
+  });
+
+  it("classifies a V8 JSON SyntaxError as an invalid response, whatever the release calls it", () => {
+    // The wording moved between node releases; these are node 20+ phrasings,
+    // and treating one as a generic error would make it terminal on attempt 1.
+    for (const broken of ['{"labels":["read-project"],}', '{labels: ["read-project"]}', '{"labels":["read-project"] "x":1}']) {
+      let thrown: unknown;
+      try {
+        parseStock(broken);
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, `expected ${broken} to throw`);
+      assert.equal(classifyClassifierFailure(thrown).category, "invalid response", broken);
+      assert.equal(isRetryableClassifierError(thrown), true, broken);
+    }
   });
 
   it("classifies auth/model failures as unavailable", () => {

@@ -18,12 +18,15 @@ const JUDGE_DENY = '{"decision":"deny","reason":"credential exfiltration"}';
 
 type ScriptStep = string | Error | "hang" | { errorMessage: string };
 
+/** What every fake completion reports, so a test can multiply it by the attempts it expects to be billed. */
+const FAKE_USAGE = { input: 10, output: 5 };
+
 function makeResponse(text: string) {
   return {
     role: "assistant",
     stopReason: "stop",
     content: [{ type: "text", text }],
-    usage: { input: 10, output: 5 },
+    usage: { ...FAKE_USAGE },
     timestamp: Date.now(),
   } as unknown as Awaited<ReturnType<CompleteFn>>;
 }
@@ -33,7 +36,8 @@ function makeIO(script: ScriptStep[], options?: { userMessages?: string[]; noAut
   const notifications: string[] = [];
   const sleeps: number[] = [];
   const complete: CompleteFn = (async (_model: unknown, context: { systemPrompt?: string; messages: Array<{ content: Array<{ type: string; text?: string }> }> }, opts?: { signal?: AbortSignal }) => {
-    const text = context.messages[0]?.content.find((part) => part.type === "text")?.text ?? "";
+    // Join every message: retries append feedback, and tests want to see it.
+    const text = context.messages.map((message) => message.content.find((part) => part.type === "text")?.text ?? "").join("\n---\n");
     calls.push({ systemPrompt: context.systemPrompt, text });
     const step = script.shift();
     if (step === undefined) throw new Error("fake complete script exhausted");
@@ -198,15 +202,68 @@ describe("retry behavior", () => {
     );
   });
 
-  it("tags a protocol violation with the same attempt context", async () => {
-    const { io } = makeIO(["not json at all"]);
+  it("retries a protocol violation, feeding the reply and the error back to the reviewer", async () => {
+    const { io, calls, notifications, sleeps } = makeIO(["Looks fine to me, go ahead!", NAME_READ]);
+    const result = await name(io);
+    assert.deepEqual(result.labels, ["read-project"]);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(sleeps, [], "a malformed reply is an immediate retry: nothing is waiting to clear");
+    assert.match(notifications[0]!, /^Rail classifier attempt 1\/5 failed \(invalid response\): reviewer did not return JSON\. Retrying\.$/);
+    assert.ok(calls[1]!.text.includes("Your previous reply could not be parsed: reviewer did not return JSON"), "the retry says what went wrong");
+    assert.ok(calls[1]!.text.includes("Looks fine to me, go ahead!"), "the retry shows the malformed reply");
+  });
+
+  it("keeps the backoff schedule for transport failures, and does not let a parse failure advance it", async () => {
+    // A parse failure between two 503s must not skip the 250ms first step.
+    const { io, sleeps } = makeIO(["not json at all", new Error("503 Service Unavailable"), new Error("503 Service Unavailable"), NAME_READ]);
+    const result = await name(io);
+    assert.deepEqual(result.labels, ["read-project"]);
+    assert.deepEqual(sleeps, [250, 1000]);
+  });
+
+  it("classifies a syntactically broken JSON object as an invalid response, whatever V8 calls it", async () => {
+    // A trailing comma reaches JSON.parse as a SyntaxError whose wording moves
+    // between node releases; it must still be retryable rather than terminal.
+    const { io, calls } = makeIO(['{"labels":["read-project"],}', NAME_READ]);
+    const result = await name(io);
+    assert.deepEqual(result.labels, ["read-project"]);
+    assert.equal(calls.length, 2, "the broken object was retried, not treated as fatal");
+  });
+
+  it("bills every completed attempt, not just the one that parsed", async () => {
+    const { io } = makeIO(["not json at all", NAME_READ]);
+    const result = await name(io);
+    // The fake reports the same usage per call, so two calls is double one.
+    assert.ok(result.tokenUsage);
+    assert.equal(result.tokenUsage.input, 2 * FAKE_USAGE.input);
+    assert.equal(result.tokenUsage.output, 2 * FAKE_USAGE.output);
+  });
+
+  it("recovers from a schema-violating reply within the budget", async () => {
+    const { io, calls } = makeIO(['{"labels":"read-project"}', NAME_READ]);
+    const result = await name(io);
+    assert.deepEqual(result.labels, ["read-project"]);
+    assert.equal(calls.length, 2);
+  });
+
+  it("tags an exhausted protocol violation with the attempts it burned and the model it called", async () => {
+    const { io, calls } = makeIO(Array.from({ length: 5 }, () => "not json at all"));
     await assert.rejects(
       () => name(io),
       (error: unknown) => {
-        assert.equal(describeClassifierFailure(error), "invalid response on test/fake-model after 1 attempt: reviewer did not return JSON");
+        assert.equal(describeClassifierFailure(error), "invalid response on test/fake-model after 5 attempts: reviewer did not return JSON");
         return true;
       },
     );
+    assert.equal(calls.length, 5);
+  });
+
+  it("drops a malformed authorizationEvidence instead of burning a retry", async () => {
+    const { io, calls } = makeIO(['{"labels":["read-project"],"authorizationEvidence":42}']);
+    const result = await name(io);
+    assert.deepEqual(result.labels, ["read-project"]);
+    assert.equal(result.authorizationEvidence, undefined);
+    assert.equal(calls.length, 1);
   });
 
   it("does not retry non-transport errors", async () => {
@@ -279,12 +336,12 @@ describe("retry behavior", () => {
 
 describe("fail-closed guarantees", () => {
   it("throws on malformed namer output instead of guessing labels", async () => {
-    const { io } = makeIO(["Looks fine to me, go ahead!"]);
+    const { io } = makeIO(Array.from({ length: 5 }, () => "Looks fine to me, go ahead!"));
     await assert.rejects(() => name(io), /did not return JSON/);
   });
 
   it("throws on schema-violating output even when it is valid JSON", async () => {
-    const { io } = makeIO(['{"labels":"read-project"}']);
+    const { io } = makeIO(Array.from({ length: 5 }, () => '{"labels":"read-project"}'));
     await assert.rejects(() => name(io), /invalid namer labels/);
   });
 

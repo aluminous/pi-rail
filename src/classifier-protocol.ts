@@ -7,6 +7,16 @@ import { errorChain, formatError, type ErrorChainNode } from "./util.ts";
 /** What a review can end up doing to a call once the table (and possibly the judge) has spoken. */
 export type RailDecision = "allow" | "deny" | "ask";
 
+/**
+ * What actually became of a call. Wider than RailDecision by exactly one case:
+ * the user can answer an `ask` by reaching for the stop key instead of by
+ * answering it, and that is not a denial. Keeping the two types apart is what
+ * lets a stop stay out of the deny counters, out of the judge's recent-decision
+ * feed, and out of the telemetry corpus's refusal rate — while RailDecision
+ * stays the reviewer's own vocabulary, which the judge protocol parses.
+ */
+export type RailOutcome = RailDecision | "stop";
+
 export interface ClassifierTokenUsage {
   /** Uncached input tokens (pi-ai normalizes cache reads/writes out of `input`). */
   input: number;
@@ -205,14 +215,25 @@ function extractJson(text: string): unknown {
   try { return JSON.parse(trimmed); } catch {}
   const match = trimmed.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("reviewer did not return JSON");
-  return JSON.parse(match[0]);
+  try {
+    return JSON.parse(match[0]);
+  } catch (error) {
+    // V8 rewords its SyntaxErrors between releases ("Unexpected token }" became
+    // "Expected ',' or '}' after property value in JSON at position 27"), so a
+    // raw parse error is a phrase list the rail cannot keep up with. Name the
+    // failure here instead, and the detail still reaches the reviewer as the
+    // retry's feedback.
+    throw new Error(`reviewer did not return JSON: ${formatError(error)}`);
+  }
 }
 
 /**
  * Fail-closed parsing: a schema violation throws rather than guessing. Unknown
  * class ids are dropped instead (the taxonomy can shrink between releases, and
- * a hallucinated id is not a protocol break), and a label set that ends up
- * empty becomes `unclassified` — the completeness valve, not an allow.
+ * a hallucinated id is not a protocol break), a label set that ends up empty
+ * becomes `unclassified` — the completeness valve, not an allow — and a
+ * non-string authorizationEvidence is dropped, since it only decorates a
+ * prompt and is not worth a retry.
  *
  * `validIds` is the caller's registry, not the built-in set: a custom class is
  * a real label the moment it exists, and a class deleted mid-call is dropped
@@ -224,8 +245,9 @@ export function parseNamerResult(text: string, validIds: ReadonlySet<string>): {
   const obj = parsed as Record<string, unknown>;
   if (!Array.isArray(obj.labels)) throw new Error("invalid namer labels: expected an array");
   if (!obj.labels.every((label) => typeof label === "string")) throw new Error("invalid namer labels: expected strings");
+  // authorizationEvidence only ever decorates a confirmation prompt, so a
+  // malformed one is dropped rather than failing the whole response closed.
   const evidence = obj.authorizationEvidence;
-  if (evidence !== undefined && typeof evidence !== "string") throw new Error("invalid namer authorizationEvidence");
   const labels = [...new Set(obj.labels.filter((label): label is string => typeof label === "string" && validIds.has(label)))];
   return {
     labels: labels.length > 0 ? labels : ["unclassified"],
@@ -409,6 +431,9 @@ export function classifyClassifierFailure(error: unknown): ClassifierFailure {
     || text.includes("is not valid json")
     || text.includes("unexpected token")
     || text.includes("unexpected end of json")
+    // Any V8 JSON SyntaxError, whatever this release calls it: extractJson
+    // names its own, but a provider SDK parsing its own envelope does not.
+    || text.includes("json at position")
   ) {
     return failure("invalid response", "invalid response");
   }
@@ -441,21 +466,38 @@ export function isModelUnavailableError(error: unknown): boolean {
   return classifyClassifierFailure(error).category === "unavailable";
 }
 
-const RETRYABLE_CATEGORIES: ReadonlySet<ClassifierFailureCategory> = new Set<ClassifierFailureCategory>([
-  "timeout",
-  "rate limit",
-  "server error",
-  "dns",
-  "connection",
-  "network",
-]);
-
 /**
- * Retry the failures a second attempt can actually fix. 5xx and "overloaded"
- * belong here: they are the provider-incident failures the loop exists for, and
- * before this they fell through to a single attempt and a stopped turn. 4xx
- * other than 429/408 stay terminal — a malformed request repeats identically.
+ * How to react to a failure, which is not the same question as whether it is
+ * the reviewer's fault:
+ *
+ * - `delayed` — a remote condition that needs wall-clock time to clear (a 5xx,
+ *   a rate limit, a dropped socket). Backing off is the whole point.
+ * - `immediate` — the call completed and the reply was wrong. Nothing is
+ *   healing in the background, and the next attempt carries the malformed reply
+ *   and the validation error back to the reviewer, so it is a genuinely
+ *   different prompt. Sleeping here only adds latency to every tool call.
+ * - `fatal` — a second identical attempt fails identically: bad auth, an
+ *   unknown model, a 4xx other than 429/408, an aborted review.
  */
+export type ClassifierRetryClass = "immediate" | "delayed" | "fatal";
+
+const RETRY_CLASSES: Record<ClassifierFailureCategory, ClassifierRetryClass> = {
+  timeout: "delayed",
+  "rate limit": "delayed",
+  "server error": "delayed",
+  dns: "delayed",
+  connection: "delayed",
+  network: "delayed",
+  "invalid response": "immediate",
+  unavailable: "fatal",
+  aborted: "fatal",
+  error: "fatal",
+};
+
+export function classifierRetryClass(error: unknown): ClassifierRetryClass {
+  return RETRY_CLASSES[classifyClassifierFailure(error).category];
+}
+
 export function isRetryableClassifierError(error: unknown): boolean {
-  return RETRYABLE_CATEGORIES.has(classifyClassifierFailure(error).category);
+  return classifierRetryClass(error) !== "fatal";
 }
