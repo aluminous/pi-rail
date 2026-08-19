@@ -52,6 +52,15 @@ describe("judge system prompt", () => {
   it("is explicitly per-action", () => {
     assert.match(JUDGE_SYSTEM_PROMPT, /never a standing approval/);
   });
+
+  it("frames an ask as an escalation with two fields, never a question or an echo", () => {
+    assert.match(JUDGE_SYSTEM_PROMPT, /an approval escalation, not a question/);
+    assert.match(JUDGE_SYSTEM_PROMPT, /Never phrase either field as a question/);
+    assert.match(JUDGE_SYSTEM_PROMPT, /Never restate the raw command text/);
+    assert.match(JUDGE_SYSTEM_PROMPT, /Never quote or paraphrase the user's messages/);
+    assert.match(JUDGE_SYSTEM_PROMPT, /\{"decision":"allow\|deny","reason":"short reason"\}/);
+    assert.match(JUDGE_SYSTEM_PROMPT, /\{"decision":"ask","action":"what it does","risk":"why it needs approval"\}/);
+  });
 });
 
 describe("parseNamerResult", () => {
@@ -104,10 +113,34 @@ describe("parseNamerResult", () => {
 });
 
 describe("parseJudgeResult", () => {
-  it("parses a well-formed verdict", () => {
-    const result = parseJudgeResult('{"decision":"ask","reason":"push to a remote you did not name"}');
+  it("parses allow and deny with a plain one-string reason", () => {
+    const allow = parseJudgeResult('{"decision":"allow","reason":"routine test run inside the project"}');
+    assert.equal(allow.decision, "allow");
+    assert.equal(allow.reason, "routine test run inside the project");
+    assert.equal(allow.ask, undefined);
+
+    const deny = parseJudgeResult('{"decision":"deny","reason":"credential exfiltration"}');
+    assert.equal(deny.decision, "deny");
+    assert.equal(deny.reason, "credential exfiltration");
+  });
+
+  it("parses an ask's two fields and composes the one-string reason from them", () => {
+    const result = parseJudgeResult('{"decision":"ask","action":"pushes the current branch to a remote the user did not name","risk":"off-machine effects beyond the stated task"}');
     assert.equal(result.decision, "ask");
-    assert.equal(result.reason, "push to a remote you did not name");
+    assert.deepEqual(result.ask, {
+      action: "pushes the current branch to a remote the user did not name",
+      risk: "off-machine effects beyond the stated task",
+    });
+    // Single-string consumers (the recent ring, telemetry, traces) keep their
+    // schema: the composed reason carries both fields for them.
+    assert.equal(result.reason, "pushes the current branch to a remote the user did not name — off-machine effects beyond the stated task");
+  });
+
+  it("fails an ask missing either field, so the retry can demand both", () => {
+    assert.throws(() => parseJudgeResult('{"decision":"ask","reason":"did you mean to push?"}'), /invalid judge ask: missing "action"/);
+    assert.throws(() => parseJudgeResult('{"decision":"ask","action":"pushes to origin"}'), /invalid judge ask: missing "risk"/);
+    assert.throws(() => parseJudgeResult('{"decision":"ask","action":"  ","risk":"off-machine effects"}'), /invalid judge ask: missing "action"/);
+    assert.throws(() => parseJudgeResult('{"decision":"ask","action":"pushes to origin","risk":42}'), /invalid judge ask: missing "risk"/);
   });
 
   it("rejects unknown decisions and blank reasons instead of guessing", () => {
@@ -136,7 +169,7 @@ describe("error classification", () => {
     }
     // The call already completed; only the reply was wrong, and the next
     // attempt carries the correction. Sleeping would be latency for nothing.
-    for (const message of ["reviewer did not return JSON", "invalid namer labels: expected an array", "invalid judge decision"]) {
+    for (const message of ["reviewer did not return JSON", "invalid namer labels: expected an array", "invalid judge decision", 'invalid judge ask: missing "action" (what the command or edit does, in plain terms)']) {
       assert.equal(classifierRetryClass(new Error(message)), "immediate", message);
     }
     // A second identical attempt fails identically.

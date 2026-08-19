@@ -15,6 +15,7 @@ const model = { provider: "test", id: "fake-model" } as Model<Api>;
 const NAME_READ = '{"labels":["read-project"]}';
 const NAME_EXFIL = '{"labels":["credentials","off-machine-effects"]}';
 const JUDGE_DENY = '{"decision":"deny","reason":"credential exfiltration"}';
+const JUDGE_ASK = '{"decision":"ask","action":"reads the private SSH key","risk":"credential material outside the project"}';
 
 type ScriptStep = string | Error | "hang" | { errorMessage: string };
 
@@ -148,6 +149,34 @@ describe("judge", () => {
     await runNaming({ io, model, config, toolName: "bash", input: { command: "ls" } });
     await runJudging({ io, model, config, toolName: "bash", input: { command: "ls" }, labels: ["unclassified"] });
     assert.notEqual(calls[0]?.systemPrompt, calls[1]?.systemPrompt);
+  });
+
+  it("returns an ask's two fields plus the composed one-string reason", async () => {
+    const { io, calls } = makeIO([JUDGE_ASK]);
+    const result = await runJudging({
+      io,
+      model,
+      config: testConfig(),
+      toolName: "bash",
+      input: { command: "cat ~/.ssh/id_rsa" },
+      labels: ["credentials"],
+    });
+    assert.equal(result.decision, "ask");
+    assert.deepEqual(result.ask, { action: "reads the private SSH key", risk: "credential material outside the project" });
+    assert.equal(result.reason, "reads the private SSH key — credential material outside the project");
+    assert.equal(calls.length, 1);
+  });
+
+  it("retries an ask missing a field immediately, feeding the demand back to the reviewer", async () => {
+    // The reason-shaped ask is the exact failure the two-field protocol
+    // replaced: a question aimed at the user instead of the two labeled lines.
+    const { io, calls, sleeps } = makeIO(['{"decision":"ask","reason":"did you mean to read the key?"}', JUDGE_ASK]);
+    const result = await runJudging({ io, model, config: testConfig(), toolName: "bash", input: { command: "cat ~/.ssh/id_rsa" }, labels: ["credentials"] });
+    assert.equal(result.decision, "ask");
+    assert.deepEqual(result.ask, { action: "reads the private SSH key", risk: "credential material outside the project" });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(sleeps, [], "a protocol violation is an immediate retry: nothing remote is waiting to clear");
+    assert.ok(calls[1]!.text.includes('invalid judge ask: missing "action"'), "the retry says which field was missing");
   });
 });
 

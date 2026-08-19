@@ -179,12 +179,12 @@ describe("/rail test dry runs", () => {
     const { ctx, widgets } = fakeCtx({ model: { provider: "test", id: "fake-model" } });
     const complete = fakeComplete([
       '{"labels":["local-destructive"]}',
-      '{"decision":"ask","reason":"delete the build directory?"}',
+      '{"decision":"ask","action":"deletes the build directory","risk":"destroys local build output"}',
     ]);
     await createRailTest({ state, completeFn: complete })("rm -rf build", ctx);
     const report = reportOf(widgets);
     assert.match(report, /local-destructive → judge \(default\)/);
-    assert.match(report, /judge: would ask — delete the build directory\?/);
+    assert.match(report, /judge: would ask — deletes the build directory — destroys local build output/);
     assert.match(report, /verdict: would ask the user \(judge\)/);
   });
 

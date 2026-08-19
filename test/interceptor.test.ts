@@ -317,6 +317,38 @@ describe("commands.classify labelling", () => {
     assert.equal(state.recent[0]?.decision, "stop", "the judge's recent-decision feed must not read this as a refusal");
   });
 
+  it("renders a judge ask as two labeled lines, keeping the composed reason for the ring", async () => {
+    const state = classifyState({ disposition: "judge" });
+    const { complete, seen } = reviewer(['{"decision":"ask","action":"deletes the api pod in the current cluster context","risk":"cluster state the session cwd does not cover"}']);
+    const prompts: string[] = [];
+    const ctx = reviewingCtx() as unknown as Record<string, any>;
+    ctx.hasUI = true;
+    ctx.ui.select = async (prompt: string) => {
+      prompts.push(prompt);
+      return "Allow";
+    };
+    const result = await interceptToolCall(
+      { toolName: "bash", input: { command: "kubectl delete pod api" } },
+      ctx as unknown as ExtensionContext,
+      state,
+      complete,
+    );
+    assert.equal(result, undefined, "the user approved");
+    assert.equal(seen.calls, 1);
+    // The dialog gets the two fields as labeled lines — not the composed
+    // string, and not the raw command, which the subject line already shows.
+    assert.match(prompts[0]!, /Rail judge asks for approval/);
+    assert.match(prompts[0]!, /What it does: deletes the api pod in the current cluster context\nWhy it's an ask: cluster state the session cwd does not cover/);
+    assert.ok(!prompts[0]!.includes("deletes the api pod in the current cluster context — cluster"), "the dialog must not show the composed one-string form");
+    // Single-string consumers keep one composed reason: "action — risk".
+    assert.equal(
+      state.classifier.lastDecision?.reason,
+      "deletes the api pod in the current cluster context — cluster state the session cwd does not cover",
+    );
+    assert.equal(state.recent[0]?.reason, state.classifier.lastDecision?.reason);
+    assert.equal(state.recentJudgements[0]?.reason, state.classifier.lastDecision?.reason);
+  });
+
   it("still runs the judge for a judge class — only the namer's label step is skipped", async () => {
     const state = classifyState({ disposition: "judge" });
     const { complete, seen } = reviewer(['{"decision":"deny","reason":"that context is the production cluster"}']);
@@ -617,7 +649,7 @@ describe("review accounting", () => {
   it("accumulates namer and judge calls against their models and fills both rings", async () => {
     const state = reviewingState();
     // credentials routes to the judge by default; both calls are priced.
-    await interceptToolCall(bash, reviewingCtx(), state, priced(['{"labels":["credentials"]}', '{"decision":"ask","reason":"confirm reading the private key"}'], 0.002));
+    await interceptToolCall(bash, reviewingCtx(), state, priced(['{"labels":["credentials"]}', '{"decision":"ask","action":"reads the private SSH key","risk":"credential material in scope"}'], 0.002));
 
     const rows = modelUsageRows(state.stats);
     assert.deepEqual(rows.map((row) => [row.role, row.model, row.calls]), [["namer", MODEL, 1], ["judge", MODEL, 1]]);
@@ -629,7 +661,7 @@ describe("review accounting", () => {
 
     const judgement = state.recentJudgements[0];
     assert.equal(judgement?.verdict, "ask");
-    assert.equal(judgement?.reason, "confirm reading the private key");
+    assert.equal(judgement?.reason, "reads the private SSH key — credential material in scope", "the ring keeps the composed one-string reason");
     assert.equal(judgement?.model, MODEL);
     assert.equal(judgement?.inputTokens, 10);
 
