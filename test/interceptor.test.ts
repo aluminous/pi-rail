@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, describe, it } from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { startApprovalMailbox } from "../src/approval-mailbox.ts";
 import type { RailBackend } from "../src/backends/types.ts";
 import { capabilityStats } from "../src/capabilities.ts";
 import type { CompleteFn } from "../src/classifier.ts";
 import { interceptToolCall, stopTurnForClassifierFailure, withWorkingMessage } from "../src/interceptor.ts";
+import { deriveRailState } from "../src/session-replay.ts";
 import { createRuntimeState, modelUsageRows } from "../src/state.ts";
 import type { RailErrorTelemetry } from "../src/telemetry.ts";
 import { makeFixtureDir, testConfig, withTempAgentDirAsync } from "./helpers.ts";
@@ -387,6 +388,43 @@ describe("commands.classify labelling", () => {
     const result = await interceptToolCall({ toolName: "bash", input: { command: "kubectl delete pod api" } }, reviewingCtx(), state);
     assert.equal(result?.block, true);
     assert.match(result.reason, /k8s-ops/);
+  });
+
+  it("persists records that session replay derives back into the same memory", async () => {
+    // The drift guard for the derive-from-branch design: run a real flow, wrap
+    // what it persisted as branch entries, and require replay to reproduce the
+    // live state (timestamps aside — replay stamps entry time, live stamps now).
+    const state = classifyState({ disposition: "ask" });
+    const captured: unknown[] = [];
+    state.appendEntry = (customType, data) => {
+      assert.equal(customType, "rail");
+      captured.push(structuredClone(data));
+    };
+    const approveCtx = reviewingCtx(["Allow with comment"]) as unknown as Record<string, any>;
+    approveCtx.ui.input = async () => "deploys are expected here";
+    await interceptToolCall({ toolName: "bash", input: { command: "kubectl apply -f deploy.yaml" } }, approveCtx as unknown as ExtensionContext, state, reviewer().complete);
+    const denyCtx = reviewingCtx(["Deny"]);
+    const denied = await interceptToolCall({ toolName: "bash", input: { command: "kubectl delete ns prod" } }, denyCtx, state, reviewer().complete);
+    assert.equal(denied?.block, true);
+    assert.equal(captured.length, 2);
+
+    const entries = captured.map((data, index) => ({
+      type: "custom",
+      id: `r${index}`,
+      parentId: null,
+      timestamp: "2026-08-19T10:00:00.000Z",
+      customType: "rail",
+      data,
+    }));
+    const derived = deriveRailState(entries as unknown as SessionEntry[]);
+    const timeless = <T extends { at: number }>(rows: T[]) => rows.map(({ at, ...rest }) => rest);
+    assert.deepEqual(timeless(derived.recent), timeless(state.recent));
+    assert.deepEqual(timeless(derived.recentClassifications), timeless(state.recentClassifications));
+    assert.deepEqual(derived.sessionGuidance, state.classifier.sessionGuidance);
+    assert.equal(derived.lastDecision?.decision, state.classifier.lastDecision?.decision);
+    assert.equal(derived.lastDecision?.reason, state.classifier.lastDecision?.reason);
+    // Turn counters are the one deliberate difference: per-turn, never per-branch.
+    assert.deepEqual(derived.stats, { ...state.stats, turnRuleHits: 0, turnClassifierHits: 0, turnClassifierDenials: 0, turnBlocked: 0 });
   });
 });
 

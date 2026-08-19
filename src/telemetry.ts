@@ -1,15 +1,30 @@
-// Rail decision telemetry. Records every rail decision as a `custom` entry
-// in pi's own session log (customType "rail"; "guard" before the rename, still
-// read by eval/session-stats.ts) so real sessions become a
-// corpus for analyzing and improving the classifier. Entries sit next to the
-// tool call they judged, do not participate in LLM context, and are written
-// best-effort: telemetry must never block, delay, or break a tool call.
+// Rail decision records. Every rail decision lands as a `custom` entry in
+// pi's own session log (customType "rail"; "guard" before the rename, still
+// read by eval/session-stats.ts). The records serve two masters:
+//
+// 1. Session memory. The rail's own derived state — recent-decisions ring,
+//    session guidance, stats — is a function of the current session branch
+//    (src/session-replay.ts): /tree navigation, /fork, and resume all rebuild
+//    it from these entries, which live in the tree exactly where they
+//    happened. The memory core of each record (kind, tool, decision/outcome,
+//    labels, reason, userAnswer, comment) is therefore ALWAYS written,
+//    regardless of the telemetry setting: the rail cannot let a privacy
+//    preference amputate its own memory.
+// 2. Telemetry. Real sessions become a corpus for analyzing and improving
+//    the classifier. The `classifier.telemetry` setting gates only this extra
+//    detail — projections, token usage, latency, models — not the memory core.
+//
+// Entries sit next to the tool call they judged, do not participate in LLM
+// context, and are written best-effort: logging must never block, delay, or
+// break a tool call.
 //
 // Privacy: the session file already contains the full tool call input and its
 // result, so a minimized projection adds little exposure — but sessions can be
 // shared (`pi share` uploads the whole file), so the default "minimal" tier
 // truncates projected values. "full" keeps complete projections and policy
-// summaries for eval-case extraction; "off" writes nothing.
+// summaries for eval-case extraction; "off" strips everything but the memory
+// core (the reasons the memory core keeps are strings the user already saw in
+// dialogs and blocks).
 import type { CapabilityId, Disposition } from "./capabilities.ts";
 import type { RailDecision, RailOutcome, ReviewProjection } from "./classifier-protocol.ts";
 import type { ResolvedRailConfig } from "./config.ts";
@@ -34,7 +49,7 @@ export type RailTelemetryMode = "off" | "minimal" | "full";
 export type UserAnswer = "approved" | "denied" | "stopped";
 
 export interface RailTelemetryBase {
-  kind: "review" | "block" | "approval" | "error";
+  kind: "review" | "block" | "approval" | "error" | "guidance";
   tool: string;
 }
 
@@ -42,7 +57,10 @@ export interface RailTelemetryBase {
 export interface RailJudgeTelemetry {
   model?: string;
   verdict: RailDecision;
-  latencyMs: number;
+  /** The judge's own explanation — memory core: it is what the judgement ring replays. */
+  reason: string;
+  /** Detail tier only; absent when telemetry is off. */
+  latencyMs?: number;
   attempts?: number;
   usage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
@@ -57,13 +75,32 @@ export interface RailReviewTelemetry extends RailTelemetryBase {
   resolvedDisposition: Disposition;
   /** The label that produced the winning disposition. */
   decidedBy?: CapabilityId;
+  /**
+   * The command or path the call was about (actionTarget, truncated) — memory
+   * core: session replay rebuilds the recent-review rings from it.
+   */
+  target: string;
+  /**
+   * What the approval dialog and session guidance call the action (describeAction
+   * without the tool-name prefix) — memory core: replay rebuilds guidance
+   * entries from it, and it must match what the live path fed addSessionGuidance
+   * or the rebuilt guidance would drift from what the user actually answered.
+   */
+  subject: string;
+  /**
+   * True when a model (namer and/or judge) took part in the decision — memory
+   * core: replay needs it to split rule hits from classifier hits, and it is
+   * not derivable from `model` (a namer call can fail model resolution yet
+   * still review) or from the detail tier (stripped when telemetry is off).
+   */
+  reviewed: boolean;
   /** Content-screen verdict for write/edit calls; absent when the screen did not apply. */
   screenTripped?: boolean;
   /** Quote the namer offered as evidence the user asked for this action. */
   authorizationEvidence?: string;
   attempts?: number;
-  /** Namer latency; 0 when the labels were entirely deterministic. */
-  latencyMs: number;
+  /** Namer latency; 0 when the labels were entirely deterministic. Detail tier: absent when telemetry is off. */
+  latencyMs?: number;
   /** Namer model. */
   model?: string;
   judge?: RailJudgeTelemetry;
@@ -112,15 +149,31 @@ export interface RailErrorTelemetry extends RailTelemetryBase {
   failureKind: string;
   /** Model calls burned before giving up. */
   attempts?: number;
-  latencyMs: number;
+  /** Detail tier only; absent when telemetry is off. */
+  latencyMs?: number;
   model?: string;
+}
+
+/**
+ * `/rail guide` traffic. Persisted so session replay can rebuild the guidance
+ * ring exactly: volunteered guidance and clears live in the tree at the point
+ * they happened, so /tree navigation rewinds (and un-rewinds) them like any
+ * approval comment.
+ */
+export interface RailGuidanceTelemetry extends RailTelemetryBase {
+  kind: "guidance";
+  /** The volunteered guidance text; absent on a clear. */
+  text?: string;
+  /** True when the user dropped every guidance entry (`/rail guide clear`). */
+  cleared?: boolean;
 }
 
 export type RailTelemetryRecord =
   | RailReviewTelemetry
   | RailBlockTelemetry
   | RailApprovalTelemetry
-  | RailErrorTelemetry;
+  | RailErrorTelemetry
+  | RailGuidanceTelemetry;
 
 export function telemetryMode(config: ResolvedRailConfig): RailTelemetryMode {
   return config.classifier.telemetry;
@@ -137,8 +190,18 @@ function truncateStrings(value: unknown, limit: number): unknown {
   return value;
 }
 
-/** Applies the configured privacy tier to a record about to be persisted. */
+/**
+ * Applies the configured privacy tier to a record about to be persisted.
+ *
+ * "off" does not mean "write nothing" — the memory core is what session
+ * replay (src/session-replay.ts) rebuilds the rail's derived state from, so
+ * it survives every tier. "off" strips the telemetry detail: projections,
+ * token usage, latency, models, attempts, screen verdicts, and the namer's
+ * evidence quote. The keys are dropped rather than zeroed so a corpus reader
+ * cannot mistake "not recorded" for "measured as zero".
+ */
 export function redactTelemetryRecord(record: RailTelemetryRecord, mode: RailTelemetryMode): RailTelemetryRecord {
+  if (mode === "off") return stripToMemoryCore(record);
   if (mode === "full" || record.kind !== "review" || !record.projection) return record;
   return {
     ...record,
@@ -150,16 +213,47 @@ export function redactTelemetryRecord(record: RailTelemetryRecord, mode: RailTel
   };
 }
 
+/** The fields session replay feeds on, and nothing else. Block, approval, and guidance records are all core already. */
+function stripToMemoryCore(record: RailTelemetryRecord): RailTelemetryRecord {
+  if (record.kind === "review") {
+    return {
+      kind: "review",
+      tool: record.tool,
+      decision: record.decision,
+      labels: record.labels,
+      resolvedDisposition: record.resolvedDisposition,
+      ...(record.decidedBy !== undefined ? { decidedBy: record.decidedBy } : {}),
+      target: record.target,
+      subject: record.subject,
+      reviewed: record.reviewed,
+      reason: record.reason,
+      ...(record.judge ? { judge: { verdict: record.judge.verdict, reason: record.judge.reason } } : {}),
+      ...(record.userAnswer !== undefined ? { userAnswer: record.userAnswer } : {}),
+      ...(record.userComment !== undefined ? { userComment: record.userComment } : {}),
+      ...(record.forwarded !== undefined ? { forwarded: record.forwarded } : {}),
+    };
+  }
+  if (record.kind === "error") {
+    return { kind: "error", tool: record.tool, reason: record.reason, failureKind: record.failureKind };
+  }
+  return record;
+}
+
 /**
  * Persists a rail decision record to the session log via pi.appendEntry.
- * Never throws: session logging is observability, not enforcement, and
- * ephemeral sessions silently skip persistence inside SessionManager.
+ * Always writes when a session is wired: the records are the rail's own
+ * memory (session replay derives state.recent, guidance, and stats from
+ * them), so the telemetry setting only chooses the redaction tier — it can
+ * no longer suppress the write. Never throws: session logging is
+ * observability, not enforcement, and ephemeral sessions silently skip
+ * persistence inside SessionManager.
  */
 export function appendRailTelemetry(state: RuntimeState, record: RailTelemetryRecord): void {
-  const config = state.config;
-  if (!config || telemetryMode(config) === "off" || !state.appendEntry) return;
+  if (!state.appendEntry) return;
+  // No config (a not-yet-initialized session) redacts like "off": memory core only.
+  const mode = state.config ? telemetryMode(state.config) : "off";
   try {
-    state.appendEntry(RAIL_TELEMETRY_TYPE, redactTelemetryRecord(record, telemetryMode(config)));
+    state.appendEntry(RAIL_TELEMETRY_TYPE, redactTelemetryRecord(record, mode));
   } catch {
     // Best-effort: a session that cannot persist entries must not affect the tool call.
   }
