@@ -749,9 +749,9 @@ approvals, and reviewer errors — is recorded as a `custom` entry
 (`customType: "rail"`) in pi's own session log, next to the tool call it
 judged. Entries do not participate in LLM context and are written
 best-effort: telemetry never blocks or breaks a tool call, and ephemeral
-sessions simply skip persistence. Sessions recorded before the rename carry
-`customType: "guard"`; the analysis tooling reads both, so an existing corpus
-stays usable.
+sessions simply skip persistence. (Sessions recorded before the pi-guard →
+pi-rail rename carry `customType: "guard"` and are no longer read by the
+analysis tooling or session replay.)
 
 These records are also the rail's own memory: session guidance, the recent
 decisions shown to the judge, and the status counters are **derived from the

@@ -1,8 +1,10 @@
 // Aggregates rail decision telemetry from pi's own session logs. Scans all
 // session files under the pi agent dir for `custom` entries written by the
-// rail extension (customType "rail", or "guard" before the rename) and
-// reports decision rates, fast-path
+// rail extension (customType "rail") and reports decision rates, fast-path
 // usage, latency, token cost, retries, and errors across real sessions.
+// Pre-rename ("guard") and pre-stop-outcome records are deliberately not
+// read: only new sessions matter, and dual-shape decoding cost more than
+// the historical corpora were worth.
 //
 // Usage:
 //   node eval/session-stats.ts              # human-readable summary
@@ -16,7 +18,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { RAIL_TELEMETRY_TYPES, type RailTelemetryRecord } from "../src/telemetry.ts";
+import { RAIL_TELEMETRY_TYPE, type RailTelemetryRecord } from "../src/telemetry.ts";
 
 interface SessionEntry {
   type?: string;
@@ -87,9 +89,7 @@ for (const file of files) {
   const entries = parseEntries(file);
   fileEntries.set(file, entries);
   entries.forEach((entry, index) => {
-    // Both customTypes: sessions recorded before the pi-guard → pi-rail rename
-    // still carry "guard", and the corpus is the point of this script.
-    if (entry.type === "custom" && RAIL_TELEMETRY_TYPES.includes(entry.customType ?? "") && entry.data && typeof entry.data === "object") {
+    if (entry.type === "custom" && entry.customType === RAIL_TELEMETRY_TYPE && entry.data && typeof entry.data === "object") {
       records.push({ file, index, record: entry.data as RailTelemetryRecord });
     }
   });
@@ -102,17 +102,9 @@ const errors = records.filter((r) => r.record.kind === "error");
 
 const decisions: Record<string, number> = { allow: 0, deny: 0, ask: 0, stop: 0 };
 
-/**
- * Reads the user's answer from either telemetry shape. Sessions recorded before
- * stops became their own outcome carry `userApproved`/`approved` booleans, in
- * which a stopped turn is indistinguishable from a denial — those corpora stay
- * readable, they just cannot report a stop.
- */
-function userAnswerOf(record: { userAnswer?: string; userApproved?: boolean; outcome?: string; approved?: boolean }): string | undefined {
-  const explicit = record.userAnswer ?? record.outcome;
-  if (explicit) return explicit;
-  const legacy = record.userApproved ?? record.approved;
-  return legacy === undefined ? undefined : legacy ? "approved" : "denied";
+/** The user's answer: `userAnswer` on reviews, `outcome` on path approvals. */
+function userAnswerOf(record: { userAnswer?: string; outcome?: string }): string | undefined {
+  return record.userAnswer ?? record.outcome;
 }
 const models = new Map<string, number>();
 const labelCounts = new Map<string, number>();

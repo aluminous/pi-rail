@@ -24,13 +24,6 @@ export const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
 export const SUBAGENT_ACK_EVENT = "subagent:acknowledge-extension";
 /** Id acknowledged with; the parent-side check also accepts an "@version" suffix. */
 export const RAIL_ACK_ID = "pi-rail";
-/**
- * The id acknowledged with before the pi-guard → pi-rail rename. Never emitted
- * again, but still accepted parent-side: a new parent will meet children that
- * loaded an older install, and reading their ack as "no rail" would fire a
- * false "ran without the rail" warning.
- */
-export const LEGACY_RAIL_ACK_ID = "pi-extension-guard";
 
 /** pi-subagents tools whose results carry per-child acknowledgement data. */
 const SUBAGENT_RESULT_TOOLS = new Set(["subagent", "subagent_wait"]);
@@ -69,7 +62,7 @@ function hasRailAck(entry: Record<string, unknown>): boolean {
   const ack = entry.runtimeAcknowledgedExtensions;
   if (!isRecord(ack) || !Array.isArray(ack.ids)) return false;
   const matches = (id: unknown, known: string) => id === known || (typeof id === "string" && id.startsWith(`${known}@`));
-  return ack.ids.some((id) => matches(id, RAIL_ACK_ID) || matches(id, LEGACY_RAIL_ACK_ID));
+  return ack.ids.some((id) => matches(id, RAIL_ACK_ID));
 }
 
 /**

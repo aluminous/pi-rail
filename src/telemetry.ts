@@ -32,14 +32,6 @@ import type { RuntimeState } from "./state.ts";
 import { textPrefix } from "./util.ts";
 
 export const RAIL_TELEMETRY_TYPE = "rail";
-/**
- * The customType written before the pi-guard → pi-rail rename. Never written
- * again; readers that mine session corpora (eval/session-stats.ts) must accept
- * it, or every session recorded before the rename stops being analyzable.
- */
-export const LEGACY_RAIL_TELEMETRY_TYPE = "guard";
-/** Both customTypes a rail telemetry record can appear under in a session log. */
-export const RAIL_TELEMETRY_TYPES: readonly string[] = [RAIL_TELEMETRY_TYPE, LEGACY_RAIL_TELEMETRY_TYPE];
 
 const MINIMAL_VALUE_LIMIT = 200;
 
