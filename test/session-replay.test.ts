@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { addSessionGuidance, type ClassifierState } from "../src/classifier.ts";
+import { createCapabilityStats } from "../src/capabilities.ts";
 import { applyDerivedRailState, deriveRailState } from "../src/session-replay.ts";
 import { createRuntimeState, lastRailDecision, recentClassifications, recentEvents, recentJudgements } from "../src/state.ts";
 import type { RailApprovalTelemetry, RailReviewTelemetry, RailTelemetryRecord } from "../src/telemetry.ts";
@@ -208,6 +209,94 @@ describe("deriveRailState", () => {
     assert.deepEqual(recentEvents(derived), []);
   });
 
+  it("rebuilds per-class hits, decided, and outcome buckets from review records", () => {
+    const derived = deriveRailState([
+      railEntry(review()),
+      railEntry(review({ decision: "deny", resolvedDisposition: "deny", labels: ["credentials"], decidedBy: "credentials" })),
+      railEntry(review({ decision: "allow", resolvedDisposition: "ask", labels: ["off-machine-effects"], decidedBy: "off-machine-effects", userAnswer: "approved" })),
+      railEntry(review({ decision: "stop", resolvedDisposition: "ask", labels: ["off-machine-effects"], decidedBy: "off-machine-effects", userAnswer: "stopped" })),
+    ]);
+    assert.equal(derived.capabilityStats["run-dev-tools"]?.hits, 1);
+    assert.equal(derived.capabilityStats["run-dev-tools"]?.decided, 1);
+    assert.equal(derived.capabilityStats["run-dev-tools"]?.outcomes.allow, 1);
+    assert.equal(derived.capabilityStats["credentials"]?.outcomes.deny, 1);
+    assert.equal(derived.capabilityStats["off-machine-effects"]?.hits, 2);
+    assert.equal(derived.capabilityStats["off-machine-effects"]?.outcomes["ask-approved"], 1);
+    assert.equal(derived.capabilityStats["off-machine-effects"]?.outcomes["ask-stopped"], 1);
+  });
+
+  it("derives judge outcomes from the judge sub-object, which survives every redaction tier", () => {
+    const judged = (verdict: "allow" | "deny" | "ask", overrides: Partial<RailReviewTelemetry>) =>
+      review({ resolvedDisposition: "judge", labels: ["credentials"], decidedBy: "credentials", judge: { verdict, reason: "r" }, ...overrides });
+    const derived = deriveRailState([
+      railEntry(judged("allow", { decision: "allow" })),
+      railEntry(judged("deny", { decision: "deny" })),
+      railEntry(judged("ask", { decision: "allow", userAnswer: "approved" })),
+      // The judge asked and nobody could answer: live files that as ask-denied, not judge-deny.
+      railEntry(judged("ask", { decision: "deny" })),
+      // Judge failure fell back to ask, then nobody could answer: no judge
+      // object at all, resolvedDisposition still "judge" — also ask-denied.
+      railEntry(review({ resolvedDisposition: "judge", labels: ["credentials"], decidedBy: "credentials", decision: "deny" })),
+    ]);
+    const stats = derived.capabilityStats["credentials"];
+    assert.equal(stats?.outcomes["judge-allow"], 1);
+    assert.equal(stats?.outcomes["judge-deny"], 1);
+    assert.equal(stats?.outcomes["judge-ask"], 1);
+    assert.equal(stats?.outcomes["ask-denied"], 2);
+    assert.equal(stats?.hits, 5);
+  });
+
+  it("rebuilds the screen ✗/✓ columns from the promoted screenTripped field", () => {
+    const derived = deriveRailState([
+      railEntry(review({ tool: "write", labels: ["modify-project"], decidedBy: "modify-project", screenTripped: false })),
+      railEntry(review({ tool: "write", labels: ["persistence"], decidedBy: "persistence", decision: "deny", resolvedDisposition: "deny", screenTripped: true })),
+      // No screenTripped at all: the screen never looked, neither column moves.
+      railEntry(review()),
+    ]);
+    assert.equal(derived.capabilityStats["modify-project"]?.screenClean, 1);
+    assert.equal(derived.capabilityStats["modify-project"]?.screenTripped, 0);
+    assert.equal(derived.capabilityStats["persistence"]?.screenTripped, 1);
+    assert.equal(derived.capabilityStats["run-dev-tools"]?.screenClean, 0);
+    assert.equal(derived.capabilityStats["run-dev-tools"]?.screenTripped, 0);
+  });
+
+  it("replays a labeled path-approval record into the per-class stats", () => {
+    const routed = approval({ labels: ["modify-system"], decidedBy: "modify-system", screenTripped: false });
+    const answered = deriveRailState([railEntry(routed)]);
+    assert.equal(answered.capabilityStats["modify-system"]?.hits, 1);
+    assert.equal(answered.capabilityStats["modify-system"]?.decided, 1);
+    assert.equal(answered.capabilityStats["modify-system"]?.outcomes["ask-approved"], 1);
+    assert.equal(answered.capabilityStats["modify-system"]?.screenClean, 1);
+    assert.equal(answered.stats.asked, 1, "a routed dialog still counts as an ask");
+
+    // A remembered record is session path memory answering: the per-class
+    // stats move, but no dialog counters and no ring events fired live.
+    const remembered = deriveRailState([railEntry({ ...routed, remembered: true })]);
+    assert.equal(remembered.capabilityStats["modify-system"]?.hits, 1);
+    assert.equal(remembered.capabilityStats["modify-system"]?.outcomes["ask-approved"], 1);
+    assert.equal(remembered.stats.asked, 0, "no dialog was shown");
+    assert.deepEqual(recentEvents(remembered), [], "and no ring events fired");
+
+    // A plain stage-1 path ask carries no labels and moves no per-class stats.
+    const plain = deriveRailState([railEntry(approval())]);
+    assert.deepEqual(plain.capabilityStats, {});
+  });
+
+  it("rewinds a denied class's stats with the branch and restores them going forward", () => {
+    const prefix = [railEntry(review(), "2026-08-19T09:00:00.000Z")];
+    const full = [
+      ...prefix,
+      railEntry(review({ decision: "deny", resolvedDisposition: "deny", labels: ["credentials"], decidedBy: "credentials" }), "2026-08-19T09:05:00.000Z"),
+    ];
+    const atLeaf = deriveRailState(full);
+    assert.equal(atLeaf.capabilityStats["credentials"]?.outcomes.deny, 1);
+    const rewound = deriveRailState(prefix);
+    assert.equal(rewound.capabilityStats["credentials"], undefined, "the denial's row rewound away with the branch");
+    assert.equal(rewound.capabilityStats["run-dev-tools"]?.hits, 1, "the prefix's own stats stay");
+    const forward = deriveRailState(full);
+    assert.deepEqual(forward, atLeaf, "navigating forward restores the leaf exactly");
+  });
+
   it("round-trips A→B→A navigation: deriving branch A again restores it exactly", () => {
     const prefix = [railEntry(review({ reason: "shared prefix" }), "2026-08-19T09:00:00.000Z")];
     const branchA = [
@@ -249,6 +338,7 @@ describe("applyDerivedRailState", () => {
     assert.equal(recentEvents(state)[0]?.decision, "deny");
     assert.equal(state.classifier.sessionGuidance?.length, 1);
     assert.equal(lastRailDecision(state)?.decision, "deny");
+    assert.equal(state.capabilities.stats["run-dev-tools"]?.outcomes["ask-denied"], 1, "the capabilities table follows the branch too");
     assert.deepEqual(state.traces, [], "traces carry never-persisted stage detail and must not describe a left branch");
   });
 
@@ -260,6 +350,9 @@ describe("applyDerivedRailState", () => {
     state.approvals.write.push("/tmp/approved");
     state.classifier.modelOverride = "openrouter/haiku";
     state.classifier.enabledOverride = false;
+    state.capabilities.overrides["local-destructive"] = "deny";
+    // Stats from before navigation: branch memory, so replay replaces them.
+    state.capabilities.stats["stale-class"] = createCapabilityStats();
     const capabilities = state.capabilities;
     const dialogQueue = state.dialogQueue;
     applyDerivedRailState(state, [railEntry(review())]);
@@ -269,7 +362,10 @@ describe("applyDerivedRailState", () => {
     assert.deepEqual(state.approvals.write, ["/tmp/approved"], "path approvals are session-scoped, not branch-derived");
     assert.equal(state.classifier.modelOverride, "openrouter/haiku", "classifier settings are settings, not memory");
     assert.equal(state.classifier.enabledOverride, false);
-    assert.equal(state.capabilities, capabilities, "session disposition overrides ride outside replay");
+    assert.equal(state.capabilities, capabilities, "the CapabilityState object keeps its identity");
+    assert.equal(state.capabilities.overrides["local-destructive"], "deny", "disposition overrides are settings, not memory");
+    assert.equal(state.capabilities.stats["stale-class"], undefined, "…but the stats half is branch memory and was rebuilt");
+    assert.equal(state.capabilities.stats["run-dev-tools"]?.hits, 1);
     assert.equal(state.dialogQueue, dialogQueue);
   });
 });

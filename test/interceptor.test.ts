@@ -456,6 +456,7 @@ describe("commands.classify labelling", () => {
     assert.deepEqual(timeless(recentClassifications(derived)), timeless(recentClassifications(state)));
     assert.deepEqual(timeless(recentJudgements(derived)), timeless(recentJudgements(state)));
     assert.deepEqual(derived.sessionGuidance, state.classifier.sessionGuidance);
+    assert.deepEqual(derived.capabilityStats, state.capabilities.stats, "per-class stats are branch memory and must replay exactly");
     assert.equal(lastRailDecision(derived)?.decision, lastRailDecision(state)?.decision);
     assert.equal(lastRailDecision(derived)?.reason, lastRailDecision(state)?.reason);
     // Turn counters are the one deliberate difference: per-turn, never per-branch.
@@ -517,6 +518,36 @@ describe("out-of-roots writes resolve through modify-system", () => {
     assert.match(result.reason, /approval denied/);
     assert.equal(state.stats.asked, 1, "the path dialog owns the counters; the table must not double-count");
     assert.equal(state.stats.ruleHits, 1);
+  });
+
+  it("persists records that replay the flow's per-class stats, remembered repeats included", async () => {
+    const state = railState(testConfig((c) => {
+      c.filesystem.allowWrite = ["."];
+      c.classifier.enabled = false;
+    }));
+    const captured: unknown[] = [];
+    state.appendEntry = (customType, data) => {
+      assert.equal(customType, "rail");
+      captured.push(structuredClone(data));
+    };
+    const ctx = interactiveCtx(cwd, ["Allow"]);
+    assert.equal(await interceptToolCall({ toolName: "write", input: { path: outside, content: "x" } }, ctx, state), undefined);
+    // The second write is answered from session path memory: no dialog, but
+    // the per-class stats still move live, so a `remembered` record must let
+    // replay move them identically.
+    assert.equal(await interceptToolCall({ toolName: "write", input: { path: outside, content: "y" } }, ctx, state), undefined);
+    assert.equal(state.capabilities.stats["modify-system"]?.hits, 2, "both writes hit the class live");
+
+    const entries = captured.map((data, index) => ({
+      type: "custom",
+      id: `p${index}`,
+      parentId: null,
+      timestamp: "2026-08-19T10:00:00.000Z",
+      customType: "rail",
+      data,
+    }));
+    const derived = deriveRailState(entries as unknown as SessionEntry[]);
+    assert.deepEqual(derived.capabilityStats, state.capabilities.stats);
   });
 
   it("escape on the path ask stops the turn rather than denying", async () => {

@@ -7,9 +7,9 @@
 //    (src/session-replay.ts): /tree navigation, /fork, and resume all rebuild
 //    it from these entries, which live in the tree exactly where they
 //    happened. The memory core of each record (kind, tool, decision/outcome,
-//    labels, reason, userAnswer, comment) is therefore ALWAYS written,
-//    regardless of the telemetry setting: the rail cannot let a privacy
-//    preference amputate its own memory.
+//    labels, reason, userAnswer, comment, screen verdict) is therefore
+//    ALWAYS written, regardless of the telemetry setting: the rail cannot
+//    let a privacy preference amputate its own memory.
 // 2. Telemetry. Real sessions become a corpus for analyzing and improving
 //    the classifier. The `classifier.telemetry` setting gates only this extra
 //    detail — projections, token usage, latency, models — not the memory core.
@@ -86,7 +86,12 @@ export interface RailReviewTelemetry extends RailTelemetryBase {
    * still review) or from the detail tier (stripped when telemetry is off).
    */
   reviewed: boolean;
-  /** Content-screen verdict for write/edit calls; absent when the screen did not apply. */
+  /**
+   * Content-screen verdict for write/edit calls; absent when the screen did
+   * not apply — memory core: replay rebuilds the per-class screen ✗/✓ columns
+   * from it, and "absent" vs false is load-bearing (absent means the screen
+   * never looked, false means it looked and found the content clean).
+   */
   screenTripped?: boolean;
   /** Quote the namer offered as evidence the user asked for this action. */
   authorizationEvidence?: string;
@@ -123,6 +128,26 @@ export interface RailApprovalTelemetry extends RailTelemetryBase {
   /** Tri-state for the same reason as {@link RailReviewTelemetry.userAnswer}: a stop is not a denial. */
   outcome: UserAnswer;
   reason: string;
+  /**
+   * Capability labels, when the disposition table routed an out-of-roots
+   * write's `ask` to this dialog. That flow ends here without a review record
+   * (askPathApproval owns the counters), so this record is the only place the
+   * per-class stats can replay from — memory core, like the review record's
+   * labels. Absent for plain stage-1 path asks, which carry no labels live.
+   */
+  labels?: CapabilityId[];
+  /** The label that produced the ask, when the table routed here; memory core with `labels`. */
+  decidedBy?: CapabilityId;
+  /** Content-screen verdict for the routed write; memory core for the same reason as {@link RailReviewTelemetry.screenTripped}. */
+  screenTripped?: boolean;
+  /**
+   * True when session path memory answered without showing a dialog. Live
+   * records no ask/grant counters, ring events, or guidance for these — only
+   * the per-class stats — so replay needs the marker (memory core) to make
+   * the same distinction. Only capability-routed asks write remembered
+   * records at all; a plain path ask's repeat mutates nothing replayable.
+   */
+  remembered?: boolean;
   /** User comment attached to an allow/deny answer, if any. */
   userComment?: string;
   /** True when the answer came from the parent session via the approval mailbox (this session was a headless child). */
@@ -188,9 +213,9 @@ function truncateStrings(value: unknown, limit: number): unknown {
  * "off" does not mean "write nothing" — the memory core is what session
  * replay (src/session-replay.ts) rebuilds the rail's derived state from, so
  * it survives every tier. "off" strips the telemetry detail: projections,
- * token usage, latency, models, attempts, screen verdicts, and the namer's
- * evidence quote. The keys are dropped rather than zeroed so a corpus reader
- * cannot mistake "not recorded" for "measured as zero".
+ * token usage, latency, models, attempts, and the namer's evidence quote.
+ * The keys are dropped rather than zeroed so a corpus reader cannot mistake
+ * "not recorded" for "measured as zero".
  */
 export function redactTelemetryRecord(record: RailTelemetryRecord, mode: RailTelemetryMode): RailTelemetryRecord {
   if (mode === "off") return stripToMemoryCore(record);
@@ -218,6 +243,10 @@ function stripToMemoryCore(record: RailTelemetryRecord): RailTelemetryRecord {
       target: record.target,
       subject: record.subject,
       reviewed: record.reviewed,
+      // Memory core despite looking like detail: the per-class screen columns
+      // replay from it, and it cannot be re-derived (the screen ran against
+      // content the record deliberately does not keep).
+      ...(record.screenTripped !== undefined ? { screenTripped: record.screenTripped } : {}),
       reason: record.reason,
       ...(record.judge ? { judge: { verdict: record.judge.verdict, reason: record.judge.reason } } : {}),
       ...(record.userAnswer !== undefined ? { userAnswer: record.userAnswer } : {}),

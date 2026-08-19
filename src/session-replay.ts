@@ -21,6 +21,14 @@
 // unparseable is silently skipped — a per-entry guard so one bad record never
 // poisons the whole replay. Old sessions simply replay with whatever matches.
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import {
+  recordCapabilityDecided,
+  recordCapabilityHits,
+  recordCapabilityOutcome,
+  recordScreenVerdict,
+  type CapabilityOutcome,
+  type CapabilityState,
+} from "./capabilities.ts";
 import { addSessionGuidance, addUserGuidance, clearSessionGuidance } from "./classifier.ts";
 import type { AccessKind } from "./policy.ts";
 import {
@@ -39,13 +47,20 @@ import {
   type RailStats,
   type RuntimeState,
 } from "./state.ts";
-import { RAIL_TELEMETRY_TYPE, type RailApprovalTelemetry, type RailErrorTelemetry, type RailGuidanceTelemetry, type RailReviewTelemetry } from "./telemetry.ts";
+import { RAIL_TELEMETRY_TYPE, type RailApprovalTelemetry, type RailErrorTelemetry, type RailGuidanceTelemetry, type RailReviewTelemetry, type UserAnswer } from "./telemetry.ts";
 
 /** The slice of RuntimeState that is a pure function of the session branch. */
 export interface DerivedRailState {
   stats: RailStats;
   /** The rebuilt decision spine; the state.ts views (recentEvents, …) slice it exactly as they slice the live one. */
   decisions: DecisionEntry[];
+  /**
+   * Per-class stats (hits/decided/outcomes/screen verdicts): the
+   * "Capabilities seen this session" table. Only the stats HALF of
+   * state.capabilities — the settings half (overrides, preset, custom
+   * classes) is deliberately not here; see applyDerivedRailState.
+   */
+  capabilityStats: CapabilityState["stats"];
   sessionGuidance: string[] | undefined;
 }
 
@@ -78,6 +93,7 @@ export function deriveRailState(entries: readonly SessionEntry[]): DerivedRailSt
   return {
     stats: scratch.stats,
     decisions: scratch.decisions,
+    capabilityStats: scratch.capabilities.stats,
     sessionGuidance: scratch.classifier.sessionGuidance,
   };
 }
@@ -87,11 +103,14 @@ export function deriveRailState(entries: readonly SessionEntry[]): DerivedRailSt
  *
  * Scope is deliberately narrow — only the branch-derived memory. Process and
  * session infrastructure (approvalMailbox, backend, config, warnings,
- * dialogQueue, liveView) is untouched, as are two session-scoped-by-design
- * stores that are NOT functions of the branch: state.approvals (path
- * approvals hold for the session however the leaf moves) and
- * state.capabilities (session disposition overrides are settings, not
- * memory; their per-class hit counters ride along).
+ * dialogQueue, liveView) is untouched, as is state.approvals — path
+ * approvals are session-scoped by design and hold however the leaf moves.
+ * state.capabilities splits down the middle: its stats half (hits, decided,
+ * outcomes, screen verdicts — what the "Capabilities seen this session"
+ * table shows) is a record of branch decisions and is replaced here, while
+ * its settings half (disposition overrides, the preset, custom classes,
+ * definition edits) is user configuration, not memory, and is never touched
+ * by replay.
  *
  * Stats consequently become per-branch: after navigation the counters
  * describe the current timeline, not everything the process ever did — which
@@ -107,6 +126,9 @@ export function applyDerivedRailState(state: RuntimeState, entries: readonly Ses
   const derived = deriveRailState(entries);
   state.stats = derived.stats;
   state.decisions = derived.decisions;
+  // Stats only: the surrounding CapabilityState (overrides/preset/custom
+  // classes) keeps its identity and its settings.
+  state.capabilities.stats = derived.capabilityStats;
   state.classifier.sessionGuidance = derived.sessionGuidance;
   // Traces carry per-stage detail (policy matches, namer evidence, dialog
   // outcomes) that is never persisted, so they cannot be rebuilt: cleared on
@@ -177,6 +199,8 @@ function replayReview(scratch: RuntimeState, raw: Record<string, unknown>, at: n
   if (record.judge && (!RAIL_DECISIONS.has(record.judge.verdict) || typeof record.judge.reason !== "string")) return;
 
   if (!record.reviewed && record.resolvedDisposition === "allow") recordClassifierSkip(scratch);
+  recordCapabilityOutcome(scratch.capabilities, record.labels, reviewOutcome(record));
+  if (typeof record.screenTripped === "boolean") recordScreenVerdict(scratch.capabilities, record.labels, record.screenTripped);
   recordCapabilityDecision(scratch, record.tool, {
     at,
     target: record.target,
@@ -212,20 +236,56 @@ function replayReview(scratch: RuntimeState, raw: Record<string, unknown>, at: n
 }
 
 /**
+ * Reconstructs the CapabilityOutcome the live finish() recorded, from fields
+ * that survive every redaction tier. The mapping inverts enforceCapabilities:
+ * judge participation is the `judge` sub-object (stripToMemoryCore keeps its
+ * verdict and reason even at "off"), an answered ask is `userAnswer`, and the
+ * one ambiguous shape — decision "deny" with no answer — splits on why: a
+ * judge deny or a table deny is a deny outcome, while anything else was an
+ * ask nobody could answer (headless, mailbox gone), which live files as
+ * ask-denied.
+ */
+function reviewOutcome(record: RailReviewTelemetry): CapabilityOutcome {
+  // A stop is never judge-tagged live: the user interrupted rather than answered.
+  if (record.userAnswer === "stopped") return "ask-stopped";
+  if (record.userAnswer !== undefined) return record.judge ? "judge-ask" : record.userAnswer === "approved" ? "ask-approved" : "ask-denied";
+  if (record.decision === "allow") return record.judge ? "judge-allow" : "allow";
+  if (record.judge) return record.judge.verdict === "deny" ? "judge-deny" : "ask-denied";
+  return record.resolvedDisposition === "deny" ? "deny" : "ask-denied";
+}
+
+/** How the path dialog's tri-state answer lands in per-class outcomes; mirrors PATH_OUTCOMES in the interceptor. */
+const PATH_ASK_OUTCOMES: Record<UserAnswer, CapabilityOutcome> = { approved: "ask-approved", denied: "ask-denied", stopped: "ask-stopped" };
+
+/**
  * Mirrors askPathApproval: one persisted record stands for the whole
  * request→answer exchange, so replay re-runs the same helper sequence the
- * dialog did (requested always; then granted, stopped, or denied).
+ * dialog did (requested always; then granted, stopped, or denied). A
+ * `remembered` record is the exception — session path memory answered without
+ * a dialog, and live records no counters, ring events, or guidance for those,
+ * only the per-class stats.
  */
 function replayApproval(scratch: RuntimeState, raw: Record<string, unknown>, at: number): void {
   if ((raw.access !== "read" && raw.access !== "write") || typeof raw.path !== "string" || !USER_ANSWERS.has(raw.outcome as string)) return;
   const record = raw as unknown as RailApprovalTelemetry;
   const kind = record.access as AccessKind;
-  recordApprovalRequested(scratch, record.tool, kind, record.path, at);
-  if (record.outcome === "approved") recordApprovalGranted(scratch, record.tool, kind, record.path, at);
-  else if (record.outcome === "stopped") recordApprovalStopped(scratch, record.tool, kind, record.path, at);
-  else recordApprovalDenied(scratch);
-  // A stop is not an answer, so it carries no guidance — same rule as live.
-  if (record.userComment && record.outcome !== "stopped") {
-    addSessionGuidance(scratch.classifier, record.outcome === "approved" ? "allowed" : "denied", record.tool, `${kind} ${record.path}`, record.userComment);
+  if (record.remembered !== true) {
+    recordApprovalRequested(scratch, record.tool, kind, record.path, at);
+    if (record.outcome === "approved") recordApprovalGranted(scratch, record.tool, kind, record.path, at);
+    else if (record.outcome === "stopped") recordApprovalStopped(scratch, record.tool, kind, record.path, at);
+    else recordApprovalDenied(scratch);
+    // A stop is not an answer, so it carries no guidance — same rule as live.
+    if (record.userComment && record.outcome !== "stopped") {
+      addSessionGuidance(scratch.classifier, record.outcome === "approved" ? "allowed" : "denied", record.tool, `${kind} ${record.path}`, record.userComment);
+    }
+  }
+  // Labels mean the disposition table routed a capability ask to this dialog,
+  // whose per-class stats the interceptor records outside askPathApproval; a
+  // plain stage-1 path ask carries none and records none live either.
+  if (isStringArray(record.labels)) {
+    recordCapabilityHits(scratch.capabilities, record.labels);
+    if (typeof record.decidedBy === "string") recordCapabilityDecided(scratch.capabilities, record.decidedBy);
+    recordCapabilityOutcome(scratch.capabilities, record.labels, PATH_ASK_OUTCOMES[record.outcome]);
+    if (typeof record.screenTripped === "boolean") recordScreenVerdict(scratch.capabilities, record.labels, record.screenTripped);
   }
 }

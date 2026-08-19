@@ -154,9 +154,36 @@ async function askPathApproval(params: {
   path: string;
   reason: string;
   trace: DecisionTrace;
+  /**
+   * Present when the disposition table routed a capability `ask` here (the
+   * out-of-roots write). This flow persists no review record, so the approval
+   * record must carry the labels itself or session replay could not rebuild
+   * the per-class stats the live path records for this dialog.
+   */
+  capability?: { labels: CapabilityId[]; decidedBy: CapabilityId; screenTripped?: boolean };
 }): Promise<PathApprovalResult> {
+  // Memory-core capability fields for every record this dialog writes.
+  const capabilityFields = params.capability
+    ? { labels: params.capability.labels, decidedBy: params.capability.decidedBy, screenTripped: params.capability.screenTripped }
+    : {};
   if (isApprovedPath(params.state.approvals[params.kind], params.path)) {
     addTraceStage(params.trace, "ask", "approved", `${params.kind} ${params.path} already approved this session`);
+    // A capability-routed repeat still mutates the per-class stats (the caller
+    // records them on our answer), so it must leave a record — marked
+    // `remembered` because none of the dialog counters fired. Plain path asks
+    // mutate nothing on a repeat and stay recordless, as before.
+    if (params.capability) {
+      appendRailTelemetry(params.state, {
+        kind: "approval",
+        tool: params.toolName,
+        access: params.kind,
+        path: params.path,
+        outcome: "approved",
+        reason: params.reason,
+        remembered: true,
+        ...capabilityFields,
+      });
+    }
     return { answer: "approved" };
   }
   recordApprovalRequested(params.state, params.toolName, params.kind, params.path);
@@ -173,7 +200,7 @@ async function askPathApproval(params: {
   if (outcome.kind === "unanswerable") {
     recordApprovalDenied(params.state);
     addTraceStage(params.trace, "ask", "unanswerable", `${params.kind} ${params.path} needs approval but ${outcome.detail}`);
-    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "denied", reason: params.reason });
+    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "denied", reason: params.reason, ...capabilityFields });
     return {
       answer: "denied",
       block: {
@@ -187,7 +214,7 @@ async function askPathApproval(params: {
   if (answer.cancelled) {
     recordApprovalStopped(params.state, params.toolName, params.kind, params.path);
     addTraceStage(params.trace, "ask", "stopped", `user stopped the turn at the ${params.kind} approval for ${params.path}${via}`);
-    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "stopped", reason: params.reason, forwarded: forwarded || undefined });
+    appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "stopped", reason: params.reason, forwarded: forwarded || undefined, ...capabilityFields });
     return { answer: "stopped", block: stopTurnAtAsk(params.ctx, `${params.kind} access to ${params.path}`) };
   }
   if (answer.comment) {
@@ -203,6 +230,7 @@ async function askPathApproval(params: {
     reason: params.reason,
     userComment: answer.comment,
     forwarded: forwarded || undefined,
+    ...capabilityFields,
   });
   if (answer.approved) {
     params.state.approvals[params.kind].push(params.path);
@@ -729,6 +757,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       path: params.pathApproval.path,
       reason: params.pathApproval.reason,
       trace,
+      capability: { labels: resolution.labels, decidedBy: resolution.decidedBy.id, screenTripped: params.screen?.tripped },
     });
     // askPathApproval owns the counters, telemetry, and recent event for this
     // dialog; only the per-class stats are still ours to record.

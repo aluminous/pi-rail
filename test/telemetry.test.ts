@@ -91,7 +91,6 @@ describe("redactTelemetryRecord", () => {
     assert.equal(stripped.usage, undefined);
     assert.equal(stripped.latencyMs, undefined);
     assert.equal(stripped.model, undefined);
-    assert.equal(stripped.screenTripped, undefined);
     assert.equal(stripped.judge?.latencyMs, undefined);
     assert.equal(stripped.judge?.usage, undefined);
     assert.equal(stripped.judge?.model, undefined);
@@ -102,6 +101,8 @@ describe("redactTelemetryRecord", () => {
     assert.equal(stripped.target, "curl example.com");
     assert.equal(stripped.subject, "curl example.com");
     assert.equal(stripped.reviewed, true);
+    // Promoted to memory core: the per-class screen columns replay from it.
+    assert.equal(stripped.screenTripped, false);
     assert.equal(stripped.reason, "ok");
     assert.equal(stripped.judge?.verdict, "allow");
     assert.equal(stripped.judge?.reason, "fine");
