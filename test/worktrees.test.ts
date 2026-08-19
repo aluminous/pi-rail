@@ -4,6 +4,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import { classifierExemptReadReason, decidePathAccess, denyReadMatch, isClassifierExemptRead } from "../src/policy.ts";
+import { screenWrite } from "../src/content-screen.ts";
 import { linkedWorktreeRoot, sessionCheckoutRoot, sessionGitCommonDir } from "../src/worktrees.ts";
 import { makeFixtureDir, testConfig } from "./helpers.ts";
 
@@ -228,5 +229,23 @@ describe("decidePathAccess in worktrees", () => {
     const outside = decidePathAccess(config, repo, path.join(plain, "notes.txt"), "read");
     assert.equal(outside.allowed, false);
     assert.equal(outside.allowed === false && outside.code, "outside-roots");
+  });
+});
+
+describe("content screen labeling in worktrees", () => {
+  // The screen's clean-write label is the fast path for edits: without the
+  // checkout-aware branch, a clean edit inside a linked worktree labels
+  // modify-system (default ask) while the identical edit in cwd labels
+  // modify-project (default allow) — observed live before this test existed.
+  it("labels a clean write inside a linked worktree modify-project", () => {
+    const verdict = screenWrite({ cwd: repo, target: path.join(wt, "src", "app.ts"), content: "export const ok = 1;\n" });
+    assert.equal(verdict.tripped, false);
+    assert.equal(verdict.label, "modify-project");
+  });
+
+  it("keeps modify-system for a clean write outside any session checkout", () => {
+    const verdict = screenWrite({ cwd: repo, target: path.join(plain, "notes.txt"), content: "hello\n" });
+    assert.equal(verdict.tripped, false);
+    assert.equal(verdict.label, "modify-system");
   });
 });

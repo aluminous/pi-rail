@@ -18,6 +18,7 @@ import path from "node:path";
 import type { CapabilityId } from "./capabilities.ts";
 import { expandHome } from "./paths.ts";
 import { textPrefix } from "./util.ts";
+import { sessionCheckoutRoot } from "./worktrees.ts";
 
 export type ScreenHitKind = "authorization" | "agent-directive" | "persistence-surface" | "lifecycle-script" | "credential-shape";
 
@@ -283,7 +284,12 @@ function summarize(hits: ScreenHit[], label: CapabilityId | undefined): string {
 export function screenWrite(params: { cwd: string; target: string; content: string }): ContentScreenVerdict {
   const hits = [...screenPath(params.cwd, params.target), ...screenText(params.content)];
   const resolved = path.resolve(params.cwd, expandHome(params.target));
-  const label: CapabilityId = isInside(path.resolve(params.cwd), resolved) ? "modify-project" : "modify-system";
+  // A linked worktree of the session repo is project scratch space: without
+  // this, a screen-clean edit in /tmp/<worktree> labels modify-system and asks
+  // — while the same edit in cwd sails through — even though the path policy
+  // already trusts the checkout. Same bidirectional verification as policy.ts.
+  const inProject = isInside(path.resolve(params.cwd), resolved) || sessionCheckoutRoot(params.cwd, resolved) !== undefined;
+  const label: CapabilityId = inProject ? "modify-project" : "modify-system";
   const tripped = hits.length > 0;
   return { applies: true, tripped, hits, label: tripped ? undefined : label, summary: summarize(hits, label) };
 }
