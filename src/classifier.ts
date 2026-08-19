@@ -9,7 +9,9 @@ import {
 } from "./capabilities.ts";
 import type { ResolvedRailConfig } from "./config.ts";
 import {
+  buildJudgeSystemPrompt,
   buildJudgeText,
+  buildNamerSystemPrompt,
   buildNamerText,
   ClassifierModelUnavailableError,
   ClassifierRetryableError,
@@ -405,8 +407,11 @@ export async function runNaming(params: {
   const response = await completeText({
     model: params.model,
     io: params.io,
-    systemPrompt: NAMER_SYSTEM_PROMPT,
-    text: buildNamerText(registry, params.io.recentUserMessages(), projection, params.sessionGuidance ?? []),
+    // The static context (classes, policy, cwd) rides in the system prompt so
+    // Anthropic's system breakpoint caches it; see the contract in
+    // classifier-protocol.ts.
+    systemPrompt: buildNamerSystemPrompt(registry, projection.policySummary, projection.cwd),
+    text: buildNamerText(params.io.recentUserMessages(), projection, params.sessionGuidance ?? []),
     timeoutMs: params.config.classifier.timeoutMs,
     budget,
     parse: (text) => parseNamerResult(text, capabilityRegistryIds(registry)),
@@ -428,13 +433,15 @@ export async function runJudging(params: {
   capabilities?: CapabilityState;
 }): Promise<JudgeResult> {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
+  const registry = capabilityRegistry(params.config, params.capabilities);
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
   const response = await completeText({
     model: params.model,
     io: params.io,
-    systemPrompt: JUDGE_SYSTEM_PROMPT,
+    // Same split as the namer: static context in the system prompt, volatile
+    // parts in the user message.
+    systemPrompt: buildJudgeSystemPrompt(registry, projection.policySummary, projection.cwd),
     text: buildJudgeText({
-      registry: capabilityRegistry(params.config, params.capabilities),
       recentUserMessages: params.io.recentUserMessages(),
       projection,
       sessionGuidance: params.sessionGuidance,
@@ -499,7 +506,13 @@ export async function judgeToolCall(params: {
   });
 }
 
-/** What /rail critique reviews: the prompts, the class definitions, the table, and the screen's coverage. */
+/**
+ * What /rail critique reviews: the prompts, the class definitions, the table,
+ * and the screen's coverage. Shows the instruction prompts alone rather than
+ * the composed system prompts: the static context block appended at review
+ * time (see buildNamerSystemPrompt) is the class definitions this text already
+ * tabulates below, plus a policy summary and cwd the critique cannot improve.
+ */
 export function buildCapabilityPromptForCritique(config: ResolvedRailConfig, capabilities: CapabilityState | undefined): string {
   const table = capabilityRegistry(config, capabilities).map((entry) => {
     const effective = getEffectiveDisposition(config, capabilities, entry.id);
@@ -512,6 +525,8 @@ export function buildCapabilityPromptForCritique(config: ResolvedRailConfig, cap
     "",
     "## Judge system prompt",
     JUDGE_SYSTEM_PROMPT,
+    "",
+    "(At review time each system prompt above also carries a static session-context block — the class definitions listed below, the active policy summary, and the cwd.)",
     "",
     "## Capability classes and their effective dispositions",
     ...table,
