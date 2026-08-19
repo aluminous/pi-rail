@@ -93,6 +93,17 @@ function keychainReadAllowlist(config: ResolvedRailConfig, cwd: string): string[
 }
 
 export function getSeatbeltRuntimeConfig(config: ResolvedRailConfig, cwd = process.cwd()): SandboxRuntimeConfig {
+  // TODO(worktree trust): this profile compiles LITERAL roots once, when the
+  // rail enables. The policy engine now trusts verified linked worktrees of
+  // the session repo (src/worktrees.ts) for file tools and the classifier,
+  // but a worktree outside the compiled write roots is still unwritable for
+  // sandboxed bash — and worktrees are typically created mid-session, after
+  // this compile, so even enumerating <gitdir>/worktrees/* here would not
+  // close the gap. Fixing it means recompiling and re-initializing the
+  // sandbox (or re-running enable) when a worktree appears; until then the
+  // README documents the limitation next to the filesystem docs. Worktrees
+  // under /tmp or the project directory are covered by the default roots.
+  //
   // Config pattern lists arrive pre-resolved through the shared compiler; only
   // the seatbelt-specific system allowlists are resolved here.
   const compiled = compileFilesystemPolicy(config, cwd);
