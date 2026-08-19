@@ -666,6 +666,25 @@ interface EnforceParams {
   reviewed: boolean;
 }
 
+/**
+ * What one resolved capability decision came to, for the finish() recorder.
+ * Grew a field per ask refinement as positional parameters before becoming an
+ * object; only the decision and its stats bucket are required — the rest
+ * exists exactly when an ask was shown (answer fields) or blocked (block).
+ */
+interface FinishResult {
+  /** What actually happened to the call, post-judge and post-user. */
+  decision: RailOutcome;
+  /** The per-class stats bucket this decision lands in. */
+  outcome: CapabilityOutcome;
+  /** Returned to the caller: present exactly when the call blocks. */
+  block?: ToolCallBlock;
+  userAnswer?: UserAnswer;
+  userComment?: string;
+  /** True when the answer came from the parent session via the approval mailbox. */
+  forwarded?: boolean;
+}
+
 /** Stage 3: the disposition table decides, with the judge as the delegated reviewer for `judge` classes. */
 async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock | undefined> {
   const { ctx, state, config, trace, event } = params;
@@ -693,7 +712,8 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     else reason = `${outcome.fallbackReason} — asking instead`;
   }
 
-  const finish = (decision: RailOutcome, outcome: CapabilityOutcome, block?: ToolCallBlock, userAnswer?: UserAnswer, userComment?: string, forwarded?: boolean): ToolCallBlock | undefined => {
+  const finish = (result: FinishResult): ToolCallBlock | undefined => {
+    const { decision, outcome, userAnswer, userComment, forwarded } = result;
     // "Exempt" means the action resolved to allow with no model consulted; a
     // deterministic label that escalated or prompted is not an exemption.
     if (!params.reviewed && resolution.disposition === "allow") recordClassifierSkip(state);
@@ -733,16 +753,20 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       usage: totalUsage(params.named, judge),
       projection,
     });
-    return block;
+    return result.block;
   };
 
-  if (disposition === "allow") return finish("allow", judge ? "judge-allow" : "allow");
+  if (disposition === "allow") return finish({ decision: "allow", outcome: judge ? "judge-allow" : "allow" });
 
   if (disposition === "deny") {
     const denyReason = judge ? `Rail judge denied: ${reason}` : `Rail denied: ${subject} is ${attribution(resolution, registry)}`;
-    return finish("deny", judge ? "judge-deny" : "deny", {
-      block: true,
-      reason: `${denyReason}. Do not work around this denial; choose a safer path or ask the user.`,
+    return finish({
+      decision: "deny",
+      outcome: judge ? "judge-deny" : "deny",
+      block: {
+        block: true,
+        reason: `${denyReason}. Do not work around this denial; choose a safer path or ask the user.`,
+      },
     });
   }
 
@@ -788,9 +812,13 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
   );
   if (outcome.kind === "unanswerable") {
     addTraceStage(trace, "ask", "unanswerable", `approval needed but ${outcome.detail}`);
-    return finish("deny", "ask-denied", {
-      block: true,
-      reason: `Rail needs approval, but ${outcome.detail}: ${reason}. Rerun interactively, or set ${resolution.decidedBy.id} to allow in rail config.`,
+    return finish({
+      decision: "deny",
+      outcome: "ask-denied",
+      block: {
+        block: true,
+        reason: `Rail needs approval, but ${outcome.detail}: ${reason}. Rerun interactively, or set ${resolution.decidedBy.id} to allow in rail config.`,
+      },
     });
   }
   const { answer, forwarded } = outcome;
@@ -798,22 +826,24 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
   if (answer.cancelled) {
     addTraceStage(trace, "ask", "stopped", `user stopped the turn at the approval prompt${via}`);
     reason = `${reason} — the user stopped the turn at the approval prompt`;
-    return finish("stop", "ask-stopped", stopTurnAtAsk(ctx, subject), "stopped", undefined, forwarded || undefined);
+    return finish({ decision: "stop", outcome: "ask-stopped", block: stopTurnAtAsk(ctx, subject), userAnswer: "stopped", forwarded: forwarded || undefined });
   }
   if (answer.comment) {
     addSessionGuidance(state.classifier, answer.approved ? "allowed" : "denied", event.toolName, guidanceSubject, answer.comment);
   }
   addTraceStage(trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"}${answer.comment ? " with a comment" : ""}${via}`);
-  if (answer.approved) return finish("allow", judge ? "judge-ask" : "ask-approved", undefined, "approved", answer.comment, forwarded || undefined);
+  if (answer.approved) {
+    return finish({ decision: "allow", outcome: judge ? "judge-ask" : "ask-approved", userAnswer: "approved", userComment: answer.comment, forwarded: forwarded || undefined });
+  }
   const commentSuffix = answer.comment ? ` User comment: ${answer.comment}` : "";
-  return finish(
-    "deny",
-    judge ? "judge-ask" : "ask-denied",
-    { block: true, reason: `Rail asked and the user denied: ${reason}.${commentSuffix} Do not work around this denial; choose a safer path or ask the user.` },
-    "denied",
-    answer.comment,
-    forwarded || undefined,
-  );
+  return finish({
+    decision: "deny",
+    outcome: judge ? "judge-ask" : "ask-denied",
+    block: { block: true, reason: `Rail asked and the user denied: ${reason}.${commentSuffix} Do not work around this denial; choose a safer path or ask the user.` },
+    userAnswer: "denied",
+    userComment: answer.comment,
+    forwarded: forwarded || undefined,
+  });
 }
 
 function totalUsage(named: NamerResult | undefined, judge: JudgeResult | undefined) {
