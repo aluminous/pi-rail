@@ -173,6 +173,13 @@ export interface RuntimeState {
   /** Writes a custom entry to pi's session log (pi.appendEntry). Undefined in tests without session wiring. */
   appendEntry?: (customType: string, data: unknown) => void;
   /**
+   * Emits the shared-bus blocked signal (`herdr:blocked`) around user-facing
+   * asks; wired once by index.ts via wireBlockedSignal, like appendEntry.
+   * Undefined in tests and fixtures without bus wiring, which simply skips
+   * the signal. Process-lifetime: resetSessionState leaves it alone.
+   */
+  emitBlocked?: (payload: { active: true; label: string } | { active: false }) => void;
+  /**
    * This process's approval mailbox for forwarded subagent asks. Process-
    * lifetime, not session-lifetime — detached children outlive `/new` — so
    * resetSessionState leaves it alone; index.ts owns start and stop.

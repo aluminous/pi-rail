@@ -1,7 +1,8 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { EventBus, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { forwardAskToParent, type ForwardedAskMeta, type ForwardFailure } from "./approval-mailbox.ts";
 import type { RuntimeState } from "./state.ts";
 import { RailApprovalDialog, type RailApprovalAnswer } from "./tui/approval-dialog.ts";
+import { textPrefix } from "./util.ts";
 
 export type { RailApprovalAnswer } from "./tui/approval-dialog.ts";
 
@@ -50,6 +51,54 @@ async function withDialogLock<T>(state: RuntimeState, fn: () => Promise<T>): Pro
   return run;
 }
 
+/**
+ * Wires pi's shared extension bus into the ask path, so pane managers (herdr's
+ * integration listens for `herdr:blocked`) can show "blocked" instead of
+ * "working" while a rail dialog waits on the user. index.ts calls this once,
+ * next to the appendEntry wiring; tests pass a recording fake. The emit is
+ * wrapped here, at the seam, so a throwing bus can never leak into an ask —
+ * and a swallowed `active` throw is safe because the paired `inactive` throw
+ * is swallowed identically, keeping the listener's refcount balanced.
+ */
+export function wireBlockedSignal(state: RuntimeState, events: Pick<EventBus, "emit">): void {
+  state.emitBlocked = (payload) => {
+    try {
+      events.emit("herdr:blocked", payload);
+    } catch {
+      /* a broken bus must not break approvals */
+    }
+  };
+}
+
+/**
+ * One line for a pane manager's blocked indicator. The tool under review is
+ * the most useful thing to show and forwardMeta carries it for free; the
+ * title (already short, and for mailbox-serviced asks it names the asking
+ * subagent) covers the rest. Whitespace collapsed: the contract is one line.
+ */
+function blockedLabel(title: string, options: AskOptions): string {
+  const base = options.forwardMeta ? `Rail approval: ${options.forwardMeta.toolName}` : title;
+  return textPrefix(base.replace(/\s+/g, " ").trim(), 80);
+}
+
+/**
+ * Brackets a user-facing ask with the blocked signal. The listener refcounts
+ * active/inactive pairs, so pairing must be exact on every path: one `active`
+ * as the wait begins — queue time included, a dialog queued behind another is
+ * already blocking on the user, and overlapping refcounts keep the blocked
+ * state continuous across a queue — and one `inactive` on ANY exit, answer or
+ * throw. The single try/finally is what guarantees never-unpaired.
+ */
+async function withBlockedSignal<T>(state: RuntimeState, label: string, fn: () => Promise<T>): Promise<T> {
+  if (!state.emitBlocked) return fn();
+  state.emitBlocked({ active: true, label });
+  try {
+    return await fn();
+  } finally {
+    state.emitBlocked({ active: false });
+  }
+}
+
 function describeForwardFailure(failure: Exclude<ForwardFailure, "no-mailbox">): string {
   if (failure === "parent-gone") return "the ask was forwarded to the parent session, but that session went away";
   if (failure === "cancelled") return "the forwarded ask was cancelled before the user answered";
@@ -73,7 +122,13 @@ export async function askRailApproval(
   options: AskOptions = {},
 ): Promise<AskOutcome> {
   if (ctx.hasUI) {
-    const answer = await withDialogLock(state, () => presentDialog(ctx, state, title, message, options));
+    // The blocked signal lives here, on the presenting side only — one seam
+    // covering the TUI dialog, the RPC select fallback, and forwarded subagent
+    // asks (the mailbox servicer re-enters through this same entry point). The
+    // forwarding child below never signals: its user sits at the parent.
+    const answer = await withBlockedSignal(state, blockedLabel(title, options), () =>
+      withDialogLock(state, () => presentDialog(ctx, state, title, message, options)),
+    );
     return { kind: "answered", answer, forwarded: false };
   }
   if (options.forwardMeta) {

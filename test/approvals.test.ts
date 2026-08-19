@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { askRailApproval, wireBlockedSignal } from "../src/approvals.ts";
 import { addSessionGuidance, type ClassifierState } from "../src/classifier.ts";
+import { createRuntimeState, type RuntimeState } from "../src/state.ts";
 import { RailApprovalDialog, type RailApprovalAnswer } from "../src/tui/approval-dialog.ts";
 
 const theme = { fg: (_name: string, text: string) => text };
@@ -91,6 +94,154 @@ describe("RailApprovalDialog", () => {
     dialog.handleInput("\x7f");
     dialog.handleInput("<enter>");
     assert.deepEqual(answers, [{ approved: true, comment: "ok" }]);
+  });
+});
+
+// The herdr:blocked contract is refcounted on the listener side (active += 1,
+// inactive -= 1), so what these tests defend is exact pairing: one active when
+// an ask starts blocking on the user, one inactive on any exit, never more —
+// an unpaired emit wedges or flickers the pane state for the whole session.
+describe("askRailApproval blocked signal", () => {
+  type BlockedPayload = { active: boolean; label?: string };
+
+  /** Fake shared bus: records herdr:blocked payloads in emission order. */
+  function fakeBus() {
+    const emissions: BlockedPayload[] = [];
+    return {
+      emissions,
+      emit(channel: string, data: unknown) {
+        assert.equal(channel, "herdr:blocked");
+        emissions.push(data as BlockedPayload);
+      },
+    };
+  }
+
+  function signalState(): { state: RuntimeState; emissions: BlockedPayload[] } {
+    const state = createRuntimeState();
+    const bus = fakeBus();
+    wireBlockedSignal(state, bus);
+    return { state, emissions: bus.emissions };
+  }
+
+  /** TUI ctx whose dialog resolves through `custom`; tests script or defer it. */
+  function tuiCtx(custom: () => Promise<RailApprovalAnswer | undefined>): ExtensionContext {
+    return { hasUI: true, mode: "tui", ui: { custom } } as unknown as ExtensionContext;
+  }
+
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("pairs active/inactive around an approved TUI ask, labelled by the reviewed tool", async () => {
+    const { state, emissions } = signalState();
+    const ctx = tuiCtx(async () => ({ approved: true }));
+    const outcome = await askRailApproval(ctx, state, "Rail asks for approval", "Allow?", {
+      forwardMeta: { toolName: "bash", site: "capability" },
+    });
+    assert.equal(outcome.kind, "answered");
+    assert.deepEqual(emissions, [{ active: true, label: "Rail approval: bash" }, { active: false }]);
+  });
+
+  it("pairs on deny and on cancel (dialog dismissed without an answer)", async () => {
+    const deny = signalState();
+    await askRailApproval(tuiCtx(async () => ({ approved: false })), deny.state, "Rail asks for approval", "Allow?");
+    assert.deepEqual(deny.emissions, [{ active: true, label: "Rail asks for approval" }, { active: false }]);
+
+    const cancel = signalState();
+    const outcome = await askRailApproval(tuiCtx(async () => undefined), cancel.state, "Rail asks for approval", "Allow?");
+    assert.deepEqual(outcome, { kind: "answered", answer: { approved: false }, forwarded: false });
+    assert.deepEqual(cancel.emissions, [{ active: true, label: "Rail asks for approval" }, { active: false }]);
+  });
+
+  it("pairs on the RPC select fallback surface", async () => {
+    const { state, emissions } = signalState();
+    const ctx = {
+      hasUI: true,
+      mode: "rpc",
+      ui: { select: async () => "Allow", input: async () => undefined },
+    } as unknown as ExtensionContext;
+    const outcome = await askRailApproval(ctx, state, "Rail path approval", "Approve?", {
+      forwardMeta: { toolName: "write", site: "path", access: "write", path: "/etc/out" },
+    });
+    assert.deepEqual(outcome, { kind: "answered", answer: { approved: true }, forwarded: false });
+    assert.deepEqual(emissions, [{ active: true, label: "Rail approval: write" }, { active: false }]);
+  });
+
+  it("still emits inactive when the ask throws", async () => {
+    const { state, emissions } = signalState();
+    const ctx = tuiCtx(async () => {
+      throw new Error("stale ctx");
+    });
+    await assert.rejects(() => askRailApproval(ctx, state, "Rail asks for approval", "Allow?"), /stale ctx/);
+    assert.deepEqual(emissions, [{ active: true, label: "Rail asks for approval" }, { active: false }]);
+  });
+
+  it("keeps refcount overlap, balance, and order for asks queued behind each other", async () => {
+    const { state, emissions } = signalState();
+    const gates = [deferred<RailApprovalAnswer | undefined>(), deferred<RailApprovalAnswer | undefined>()];
+    let dialogsShown = 0;
+    const ctx = tuiCtx(() => gates[dialogsShown++]!.promise);
+
+    const first = askRailApproval(ctx, state, "Rail asks for approval", "first?", {
+      forwardMeta: { toolName: "bash", site: "capability" },
+    });
+    const second = askRailApproval(ctx, state, "Rail asks for approval", "second?", {
+      forwardMeta: { toolName: "write", site: "capability" },
+    });
+    // Both asks are blocking on the user already — the queued one signals too,
+    // so the blocked state stays continuous across the dialog handoff.
+    assert.deepEqual(emissions, [
+      { active: true, label: "Rail approval: bash" },
+      { active: true, label: "Rail approval: write" },
+    ]);
+    // The dialog itself opens on a microtask; flush before asserting only one is up.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dialogsShown, 1);
+
+    gates[0]!.resolve({ approved: true });
+    await first;
+    gates[1]!.resolve({ approved: false });
+    await second;
+
+    assert.deepEqual(emissions.slice(2), [{ active: false }, { active: false }]);
+    // Never-negative depth, and everything released: the refcount invariant.
+    let depth = 0;
+    for (const emission of emissions) {
+      depth += emission.active ? 1 : -1;
+      assert.equal(depth >= 0, true);
+    }
+    assert.equal(depth, 0);
+  });
+
+  it("collapses the label to one line", async () => {
+    const { state, emissions } = signalState();
+    await askRailApproval(tuiCtx(async () => ({ approved: true })), state, "Rail approval —\n subagent   researcher", "Allow?");
+    assert.equal(emissions[0]!.label, "Rail approval — subagent researcher");
+  });
+
+  it("survives a throwing bus without leaking into the ask", async () => {
+    const state = createRuntimeState();
+    wireBlockedSignal(state, {
+      emit() {
+        throw new Error("bus down");
+      },
+    });
+    const outcome = await askRailApproval(tuiCtx(async () => ({ approved: true })), state, "Rail asks for approval", "Allow?");
+    assert.deepEqual(outcome, { kind: "answered", answer: { approved: true }, forwarded: false });
+  });
+
+  it("does not signal from headless sessions (their user sits at the parent)", async () => {
+    const { state, emissions } = signalState();
+    const ctx = { hasUI: false, mode: "print", ui: {} } as unknown as ExtensionContext;
+    const outcome = await askRailApproval(ctx, state, "Rail asks for approval", "Allow?");
+    assert.equal(outcome.kind, "unanswerable");
+    assert.deepEqual(emissions, []);
   });
 });
 
