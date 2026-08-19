@@ -1,6 +1,6 @@
 // Rail decision records. Every rail decision lands as a `custom` entry in
-// pi's own session log (customType "rail"; "guard" before the rename, still
-// read by eval/session-stats.ts). The records serve two masters:
+// pi's own session log (customType "rail"; pre-rename "guard" entries are no
+// longer read anywhere). The records serve two masters:
 //
 // 1. Session memory. The rail's own derived state — recent-decisions ring,
 //    session guidance, stats — is a function of the current session branch
