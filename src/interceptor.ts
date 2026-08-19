@@ -645,6 +645,10 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
 
   const projection = projectToolCall(event.toolName, event.input, ctx.cwd, config);
   const subject = describeAction(event.toolName, projection.inputSummary);
+  // What guidance and the persisted record call the action: the subject minus
+  // the tool-name prefix (the record and the rings carry the tool separately).
+  const guidanceSubject = subject.startsWith(`${event.toolName}: `) ? subject.slice(event.toolName.length + 2) : subject;
+  const target = actionTarget(event.toolName, event.input);
   const registry = capabilityRegistry(config, state.capabilities);
   let disposition = resolution.disposition;
   let judge: JudgeResult | undefined;
@@ -665,7 +669,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     // deterministic label that escalated or prompted is not an exemption.
     if (!params.reviewed && resolution.disposition === "allow") recordClassifierSkip(state);
     recordCapabilityDecision(state, event.toolName, {
-      target: actionTarget(event.toolName, event.input),
+      target,
       labels: resolution.labels,
       decision,
       disposition: resolution.disposition,
@@ -685,6 +689,9 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       labels: resolution.labels,
       resolvedDisposition: resolution.disposition,
       decidedBy: resolution.decidedBy.id,
+      target,
+      subject: guidanceSubject,
+      reviewed: params.reviewed || judge !== undefined,
       screenTripped: params.screen?.tripped,
       authorizationEvidence: params.named?.authorizationEvidence,
       attempts: params.named?.attempts,
@@ -765,7 +772,6 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     return finish("stop", "ask-stopped", stopTurnAtAsk(ctx, subject), "stopped", undefined, forwarded || undefined);
   }
   if (answer.comment) {
-    const guidanceSubject = subject.startsWith(`${event.toolName}: `) ? subject.slice(event.toolName.length + 2) : subject;
     addSessionGuidance(state.classifier, answer.approved ? "allowed" : "denied", event.toolName, guidanceSubject, answer.comment);
   }
   addTraceStage(trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"}${answer.comment ? " with a comment" : ""}${via}`);
@@ -850,6 +856,9 @@ async function runJudgeStage(
       telemetry: {
         model,
         verdict: judge.decision,
+        // The judge's own reason is memory core (the judgement ring replays
+        // from it), unlike the latency/usage detail around it.
+        reason: judge.reason,
         latencyMs,
         attempts: judge.attempts,
         usage: judge.tokenUsage ? { input: judge.tokenUsage.input, output: judge.tokenUsage.output, cacheRead: judge.tokenUsage.cacheRead, cacheWrite: judge.tokenUsage.cacheWrite } : undefined,

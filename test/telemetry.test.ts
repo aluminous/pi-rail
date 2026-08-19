@@ -38,8 +38,16 @@ describe("redactTelemetryRecord", () => {
     labels: ["run-dev-tools"],
     resolvedDisposition: "allow",
     decidedBy: "run-dev-tools",
+    target: "curl example.com",
+    subject: "curl example.com",
+    reviewed: true,
     screenTripped: false,
     latencyMs: 10,
+    model: "openrouter/haiku",
+    usage: { input: 100, output: 10 },
+    judge: { verdict: "allow", reason: "fine", latencyMs: 900, model: "anthropic/opus", usage: { input: 50, output: 5 } },
+    userAnswer: "approved",
+    userComment: "deploys are expected",
     reason: "ok",
     projection: {
       toolName: "bash",
@@ -75,6 +83,36 @@ describe("redactTelemetryRecord", () => {
     const block: RailTelemetryRecord = { kind: "block", tool: "write", reason: "outside roots" };
     assert.deepEqual(redactTelemetryRecord(block, "minimal"), block);
   });
+
+  it("strips a review to its memory core in off mode", () => {
+    const stripped = redactTelemetryRecord(record, "off") as typeof record;
+    // Detail tier gone: nothing the corpus tooling wants survives "off"...
+    assert.equal(stripped.projection, undefined);
+    assert.equal(stripped.usage, undefined);
+    assert.equal(stripped.latencyMs, undefined);
+    assert.equal(stripped.model, undefined);
+    assert.equal(stripped.screenTripped, undefined);
+    assert.equal(stripped.judge?.latencyMs, undefined);
+    assert.equal(stripped.judge?.usage, undefined);
+    assert.equal(stripped.judge?.model, undefined);
+    // ...but the memory core session replay feeds on stays whole.
+    assert.equal(stripped.decision, "allow");
+    assert.deepEqual(stripped.labels, ["run-dev-tools"]);
+    assert.equal(stripped.resolvedDisposition, "allow");
+    assert.equal(stripped.target, "curl example.com");
+    assert.equal(stripped.subject, "curl example.com");
+    assert.equal(stripped.reviewed, true);
+    assert.equal(stripped.reason, "ok");
+    assert.equal(stripped.judge?.verdict, "allow");
+    assert.equal(stripped.judge?.reason, "fine");
+    assert.equal(stripped.userAnswer, "approved");
+    assert.equal(stripped.userComment, "deploys are expected");
+  });
+
+  it("strips error records to their memory core in off mode", () => {
+    const error: RailTelemetryRecord = { kind: "error", tool: "bash", reason: "timeout", failureKind: "timeout", attempts: 5, latencyMs: 15000, model: "openrouter/haiku" };
+    assert.deepEqual(redactTelemetryRecord(error, "off"), { kind: "error", tool: "bash", reason: "timeout", failureKind: "timeout" });
+  });
 });
 
 describe("appendRailTelemetry", () => {
@@ -86,11 +124,20 @@ describe("appendRailTelemetry", () => {
     assert.equal(captured[0]?.kind, "block");
   });
 
-  it("writes nothing when telemetry is off", () => {
+  it("still writes the memory core when telemetry is off — replay depends on it", () => {
     const captured: RailTelemetryRecord[] = [];
     const { state } = readyState(captured, (c) => { c.classifier.telemetry = "off"; });
     appendRailTelemetry(state, { kind: "block", tool: "write", reason: "denied" });
-    assert.equal(captured.length, 0);
+    assert.equal(captured.length, 1);
+    assert.deepEqual(captured[0], { kind: "block", tool: "write", reason: "denied" });
+  });
+
+  it("writes memory-core records even before a config is loaded", () => {
+    const captured: RailTelemetryRecord[] = [];
+    const state = createRuntimeState();
+    state.appendEntry = (_type, data) => captured.push(data as RailTelemetryRecord);
+    appendRailTelemetry(state, { kind: "block", tool: "write", reason: "denied" });
+    assert.equal(captured.length, 1);
   });
 
   it("writes nothing when no session appender is wired", () => {
@@ -141,7 +188,9 @@ describe("interceptor telemetry wiring", () => {
     assert.equal(approval.kind === "approval" && approval.outcome, "denied");
   });
 
-  it("records nothing when telemetry is off", async () => {
+  it("records the memory core even when telemetry is off", async () => {
+    // The rail's session memory replays from these records (session-replay.ts),
+    // so the user's telemetry preference must not be able to suppress them.
     const captured: RailTelemetryRecord[] = [];
     const { state } = readyState(captured, (c) => {
       c.classifier.enabled = false;
@@ -152,6 +201,8 @@ describe("interceptor telemetry wiring", () => {
       fakeCtx(),
       state,
     );
-    assert.equal(captured.length, 0);
+    const block = captured.find((r) => r.kind === "block");
+    assert.ok(block, "the block record is memory, not telemetry detail");
+    assert.equal(block.tool, "write");
   });
 });

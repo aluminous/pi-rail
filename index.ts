@@ -11,6 +11,7 @@ import { createRailSmoke } from "./src/commands/smoke.ts";
 import { loadConfig, type ResolvedRailConfig } from "./src/config.ts";
 import { interceptToolCall } from "./src/interceptor.ts";
 import { compileFilesystemPolicy, summarizeDegradedPatterns } from "./src/policy.ts";
+import { applyDerivedRailState } from "./src/session-replay.ts";
 import { createRuntimeState, resetSessionState, resetTurnStats } from "./src/state.ts";
 import { registerRailMessageRenderer, updateRailStatus } from "./src/status.ts";
 import { acknowledgeRailInSubagentChild, warnUnacknowledgedSubagents } from "./src/subagents-interop.ts";
@@ -136,6 +137,19 @@ export default function (pi: ExtensionAPI) {
     updateRailStatus(ctx, state);
   });
 
+  // /tree navigation moves the current leaf backward AND forward between
+  // branches of the same session file. The rail's memory is a function of the
+  // current branch, so re-derive it wholesale rather than accumulate: a denial
+  // the user navigated away from must stop biasing the judge, and navigating
+  // back must bring it back. navigateTree cannot run mid-stream, so no
+  // in-flight decision can race this rebuild.
+  pi.on("session_tree", (_event, ctx) => {
+    state.lastUiContext = ctx;
+    applyDerivedRailState(state, ctx.sessionManager.getBranch());
+    state.liveView?.refresh();
+    updateRailStatus(ctx, state);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     try {
       resetSessionState(state);
@@ -145,6 +159,18 @@ export default function (pi: ExtensionAPI) {
       // keeps it process-lifetime: detached children outlive /new, and a new
       // mailbox here would silently orphan their in-flight asks.
       state.approvalMailbox ??= startApprovalMailbox({ state, ask: askRailApproval });
+
+      // Resume and /fork start from a session file that already has history:
+      // rebuild the rail's derived memory (recent decisions, guidance, stats)
+      // from the current branch instead of starting blank — resetSessionState
+      // above just wiped the previous session's, which is right; forgetting
+      // this session's own prefix would not be. Best-effort: a context without
+      // a usable session manager must not break startup.
+      try {
+        applyDerivedRailState(state, ctx.sessionManager.getBranch());
+      } catch {
+        // A fresh session simply has nothing to replay.
+      }
 
       const disabledByFlag = pi.getFlag("no-rail") as boolean;
       const config = loadConfig(ctx);

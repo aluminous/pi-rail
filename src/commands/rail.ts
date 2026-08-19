@@ -8,6 +8,7 @@ import type { RuntimeState } from "../state.ts";
 import { classifierModelLabel, networkPolicyLabel, updateRailStatus } from "../status.ts";
 import { isStatusTab, PLAIN_THEME, statusReportLines, statusTabLines, type StatusTab, type StatusView } from "../status-tabs.ts";
 import { showRailView, toggleRailPanel, toggleRailView } from "../live-view.ts";
+import { appendRailTelemetry } from "../telemetry.ts";
 import type { PanelTheme } from "../tui/report-panel.ts";
 import { StatusPage } from "../tui/status-page.ts";
 import { pickFromList, type SelectItem } from "../tui/select-list.ts";
@@ -74,12 +75,16 @@ export function createRailCommand(deps: RailCommandDeps) {
   /**
    * `/rail guide`: volunteer classifier guidance instead of waiting to be
    * asked. Entries join the same session ring approval comments feed, so the
-   * namer and judge see them on the next action.
+   * namer and judge see them on the next action. Both the add and the clear
+   * are persisted as rail records: session replay rebuilds the guidance ring
+   * from the branch, and un-persisted guide traffic would silently vanish on
+   * /tree navigation (or a cleared ring would resurrect).
    */
   async function runGuide(args: string, ctx: ExtensionContext): Promise<void> {
     const trimmed = args.trim();
     if (trimmed.toLowerCase() === "clear") {
       const removed = clearSessionGuidance(state.classifier);
+      if (removed > 0) appendRailTelemetry(state, { kind: "guidance", tool: "rail", cleared: true });
       show(ctx, removed === 0 ? "No session guidance to clear." : `Cleared ${removed} guidance entr${removed === 1 ? "y" : "ies"}.`);
       return;
     }
@@ -94,6 +99,7 @@ export function createRailCommand(deps: RailCommandDeps) {
       if (!text.trim()) return;
     }
     addUserGuidance(state.classifier, text);
+    appendRailTelemetry(state, { kind: "guidance", tool: "rail", text });
     const { count, limit } = sessionGuidanceCount(state.classifier);
     show(ctx, `Guidance added for this session (${count}/${limit}).`);
   }

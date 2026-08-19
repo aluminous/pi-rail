@@ -353,25 +353,31 @@ export function recordDecisionTrace(state: RuntimeState, trace: DecisionTrace): 
   state.traces = state.traces.slice(0, TRACE_LIMIT);
 }
 
+// The record* helpers below take an optional `at` timestamp. Live callers
+// omit it (Date.now()); session replay (src/session-replay.ts) passes the
+// session entry's own timestamp so a rebuilt ring carries the moments the
+// decisions actually happened. Replay reuses these exact helpers so the
+// derived state cannot drift from what the live path would have produced.
+
 /** A deterministic policy rule hard-blocked the call. */
-export function recordPolicyBlock(state: RuntimeState, toolName: string, reason: string): void {
+export function recordPolicyBlock(state: RuntimeState, toolName: string, reason: string, at = Date.now()): void {
   state.stats.ruleHits++;
   state.stats.turnRuleHits++;
   state.stats.blocked++;
   state.stats.turnBlocked++;
-  pushRecent(state, { at: Date.now(), toolName, decision: "block", reason });
+  pushRecent(state, { at, toolName, decision: "block", reason });
 }
 
 /** An out-of-roots path triggered an interactive approval request. */
-export function recordApprovalRequested(state: RuntimeState, toolName: string, kind: AccessKind, path: string): void {
+export function recordApprovalRequested(state: RuntimeState, toolName: string, kind: AccessKind, path: string, at = Date.now()): void {
   state.stats.ruleHits++;
   state.stats.turnRuleHits++;
   state.stats.asked++;
-  pushRecent(state, { at: Date.now(), toolName, decision: "ask", reason: `${kind} approval requested for ${path}` });
+  pushRecent(state, { at, toolName, decision: "ask", reason: `${kind} approval requested for ${path}` });
 }
 
-export function recordApprovalGranted(state: RuntimeState, toolName: string, kind: AccessKind, path: string): void {
-  pushRecent(state, { at: Date.now(), toolName, decision: "allow", reason: `approved ${kind} path ${path}` });
+export function recordApprovalGranted(state: RuntimeState, toolName: string, kind: AccessKind, path: string, at = Date.now()): void {
+  pushRecent(state, { at, toolName, decision: "allow", reason: `approved ${kind} path ${path}` });
 }
 
 export function recordApprovalDenied(state: RuntimeState): void {
@@ -384,9 +390,9 @@ export function recordApprovalDenied(state: RuntimeState): void {
  * block: `blocked` is the "the rail refused this" counter the status page
  * reports, and a stopped turn is the user refusing to be asked right now.
  */
-export function recordApprovalStopped(state: RuntimeState, toolName: string, kind: AccessKind, path: string): void {
+export function recordApprovalStopped(state: RuntimeState, toolName: string, kind: AccessKind, path: string, at = Date.now()): void {
   state.stats.stopped++;
-  pushRecent(state, { at: Date.now(), toolName, decision: "stop", reason: `user stopped the turn at the ${kind} approval for ${path}` });
+  pushRecent(state, { at, toolName, decision: "stop", reason: `user stopped the turn at the ${kind} approval for ${path}` });
 }
 
 /** A forwarded subagent ask the user answered here; recent ring only — the counters describe this session's own calls. */
@@ -416,6 +422,8 @@ export interface CapabilityDecisionRecord {
   /** Review latency and namer model, for the recent-classifications ring; 0/undefined for deterministic labels. */
   latencyMs?: number;
   model?: string;
+  /** When the decision happened; session replay passes the entry timestamp, live callers omit it. */
+  at?: number;
 }
 
 /** One resolved capability decision: statusline counters, per-class stats, and the two recent-decision rings. */
@@ -442,7 +450,7 @@ export function recordCapabilityDecision(state: RuntimeState, toolName: string, 
   if (record.decision === "stop") state.stats.stopped++;
   recordCapabilityHits(state.capabilities, record.labels);
   if (record.decidedBy) recordCapabilityDecided(state.capabilities, record.decidedBy);
-  const at = Date.now();
+  const at = record.at ?? Date.now();
   pushRecent(state, { at, toolName, decision: record.decision, capabilities: record.labels, reason: record.reason });
   state.recentClassifications.unshift({
     at,
@@ -469,8 +477,8 @@ export function recordClassifierSkip(state: RuntimeState): void {
  * from classifyClassifierFailure, so a session can say whether its five errors
  * were one provider incident or five different problems.
  */
-export function recordClassifierError(state: RuntimeState, toolName: string, reason: string, kind: string): void {
+export function recordClassifierError(state: RuntimeState, toolName: string, reason: string, kind: string, at = Date.now()): void {
   state.stats.errors++;
   state.stats.errorsByKind[kind] = (state.stats.errorsByKind[kind] ?? 0) + 1;
-  pushRecent(state, { at: Date.now(), toolName, decision: "error", reason });
+  pushRecent(state, { at, toolName, decision: "error", reason });
 }
