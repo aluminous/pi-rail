@@ -49,6 +49,7 @@ import {
   recordJudgement,
   recordModelCall,
   recordPolicyBlock,
+  recentEvents,
   syncCapabilityPreset,
   type RuntimeState,
 } from "./state.ts";
@@ -681,7 +682,6 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       model: params.namerModel,
     });
     recordCapabilityOutcome(state.capabilities, resolution.labels, outcome);
-    state.classifier.lastDecision = { toolName: event.toolName, at: Date.now(), labels: resolution.labels, decision, reason };
     appendRailTelemetry(state, {
       kind: "review",
       tool: event.toolName,
@@ -799,9 +799,9 @@ function totalUsage(named: NamerResult | undefined, judge: JudgeResult | undefin
 
 /** The last few rail decisions, as the judge sees them: a retry after a denial is signal. */
 function recentDecisionsForJudge(state: RuntimeState): string[] {
-  return state.recent
-    .slice(0, 8)
-    .map((event) => `${event.decision} ${event.toolName}${event.capabilities?.length ? ` (${event.capabilities.join(", ")})` : ""}: ${textPrefix(event.reason, 160)}`);
+  return recentEvents(state).map(
+    (event) => `${event.decision} ${event.toolName}${event.capabilities?.length ? ` (${event.capabilities.join(", ")})` : ""}: ${textPrefix(event.reason, 160)}`,
+  );
 }
 
 /**

@@ -15,7 +15,16 @@ import { classifierEnabled, judgeModelSpec } from "./classifier.ts";
 import { configSourceLabel, type ProvenanceListKey, type ResolvedRailConfig } from "./config.ts";
 import { getPersistentConfigPath } from "./persistent-settings.ts";
 import { resolveConfigPath } from "./policy.ts";
-import { modelUsageRows, type ModelUsageStats, type RailEvent, type RailStats, type RuntimeState } from "./state.ts";
+import {
+  modelUsageRows,
+  recentClassifications,
+  recentEvents,
+  recentJudgements,
+  type ModelUsageStats,
+  type RailEvent,
+  type RailStats,
+  type RuntimeState,
+} from "./state.ts";
 import type { PanelTheme } from "./tui/report-panel.ts";
 import { renderTable, type TableColumn } from "./tui/table.ts";
 
@@ -253,7 +262,7 @@ function sessionTab(view: StatusView): string[] {
     ...note(theme, width, "decided = times this class set the disposition; the other columns count every label of an action"),
     "",
     heading(theme, "Recent events"),
-    ...renderTable(theme, EVENT_COLUMNS, recentEventRows(state.recent), width, {
+    ...renderTable(theme, EVENT_COLUMNS, recentEventRows(recentEvents(state)), width, {
       empty: "(none yet)",
       styleRow: (text, row) => theme.fg(decisionColor(row[2] ?? ""), text),
     }),
@@ -347,7 +356,8 @@ const CLASSIFICATION_COLUMNS: TableColumn[] = [
 
 function namerTab(view: StatusView): string[] {
   const { state, theme, width } = view;
-  const rows = state.recentClassifications.map((entry) => [
+  const classifications = recentClassifications(state);
+  const rows = classifications.map((entry) => [
     formatAge(entry.at),
     entry.toolName,
     entry.labels.join(", "),
@@ -363,7 +373,7 @@ function namerTab(view: StatusView): string[] {
       styleRow: (text, row) => theme.fg(decisionColor(row[4] ?? ""), text),
       // The command or path, wrapped under the row like a judge reason — an
       // eighth column would squeeze the seven that are already there.
-      rowNote: (_row, index) => state.recentClassifications[index]?.target || undefined,
+      rowNote: (_row, index) => classifications[index]?.target || undefined,
     }),
     "",
     ...note(theme, width, "table = what the disposition table resolved over the labels; a `judge` row means the escalation reviewer then decided"),
@@ -384,7 +394,7 @@ const JUDGEMENT_COLUMNS: TableColumn[] = [
 
 function judgeTab(view: StatusView): string[] {
   const { state, config, theme, width } = view;
-  const judgements = state.recentJudgements;
+  const judgements = recentJudgements(state);
   const rows = judgements.map((entry) => [
     formatAge(entry.at),
     entry.toolName,

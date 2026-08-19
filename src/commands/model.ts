@@ -5,7 +5,7 @@ import type { ResolvedRailConfig } from "../config.ts";
 import { loadConfig } from "../config.ts";
 import { selectClassifierModel, type ClassifierModelChoice } from "../model-selector.ts";
 import { getPersistentConfigPath, updatePersistentClassifierSettings } from "../persistent-settings.ts";
-import type { RuntimeState } from "../state.ts";
+import { lastRailDecision, type RuntimeState } from "../state.ts";
 import { formatError } from "../util.ts";
 
 type Show = (message: string) => void;
@@ -191,6 +191,7 @@ export async function runModelCommand(args: string, ctx: ExtensionContext, state
   const selected = resolveClassifierModel(ctx, config, state.classifier);
   const judgeSelected = resolveJudgeModel(ctx, config, state.classifier);
   const available = ctx.modelRegistry.getAvailable().map(spec).slice(0, 30);
+  const lastDecision = lastRailDecision(state);
   show([
     `Reviewers: ${classifierEnabled(config, state.classifier) ? "enabled" : "disabled"}`,
     `Configured namer model: ${state.classifier.modelOverride ?? config.classifier.model}`,
@@ -198,8 +199,8 @@ export async function runModelCommand(args: string, ctx: ExtensionContext, state
     `Configured judge model: ${judgeModelSpec(config, state.classifier)}`,
     `Resolved judge model: ${judgeSelected ? spec(judgeSelected) : "(none)"}`,
     `Persistent config: ${getPersistentConfigPath()}`,
-    state.classifier.lastDecision
-      ? `Last decision: ${state.classifier.lastDecision.decision} (${state.classifier.lastDecision.labels.join(", ")}) ${state.classifier.lastDecision.reason}`
+    lastDecision
+      ? `Last decision: ${lastDecision.decision} (${lastDecision.labels.join(", ")}) ${lastDecision.reason}`
       : undefined,
     state.classifier.lastError ? `Last error: ${state.classifier.lastError}` : undefined,
     "",

@@ -10,7 +10,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RailBackend } from "../src/backends/types.ts";
 import type { CompleteFn } from "../src/classifier.ts";
 import { createRailTest } from "../src/commands/test.ts";
-import { createRailStats, createRuntimeState } from "../src/state.ts";
+import { createRailStats, createRuntimeState, lastRailDecision } from "../src/state.ts";
 import { makeFixtureDir, testConfig } from "./helpers.ts";
 
 const fixture = makeFixtureDir();
@@ -163,8 +163,8 @@ describe("/rail test dry runs", () => {
     assert.ok(notifications.some((n) => n.includes("running a real capability naming call")));
     // Dry runs must leave every decision record untouched.
     assert.deepEqual(state.stats, createRailStats());
-    assert.equal(state.classifier.lastDecision, undefined);
-    assert.deepEqual(state.recent, []);
+    assert.equal(lastRailDecision(state), undefined);
+    assert.deepEqual(state.decisions, []);
     assert.deepEqual(state.traces, []);
     assert.deepEqual(telemetry, []);
   });

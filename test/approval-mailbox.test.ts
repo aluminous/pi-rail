@@ -14,7 +14,7 @@ import {
 } from "../src/approval-mailbox.ts";
 import type { AskOptions, AskOutcome, RailAsk } from "../src/approvals.ts";
 import type { RailApprovalAnswer } from "../src/tui/approval-dialog.ts";
-import { createRuntimeState, type RuntimeState } from "../src/state.ts";
+import { createRuntimeState, recentEvents, type RuntimeState } from "../src/state.ts";
 import { withTempAgentDirAsync } from "./helpers.ts";
 
 const FAST = { parentPollMs: 20, childPollMs: 10 };
@@ -89,8 +89,8 @@ describe("approval mailbox round trips", () => {
         assert.equal(typeof log[0]!.options?.onCancelHandle, "function");
         assert.deepEqual(fs.readdirSync(path.join(mailbox.dir, "requests")), []);
         assert.deepEqual(fs.readdirSync(path.join(mailbox.dir, "responses")), []);
-        assert.equal(state.recent[0]?.decision, "allow");
-        assert.match(state.recent[0]?.reason ?? "", /forwarded ask from subagent researcher/);
+        assert.equal(recentEvents(state)[0]?.decision, "allow");
+        assert.match(recentEvents(state)[0]?.reason ?? "", /forwarded ask from subagent researcher/);
       } finally {
         mailbox.stop();
       }
@@ -119,8 +119,8 @@ describe("approval mailbox round trips", () => {
         // Without `cancelled` surviving the envelope the child sees a plain
         // deny, and the model is free to work around it.
         assert.deepEqual(result, { ok: true, answer: { approved: false, cancelled: true } });
-        assert.equal(state.recent[0]?.decision, "stop", "the parent logs it as a stop, not a denial");
-        assert.match(state.recent[0]?.reason ?? "", /user stopped the turn/);
+        assert.equal(recentEvents(state)[0]?.decision, "stop", "the parent logs it as a stop, not a denial");
+        assert.match(recentEvents(state)[0]?.reason ?? "", /user stopped the turn/);
       } finally {
         mailbox.stop();
       }

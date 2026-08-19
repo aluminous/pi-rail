@@ -21,7 +21,7 @@
 // unparseable is silently skipped — a per-entry guard so one bad record never
 // poisons the whole replay. Old sessions simply replay with whatever matches.
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { addSessionGuidance, addUserGuidance, clearSessionGuidance, type LastRailDecision } from "./classifier.ts";
+import { addSessionGuidance, addUserGuidance, clearSessionGuidance } from "./classifier.ts";
 import type { AccessKind } from "./policy.ts";
 import {
   createRuntimeState,
@@ -35,9 +35,7 @@ import {
   recordJudgement,
   recordPolicyBlock,
   resetTurnStats,
-  type ClassificationRecord,
-  type JudgementRecord,
-  type RailEvent,
+  type DecisionEntry,
   type RailStats,
   type RuntimeState,
 } from "./state.ts";
@@ -46,11 +44,9 @@ import { RAIL_TELEMETRY_TYPE, type RailApprovalTelemetry, type RailErrorTelemetr
 /** The slice of RuntimeState that is a pure function of the session branch. */
 export interface DerivedRailState {
   stats: RailStats;
-  recent: RailEvent[];
-  recentClassifications: ClassificationRecord[];
-  recentJudgements: JudgementRecord[];
+  /** The rebuilt decision spine; the state.ts views (recentEvents, …) slice it exactly as they slice the live one. */
+  decisions: DecisionEntry[];
   sessionGuidance: string[] | undefined;
-  lastDecision: LastRailDecision | undefined;
 }
 
 /**
@@ -81,11 +77,8 @@ export function deriveRailState(entries: readonly SessionEntry[]): DerivedRailSt
   resetTurnStats(scratch);
   return {
     stats: scratch.stats,
-    recent: scratch.recent,
-    recentClassifications: scratch.recentClassifications,
-    recentJudgements: scratch.recentJudgements,
+    decisions: scratch.decisions,
     sessionGuidance: scratch.classifier.sessionGuidance,
-    lastDecision: scratch.classifier.lastDecision,
   };
 }
 
@@ -113,11 +106,8 @@ export function deriveRailState(entries: readonly SessionEntry[]): DerivedRailSt
 export function applyDerivedRailState(state: RuntimeState, entries: readonly SessionEntry[]): void {
   const derived = deriveRailState(entries);
   state.stats = derived.stats;
-  state.recent = derived.recent;
-  state.recentClassifications = derived.recentClassifications;
-  state.recentJudgements = derived.recentJudgements;
+  state.decisions = derived.decisions;
   state.classifier.sessionGuidance = derived.sessionGuidance;
-  state.classifier.lastDecision = derived.lastDecision;
   // Traces carry per-stage detail (policy matches, namer evidence, dialog
   // outcomes) that is never persisted, so they cannot be rebuilt: cleared on
   // navigation rather than left describing a branch the user left.
@@ -170,7 +160,7 @@ function replayRecord(scratch: RuntimeState, data: unknown, at: number): void {
   }
 }
 
-/** Mirrors the finish() path of enforceCapabilities: skip counter, capability decision, guidance, last decision. */
+/** Mirrors the finish() path of enforceCapabilities: skip counter, capability decision, guidance. */
 function replayReview(scratch: RuntimeState, raw: Record<string, unknown>, at: number): void {
   if (
     !RAIL_OUTCOMES.has(raw.decision as string) ||
@@ -219,7 +209,6 @@ function replayReview(scratch: RuntimeState, raw: Record<string, unknown>, at: n
   if (record.userComment && (record.userAnswer === "approved" || record.userAnswer === "denied")) {
     addSessionGuidance(scratch.classifier, record.userAnswer === "approved" ? "allowed" : "denied", record.tool, record.subject, record.userComment);
   }
-  scratch.classifier.lastDecision = { toolName: record.tool, at, labels: record.labels, decision: record.decision, reason: record.reason };
 }
 
 /**

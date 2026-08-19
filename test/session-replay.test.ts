@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { addSessionGuidance, type ClassifierState } from "../src/classifier.ts";
 import { applyDerivedRailState, deriveRailState } from "../src/session-replay.ts";
-import { createRuntimeState } from "../src/state.ts";
+import { createRuntimeState, lastRailDecision, recentClassifications, recentEvents, recentJudgements } from "../src/state.ts";
 import type { RailApprovalTelemetry, RailReviewTelemetry, RailTelemetryRecord } from "../src/telemetry.ts";
 
 let seq = 0;
@@ -48,19 +48,19 @@ describe("deriveRailState", () => {
       railEntry(review({ reason: "first" }), "2026-08-19T10:00:00.000Z"),
       railEntry(review({ decision: "deny", labels: ["credentials"], reason: "second" }), "2026-08-19T10:05:00.000Z"),
     ]);
-    assert.equal(derived.recent.length, 2);
-    assert.equal(derived.recent[0]?.reason, "second", "newest first, like the live ring");
-    assert.equal(derived.recent[0]?.decision, "deny");
-    assert.deepEqual(derived.recent[0]?.capabilities, ["credentials"]);
-    assert.equal(derived.recent[0]?.at, Date.parse("2026-08-19T10:05:00.000Z"));
-    assert.equal(derived.recent[1]?.at, Date.parse("2026-08-19T10:00:00.000Z"));
+    assert.equal(recentEvents(derived).length, 2);
+    assert.equal(recentEvents(derived)[0]?.reason, "second", "newest first, like the live ring");
+    assert.equal(recentEvents(derived)[0]?.decision, "deny");
+    assert.deepEqual(recentEvents(derived)[0]?.capabilities, ["credentials"]);
+    assert.equal(recentEvents(derived)[0]?.at, Date.parse("2026-08-19T10:05:00.000Z"));
+    assert.equal(recentEvents(derived)[1]?.at, Date.parse("2026-08-19T10:00:00.000Z"));
   });
 
   it("caps the rebuilt recent ring at the live limit of 8", () => {
     const entries = Array.from({ length: 12 }, (_, i) => railEntry(review({ reason: `call ${i}` })));
     const derived = deriveRailState(entries);
-    assert.equal(derived.recent.length, 8);
-    assert.equal(derived.recent[0]?.reason, "call 11");
+    assert.equal(recentEvents(derived).length, 8);
+    assert.equal(recentEvents(derived)[0]?.reason, "call 11");
   });
 
   it("folds review outcomes into the same counters the live path keeps", () => {
@@ -97,8 +97,8 @@ describe("deriveRailState", () => {
     assert.equal(derived.stats.ruleHits, 1);
     assert.equal(derived.stats.errors, 2);
     assert.deepEqual(derived.stats.errorsByKind, { timeout: 2 });
-    assert.equal(derived.recent[2]?.decision, "block");
-    assert.equal(derived.recent[0]?.decision, "error");
+    assert.equal(recentEvents(derived)[2]?.decision, "block");
+    assert.equal(recentEvents(derived)[0]?.decision, "error");
   });
 
   it("replays one approval record as the live request→answer helper sequence", () => {
@@ -107,8 +107,8 @@ describe("deriveRailState", () => {
     assert.equal(granted.stats.ruleHits, 1);
     assert.equal(granted.stats.blocked, 0);
     // Live pushes two ring events for a granted approval: the ask and the grant.
-    assert.deepEqual(granted.recent.map((event) => event.decision), ["allow", "ask"]);
-    assert.equal(granted.recent[0]?.reason, "approved write path /tmp/out.txt");
+    assert.deepEqual(recentEvents(granted).map((event) => event.decision), ["allow", "ask"]);
+    assert.equal(recentEvents(granted)[0]?.reason, "approved write path /tmp/out.txt");
 
     const denied = deriveRailState([railEntry(approval({ outcome: "denied" }))]);
     assert.equal(denied.stats.blocked, 1);
@@ -117,7 +117,7 @@ describe("deriveRailState", () => {
     const stopped = deriveRailState([railEntry(approval({ outcome: "stopped" }))]);
     assert.equal(stopped.stats.stopped, 1, "a stopped ask is stopped");
     assert.equal(stopped.stats.blocked, 0, "…not a refusal");
-    assert.equal(stopped.recent[0]?.decision, "stop");
+    assert.equal(recentEvents(stopped)[0]?.decision, "stop");
   });
 
   it("rebuilds session guidance exactly as the live addSessionGuidance calls built it", () => {
@@ -159,7 +159,7 @@ describe("deriveRailState", () => {
         }),
       ),
     ]);
-    const judgement = derived.recentJudgements[0];
+    const judgement = recentJudgements(derived)[0];
     assert.equal(judgement?.verdict, "deny");
     assert.equal(judgement?.reason, "reads a production secret");
     assert.equal(judgement?.latencyMs, 900);
@@ -167,8 +167,8 @@ describe("deriveRailState", () => {
     assert.equal(judgement?.model, "anthropic/opus");
     assert.deepEqual(judgement?.labels, ["credentials"]);
     // The classifications ring shows the whole review: namer plus judge latency, combined tokens.
-    assert.equal(derived.recentClassifications[0]?.latencyMs, 1100);
-    assert.equal(derived.recentClassifications[0]?.inputTokens, 100);
+    assert.equal(recentClassifications(derived)[0]?.latencyMs, 1100);
+    assert.equal(recentClassifications(derived)[0]?.inputTokens, 100);
   });
 
   it("tracks the last decision for the status panel", () => {
@@ -176,9 +176,9 @@ describe("deriveRailState", () => {
       railEntry(review({ reason: "older" }), "2026-08-19T10:00:00.000Z"),
       railEntry(review({ decision: "deny", reason: "newest" }), "2026-08-19T10:05:00.000Z"),
     ]);
-    assert.equal(derived.lastDecision?.decision, "deny");
-    assert.equal(derived.lastDecision?.reason, "newest");
-    assert.equal(derived.lastDecision?.at, Date.parse("2026-08-19T10:05:00.000Z"));
+    assert.equal(lastRailDecision(derived)?.decision, "deny");
+    assert.equal(lastRailDecision(derived)?.reason, "newest");
+    assert.equal(lastRailDecision(derived)?.at, Date.parse("2026-08-19T10:05:00.000Z"));
   });
 
   it("silently skips what it cannot parse — one bad record never poisons replay", () => {
@@ -197,7 +197,7 @@ describe("deriveRailState", () => {
     ];
     const derived = deriveRailState(entries);
     assert.equal(derived.stats.reviewed, 2);
-    assert.deepEqual(derived.recent.map((event) => event.reason), ["also good", "good"]);
+    assert.deepEqual(recentEvents(derived).map((event) => event.reason), ["also good", "good"]);
   });
 
   it("ignores the legacy 'guard' customType outright — no compat shims by decision", () => {
@@ -205,7 +205,7 @@ describe("deriveRailState", () => {
     // does not replay: replay reads only what the current rail writes.
     const derived = deriveRailState([railEntry(review(), undefined, "guard")]);
     assert.equal(derived.stats.reviewed, 0);
-    assert.deepEqual(derived.recent, []);
+    assert.deepEqual(recentEvents(derived), []);
   });
 
   it("round-trips A→B→A navigation: deriving branch A again restores it exactly", () => {
@@ -223,7 +223,7 @@ describe("deriveRailState", () => {
     const away = deriveRailState(branchB);
     const back = deriveRailState(branchA);
     assert.deepEqual(back, first, "memory is a pure function of the branch");
-    assert.notDeepEqual(away.recent, first.recent, "and B really was a different branch");
+    assert.notDeepEqual(recentEvents(away), recentEvents(first), "and B really was a different branch");
     assert.equal(away.stats.denied, 0, "the denial navigated away from stopped existing on B");
     assert.equal(back.stats.denied, 1, "and came back with A");
   });
@@ -236,7 +236,7 @@ describe("deriveRailState", () => {
     const derived = deriveRailState(full.slice(0, 1));
     assert.equal(derived.stats.reviewed, 1, "pre-fork history is remembered");
     assert.equal(derived.stats.denied, 0, "post-fork history is not");
-    assert.equal(derived.lastDecision?.reason, "pre-fork");
+    assert.equal(lastRailDecision(derived)?.reason, "pre-fork");
   });
 });
 
@@ -246,9 +246,9 @@ describe("applyDerivedRailState", () => {
     state.traces.push({ at: 1, toolName: "bash", action: "bash: x", final: "allowed", stages: [] });
     applyDerivedRailState(state, [railEntry(review({ decision: "deny", userAnswer: "denied", userComment: "no" }))]);
     assert.equal(state.stats.denied, 1);
-    assert.equal(state.recent[0]?.decision, "deny");
+    assert.equal(recentEvents(state)[0]?.decision, "deny");
     assert.equal(state.classifier.sessionGuidance?.length, 1);
-    assert.equal(state.classifier.lastDecision?.decision, "deny");
+    assert.equal(lastRailDecision(state)?.decision, "deny");
     assert.deepEqual(state.traces, [], "traces carry never-persisted stage detail and must not describe a left branch");
   });
 

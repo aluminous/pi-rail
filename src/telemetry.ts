@@ -234,7 +234,7 @@ function stripToMemoryCore(record: RailTelemetryRecord): RailTelemetryRecord {
 /**
  * Persists a rail decision record to the session log via pi.appendEntry.
  * Always writes when a session is wired: the records are the rail's own
- * memory (session replay derives state.recent, guidance, and stats from
+ * memory (session replay derives the decision spine, guidance, and stats from
  * them), so the telemetry setting only chooses the redaction tier — it can
  * no longer suppress the write. Never throws: session logging is
  * observability, not enforcement, and ephemeral sessions silently skip

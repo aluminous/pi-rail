@@ -53,8 +53,11 @@ export interface ModelUsageStats {
   maxLatencyMs: number;
 }
 
-/** How many entries the recent-classification and recent-judgement rings keep. */
+/** How many rows the recent-classification and recent-judgement views keep. */
 export const REVIEW_RING_LIMIT = 20;
+
+/** How many rows the recent-events view (the status page and the judge's context window) keeps. */
+export const RECENT_EVENT_LIMIT = 8;
 
 /** One resolved capability decision, as the namer tab lists them. */
 export interface ClassificationRecord {
@@ -66,6 +69,8 @@ export interface ClassificationRecord {
   /** What the table resolved over those labels, before a judge or the user answered. */
   disposition: Disposition;
   decision: RailOutcome;
+  /** The one-line reason the event view and the last-decision line show; the namer tab shows `target` instead. */
+  reason: string;
   /** The whole review's latency — namer plus judge; 0 when the labels were entirely deterministic. */
   latencyMs: number;
   /** The whole review's tokens, judge included; the judge tab breaks out its own share. */
@@ -73,6 +78,31 @@ export interface ClassificationRecord {
   outputTokens: number;
   /** Namer model; absent when the labels were deterministic (a `judge` disposition still means the judge ran). */
   model?: string;
+}
+
+/**
+ * One entry on the session's decision spine — the single recency list every
+ * "what just happened" surface derives from. A `review` entry is a resolved
+ * capability decision and feeds three views at once (the event window, the
+ * namer tab, the last-decision line); an `event` entry is everything else the
+ * event window shows (blocks, path approvals, errors, forwarded asks); a
+ * `judgement` entry is one escalation review for the judge tab. Judgements
+ * stay separate from the review they belong to because live records them when
+ * the judge returns while replay records them after the review folds — the
+ * views filter by kind, so that interleaving difference can never show.
+ */
+export type DecisionEntry =
+  | { kind: "event"; event: RailEvent }
+  | { kind: "review"; review: ClassificationRecord }
+  | { kind: "judgement"; judgement: JudgementRecord };
+
+/** The last resolved capability decision, as /rail model and the status panel report it. */
+export interface LastRailDecision {
+  toolName: string;
+  at: number;
+  labels: CapabilityId[];
+  decision: RailOutcome;
+  reason: string;
 }
 
 /** One escalation review, as the judge tab lists them. */
@@ -163,11 +193,13 @@ export interface RuntimeState {
     write: string[];
   };
   stats: RailStats;
-  recent: RailEvent[];
-  /** Resolved capability decisions, newest first (last REVIEW_RING_LIMIT): the status page's namer tab. */
-  recentClassifications: ClassificationRecord[];
-  /** Escalation reviews, newest first (last REVIEW_RING_LIMIT): the status page's judge tab. */
-  recentJudgements: JudgementRecord[];
+  /**
+   * The decision spine, newest first. Not read directly by consumers — the
+   * derived views below (recentEvents, recentClassifications, recentJudgements,
+   * lastRailDecision) slice it per surface, each under its own cap; the list
+   * itself keeps whatever the largest view still needs (see pushDecision).
+   */
+  decisions: DecisionEntry[];
   /** Per-call decision traces for /rail explain, newest first (last TRACE_LIMIT). */
   traces: DecisionTrace[];
   /** Most recent sandboxed bash execution, for the /rail why sandbox-denial window. */
@@ -242,9 +274,7 @@ export function createRuntimeState(): RuntimeState {
     capabilities: createCapabilityState(),
     approvals: { read: [], write: [] },
     stats: createRailStats(),
-    recent: [],
-    recentClassifications: [],
-    recentJudgements: [],
+    decisions: [],
     traces: [],
     availableModelSpecs: [],
     subagentAckWarned: new Set(),
@@ -266,9 +296,7 @@ export function resetSessionState(state: RuntimeState): void {
   state.capabilities = createCapabilityState();
   state.approvals = { read: [], write: [] };
   state.stats = createRailStats();
-  state.recent = [];
-  state.recentClassifications = [];
-  state.recentJudgements = [];
+  state.decisions = [];
   state.traces = [];
   state.lastBashCommand = undefined;
   state.subagentAckWarned = new Set();
@@ -293,9 +321,81 @@ export function resetTurnStats(state: RuntimeState): void {
   state.stats.turnBlocked = 0;
 }
 
+/**
+ * Prepends a spine entry, then trims from the tail. An entry is kept while ANY
+ * view still shows it — the caps are per view, not per list, so a burst of
+ * judgements cannot evict the classifications the namer tab would still list
+ * (and vice versa). Review entries feed both the event window and the namer
+ * tab, so they stay while either window wants them.
+ */
+function pushDecision(state: RuntimeState, entry: DecisionEntry): void {
+  state.decisions.unshift(entry);
+  let events = 0;
+  let reviews = 0;
+  let judgements = 0;
+  state.decisions = state.decisions.filter((kept) => {
+    if (kept.kind === "judgement") return judgements++ < REVIEW_RING_LIMIT;
+    if (kept.kind === "review") {
+      const wanted = events < RECENT_EVENT_LIMIT || reviews < REVIEW_RING_LIMIT;
+      events++;
+      reviews++;
+      return wanted;
+    }
+    return events++ < RECENT_EVENT_LIMIT;
+  });
+}
+
 function pushRecent(state: RuntimeState, event: RailEvent) {
-  state.recent.unshift(event);
-  state.recent = state.recent.slice(0, 8);
+  pushDecision(state, { kind: "event", event });
+}
+
+// ── Derived views over the spine ─────────────────────────────────────────────
+// Each view is a pure slice of state.decisions, so live recording and session
+// replay (which rebuilds the same list) can never disagree per surface. They
+// take just { decisions } so DerivedRailState can be viewed the same way.
+
+/** The recent-events window: the status page's event table and the judge's recent-decisions context. */
+export function recentEvents(state: Pick<RuntimeState, "decisions">): RailEvent[] {
+  const events: RailEvent[] = [];
+  for (const entry of state.decisions) {
+    if (events.length === RECENT_EVENT_LIMIT) break;
+    if (entry.kind === "event") events.push(entry.event);
+    else if (entry.kind === "review") {
+      const review = entry.review;
+      events.push({ at: review.at, toolName: review.toolName, decision: review.decision, capabilities: review.labels, reason: review.reason });
+    }
+  }
+  return events;
+}
+
+/** Resolved capability decisions, newest first: the status page's namer tab. */
+export function recentClassifications(state: Pick<RuntimeState, "decisions">): ClassificationRecord[] {
+  const rows: ClassificationRecord[] = [];
+  for (const entry of state.decisions) {
+    if (rows.length === REVIEW_RING_LIMIT) break;
+    if (entry.kind === "review") rows.push(entry.review);
+  }
+  return rows;
+}
+
+/** Escalation reviews, newest first: the status page's judge tab. */
+export function recentJudgements(state: Pick<RuntimeState, "decisions">): JudgementRecord[] {
+  const rows: JudgementRecord[] = [];
+  for (const entry of state.decisions) {
+    if (rows.length === REVIEW_RING_LIMIT) break;
+    if (entry.kind === "judgement") rows.push(entry.judgement);
+  }
+  return rows;
+}
+
+/** The most recent resolved capability decision, for /rail model's summary line. */
+export function lastRailDecision(state: Pick<RuntimeState, "decisions">): LastRailDecision | undefined {
+  for (const entry of state.decisions) {
+    if (entry.kind !== "review") continue;
+    const review = entry.review;
+    return { toolName: review.toolName, at: review.at, labels: review.labels, decision: review.decision, reason: review.reason };
+  }
+  return undefined;
 }
 
 /**
@@ -344,8 +444,7 @@ export function modelUsageRows(stats: RailStats): ModelUsageStats[] {
 }
 
 export function recordJudgement(state: RuntimeState, record: JudgementRecord): void {
-  state.recentJudgements.unshift(record);
-  state.recentJudgements = state.recentJudgements.slice(0, REVIEW_RING_LIMIT);
+  pushDecision(state, { kind: "judgement", judgement: record });
 }
 
 export function recordDecisionTrace(state: RuntimeState, trace: DecisionTrace): void {
@@ -450,21 +549,24 @@ export function recordCapabilityDecision(state: RuntimeState, toolName: string, 
   if (record.decision === "stop") state.stats.stopped++;
   recordCapabilityHits(state.capabilities, record.labels);
   if (record.decidedBy) recordCapabilityDecided(state.capabilities, record.decidedBy);
-  const at = record.at ?? Date.now();
-  pushRecent(state, { at, toolName, decision: record.decision, capabilities: record.labels, reason: record.reason });
-  state.recentClassifications.unshift({
-    at,
-    toolName,
-    target: record.target,
-    labels: record.labels,
-    disposition: record.disposition,
-    decision: record.decision,
-    latencyMs: record.latencyMs ?? 0,
-    inputTokens: record.tokenUsage?.input ?? 0,
-    outputTokens: record.tokenUsage?.output ?? 0,
-    model: record.model,
+  // One spine entry serves the event window, the namer tab, and the
+  // last-decision line at once; the views derive their old shapes from it.
+  pushDecision(state, {
+    kind: "review",
+    review: {
+      at: record.at ?? Date.now(),
+      toolName,
+      target: record.target,
+      labels: record.labels,
+      disposition: record.disposition,
+      decision: record.decision,
+      reason: record.reason,
+      latencyMs: record.latencyMs ?? 0,
+      inputTokens: record.tokenUsage?.input ?? 0,
+      outputTokens: record.tokenUsage?.output ?? 0,
+      model: record.model,
+    },
   });
-  state.recentClassifications = state.recentClassifications.slice(0, REVIEW_RING_LIMIT);
 }
 
 /** A read or allowlisted command skipped classifier review deterministically. */

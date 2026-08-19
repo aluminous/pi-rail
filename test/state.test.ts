@@ -3,7 +3,11 @@ import { describe, it } from "node:test";
 import { capabilityStats } from "../src/capabilities.ts";
 import {
   createRuntimeState,
+  lastRailDecision,
   modelUsageRows,
+  recentClassifications,
+  recentEvents,
+  recentJudgements,
   recordApprovalDenied,
   recordApprovalGranted,
   recordApprovalRequested,
@@ -24,7 +28,7 @@ describe("decision recording", () => {
     assert.equal(state.stats.ruleHits, 1);
     assert.equal(state.stats.turnRuleHits, 1);
     assert.equal(state.stats.blocked, 1);
-    assert.equal(state.recent[0]?.decision, "block");
+    assert.equal(recentEvents(state)[0]?.decision, "block");
   });
 
   it("tracks the approval ask/deny flow", () => {
@@ -39,7 +43,7 @@ describe("decision recording", () => {
   it("records approval grants as allow events without counter changes", () => {
     const state = createRuntimeState();
     recordApprovalGranted(state, "read", "read", "/tmp/x");
-    assert.equal(state.recent[0]?.decision, "allow");
+    assert.equal(recentEvents(state)[0]?.decision, "allow");
     assert.equal(state.stats.ruleHits, 0);
     assert.equal(state.stats.allowed, 0);
   });
@@ -60,7 +64,7 @@ describe("decision recording", () => {
     assert.equal(state.stats.classifierInputTokens, 150);
     assert.equal(state.stats.classifierOutputTokens, 30);
     assert.equal(capabilityStats(state.capabilities, "credentials").hits, 1);
-    assert.equal(state.recent[0]?.capabilities?.[0], "off-machine-effects");
+    assert.equal(recentEvents(state)[0]?.capabilities?.[0], "off-machine-effects");
   });
 
   it("counts a deterministic table hit as a rule hit, not a review", () => {
@@ -77,7 +81,7 @@ describe("decision recording", () => {
     const state = createRuntimeState();
     recordClassifierError(state, "bash", "boom", "timeout");
     assert.equal(state.stats.errors, 1);
-    assert.equal(state.recent[0]?.decision, "error");
+    assert.equal(recentEvents(state)[0]?.decision, "error");
     assert.deepEqual(state.stats.errorsByKind, { timeout: 1 });
   });
 
@@ -96,8 +100,8 @@ describe("decision recording", () => {
   it("caps recent events at 8", () => {
     const state = createRuntimeState();
     for (let i = 0; i < 12; i++) recordPolicyBlock(state, "read", `block ${i}`);
-    assert.equal(state.recent.length, 8);
-    assert.equal(state.recent[0]?.reason, "block 11");
+    assert.equal(recentEvents(state).length, 8);
+    assert.equal(recentEvents(state)[0]?.reason, "block 11");
   });
 
   it("resets turn counters without touching session totals", () => {
@@ -204,8 +208,8 @@ describe("recent review rings", () => {
     const state = createRuntimeState();
     classify(state, 1);
     classify(state, 2);
-    const [newest] = state.recentClassifications;
-    assert.equal(state.recentClassifications.length, 2);
+    const [newest] = recentClassifications(state);
+    assert.equal(recentClassifications(state).length, 2);
     assert.equal(newest?.inputTokens, 20);
     assert.equal(newest?.outputTokens, 2);
     assert.equal(newest?.latencyMs, 2);
@@ -218,8 +222,8 @@ describe("recent review rings", () => {
   it("leaves the model and latency empty for a deterministic decision", () => {
     const state = createRuntimeState();
     recordCapabilityDecision(state, "read", { target: "", labels: ["read-project"], decision: "allow", disposition: "allow", reason: "in cwd", reviewed: false });
-    assert.equal(state.recentClassifications[0]?.model, undefined);
-    assert.equal(state.recentClassifications[0]?.latencyMs, 0);
+    assert.equal(recentClassifications(state)[0]?.model, undefined);
+    assert.equal(recentClassifications(state)[0]?.latencyMs, 0);
   });
 
   it("caps both rings and drops them on session reset", () => {
@@ -228,13 +232,35 @@ describe("recent review rings", () => {
       classify(state, i);
       recordJudgement(state, { at: Date.now(), toolName: "bash", target: "", labels: ["credentials"], verdict: "ask", reason: `judge ${i}`, latencyMs: i, inputTokens: i, outputTokens: i });
     }
-    assert.equal(state.recentClassifications.length, REVIEW_RING_LIMIT);
-    assert.equal(state.recentJudgements.length, REVIEW_RING_LIMIT);
-    assert.equal(state.recentJudgements[0]?.reason, `judge ${REVIEW_RING_LIMIT + 4}`);
+    assert.equal(recentClassifications(state).length, REVIEW_RING_LIMIT);
+    assert.equal(recentJudgements(state).length, REVIEW_RING_LIMIT);
+    assert.equal(recentJudgements(state)[0]?.reason, `judge ${REVIEW_RING_LIMIT + 4}`);
     resetSessionState(state);
-    assert.deepEqual(state.recentClassifications, []);
-    assert.deepEqual(state.recentJudgements, []);
-    assert.deepEqual(state.recent, []);
+    assert.deepEqual(recentClassifications(state), []);
+    assert.deepEqual(recentJudgements(state), []);
+    assert.deepEqual(state.decisions, []);
+  });
+
+  it("keeps each view's window independent: a judgement burst cannot evict the namer rows", () => {
+    const state = createRuntimeState();
+    for (let i = 0; i < 5; i++) classify(state, i);
+    for (let i = 0; i < REVIEW_RING_LIMIT + 10; i++) {
+      recordJudgement(state, { at: Date.now(), toolName: "bash", target: "", labels: ["credentials"], verdict: "ask", reason: `judge ${i}`, latencyMs: i, inputTokens: i, outputTokens: i });
+    }
+    assert.equal(recentClassifications(state).length, 5, "the old per-ring behavior: other kinds never crowd a view out");
+    assert.equal(recentJudgements(state).length, REVIEW_RING_LIMIT);
+    assert.equal(recentEvents(state).length, 5, "judgements are not event rows");
+  });
+
+  it("derives the last decision from the newest review entry, skipping later plain events", () => {
+    const state = createRuntimeState();
+    assert.equal(lastRailDecision(state), undefined);
+    classify(state, 1);
+    recordPolicyBlock(state, "write", "blocked after");
+    const last = lastRailDecision(state);
+    assert.equal(last?.decision, "allow");
+    assert.equal(last?.reason, "call 1");
+    assert.deepEqual(last?.labels, ["run-dev-tools"]);
   });
 });
 

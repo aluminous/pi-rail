@@ -26,7 +26,6 @@ import {
   retryFailureKind,
   tagClassifierFailure,
   type ClassifierTokenUsage,
-  type RailOutcome,
   type JudgeResult,
   type NamerResult,
 } from "./classifier-protocol.ts";
@@ -45,15 +44,6 @@ export {
   type ReviewProjection,
 } from "./classifier-protocol.ts";
 
-/** The last resolved decision, for the status panel. */
-export interface LastRailDecision {
-  toolName: string;
-  at: number;
-  labels: CapabilityId[];
-  decision: RailOutcome;
-  reason: string;
-}
-
 export interface ClassifierState {
   enabledOverride?: boolean;
   modelOverride?: string;
@@ -63,7 +53,6 @@ export interface ClassifierState {
    * "off" here on purpose: the judge cannot be disabled, only re-pointed.
    */
   judgeModelOverride?: string;
-  lastDecision?: LastRailDecision;
   lastError?: string;
   /**
    * Session-scoped, user-authored guidance collected from allow/deny-with-

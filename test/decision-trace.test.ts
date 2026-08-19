@@ -11,7 +11,7 @@ import type { CompleteFn } from "../src/classifier.ts";
 import { createRailCommand } from "../src/commands/rail.ts";
 import { formatDecisionTrace, TRACE_LIMIT, type DecisionTrace } from "../src/decision-trace.ts";
 import { interceptToolCall } from "../src/interceptor.ts";
-import { createRuntimeState, recordDecisionTrace, resetSessionState } from "../src/state.ts";
+import { createRuntimeState, lastRailDecision, recordDecisionTrace, resetSessionState } from "../src/state.ts";
 import { makeFixtureDir, testConfig } from "./helpers.ts";
 
 const fixture = makeFixtureDir();
@@ -188,8 +188,8 @@ describe("decision traces", () => {
     const capabilities = trace.stages.find((s) => s.stage === "capabilities");
     assert.equal(capabilities?.outcome, "allow");
     assert.match(capabilities!.detail, /run-dev-tools→allow \(default\) ⇒ allow/);
-    assert.equal(state.classifier.lastDecision?.decision, "allow");
-    assert.deepEqual(state.classifier.lastDecision?.labels, ["run-dev-tools"]);
+    assert.equal(lastRailDecision(state)?.decision, "allow");
+    assert.deepEqual(lastRailDecision(state)?.labels, ["run-dev-tools"]);
   });
 
   it("records the judge stage when the table escalates", async () => {

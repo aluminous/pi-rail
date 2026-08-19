@@ -9,7 +9,7 @@ import { capabilityStats } from "../src/capabilities.ts";
 import type { CompleteFn } from "../src/classifier.ts";
 import { interceptToolCall, stopTurnForClassifierFailure, withWorkingMessage } from "../src/interceptor.ts";
 import { deriveRailState } from "../src/session-replay.ts";
-import { createRuntimeState, modelUsageRows } from "../src/state.ts";
+import { createRuntimeState, lastRailDecision, modelUsageRows, recentClassifications, recentEvents, recentJudgements } from "../src/state.ts";
 import type { RailErrorTelemetry } from "../src/telemetry.ts";
 import { makeFixtureDir, testConfig, withTempAgentDirAsync } from "./helpers.ts";
 
@@ -147,7 +147,7 @@ describe("classifier read exemption", () => {
     const result = await interceptToolCall({ toolName: "read", input: { path: ".env" } }, fakeCtx(cwd), state);
     assert.equal(result?.block, true);
     assert.equal(state.stats.classifierSkips, 0, "a read that reached the judge is not an exemption");
-    assert.deepEqual(state.recent[0]?.capabilities, ["credentials"]);
+    assert.deepEqual(recentEvents(state)[0]?.capabilities, ["credentials"]);
   });
 });
 
@@ -164,7 +164,7 @@ describe("write content screen routing", () => {
     assert.equal(result, undefined);
     assert.equal(state.stats.classifierSkips, 1);
     assert.equal(state.stats.classifierHits, 0);
-    assert.deepEqual(state.recent[0]?.capabilities, ["modify-project"]);
+    assert.deepEqual(recentEvents(state)[0]?.capabilities, ["modify-project"]);
   });
 
   it("sends a write whose content trips the screen to the namer", async () => {
@@ -276,7 +276,7 @@ describe("commands.classify labelling", () => {
     assert.match(result.reason, /Rail denied/);
     assert.match(result.reason, /k8s-ops \(Cluster ops\), which is set to deny/);
     assert.equal(seen.calls, 0, "a tightening verdict never consults the namer");
-    assert.deepEqual(state.recent[0]?.capabilities, ["k8s-ops"]);
+    assert.deepEqual(recentEvents(state)[0]?.capabilities, ["k8s-ops"]);
     assert.equal(state.stats.ruleHits, 1);
   });
 
@@ -287,7 +287,7 @@ describe("commands.classify labelling", () => {
     assert.equal(result, undefined, "the user approved");
     assert.equal(seen.calls, 0);
     assert.equal(state.stats.asked, 0, "an approved ask is counted as an allow decision");
-    assert.deepEqual(state.recent[0]?.decision, "allow");
+    assert.deepEqual(recentEvents(state)[0]?.decision, "allow");
 
     const denied = await interceptToolCall({ toolName: "bash", input: { command: "kubectl apply -f deploy.yaml" } }, reviewingCtx(["Deny"]), state, complete);
     assert.equal(denied?.block, true);
@@ -314,8 +314,8 @@ describe("commands.classify labelling", () => {
     assert.equal(state.stats.stopped, 1);
     assert.equal(state.stats.denied, 0, "a stop is not a denial");
     assert.equal(state.stats.blocked, 0, "nor a policy block");
-    assert.equal(state.classifier.lastDecision?.decision, "stop");
-    assert.equal(state.recent[0]?.decision, "stop", "the judge's recent-decision feed must not read this as a refusal");
+    assert.equal(lastRailDecision(state)?.decision, "stop");
+    assert.equal(recentEvents(state)[0]?.decision, "stop", "the judge's recent-decision feed must not read this as a refusal");
   });
 
   it("renders a judge ask as two labeled lines, keeping the composed reason for the ring", async () => {
@@ -343,11 +343,11 @@ describe("commands.classify labelling", () => {
     assert.ok(!prompts[0]!.includes("deletes the api pod in the current cluster context — cluster"), "the dialog must not show the composed one-string form");
     // Single-string consumers keep one composed reason: "action — risk".
     assert.equal(
-      state.classifier.lastDecision?.reason,
+      lastRailDecision(state)?.reason,
       "deletes the api pod in the current cluster context — cluster state the session cwd does not cover",
     );
-    assert.equal(state.recent[0]?.reason, state.classifier.lastDecision?.reason);
-    assert.equal(state.recentJudgements[0]?.reason, state.classifier.lastDecision?.reason);
+    assert.equal(recentEvents(state)[0]?.reason, lastRailDecision(state)?.reason);
+    assert.equal(recentJudgements(state)[0]?.reason, lastRailDecision(state)?.reason);
   });
 
   it("still runs the judge for a judge class — only the namer's label step is skipped", async () => {
@@ -357,7 +357,7 @@ describe("commands.classify labelling", () => {
     assert.equal(result?.block, true);
     assert.match(result.reason, /Rail judge denied: that context is the production cluster/);
     assert.equal(seen.calls, 1, "exactly one model call: the judge, on the deterministic labels");
-    assert.deepEqual(state.recentJudgements[0]?.labels, ["k8s-ops"]);
+    assert.deepEqual(recentJudgements(state)[0]?.labels, ["k8s-ops"]);
   });
 
   it("needs an enforcing sandbox before a deterministic allow, and falls to the namer without one", async () => {
@@ -366,7 +366,7 @@ describe("commands.classify labelling", () => {
     const result = await interceptToolCall({ toolName: "bash", input: { command: "kubectl get pods" } }, reviewingCtx(), state, complete);
     assert.equal(seen.calls, 1, "an allow without containment is the one case that still gets named");
     assert.equal(result?.block, true, "headless: the namer's off-machine-effects asks, and nobody can answer");
-    assert.deepEqual(state.recent[0]?.capabilities, ["off-machine-effects"]);
+    assert.deepEqual(recentEvents(state)[0]?.capabilities, ["off-machine-effects"]);
   });
 
   it("allows deterministically once the sandbox is enforcing", async () => {
@@ -384,7 +384,7 @@ describe("commands.classify labelling", () => {
     const result = await interceptToolCall({ toolName: "bash", input: { command: "kubectl get pods && helm upgrade api" } }, reviewingCtx(), state, complete);
     assert.equal(result, undefined, "the namer's own labels decide; the matched half seeds nothing");
     assert.equal(seen.calls, 1);
-    assert.deepEqual(state.recent[0]?.capabilities, ["run-dev-tools"], "no k8s-ops label leaked in from the matched segment");
+    assert.deepEqual(recentEvents(state)[0]?.capabilities, ["run-dev-tools"], "no k8s-ops label leaked in from the matched segment");
   });
 
   it("lets a user rule re-classify a built-in allowlist template", async () => {
@@ -399,7 +399,7 @@ describe("commands.classify labelling", () => {
     const result = await interceptToolCall({ toolName: "bash", input: { command: "git log --oneline" } }, reviewingCtx(), state, complete);
     assert.equal(result?.block, true, "off-machine-effects asks, and this session is headless");
     assert.equal(seen.calls, 0);
-    assert.deepEqual(state.recent[0]?.capabilities, ["off-machine-effects"]);
+    assert.deepEqual(recentEvents(state)[0]?.capabilities, ["off-machine-effects"]);
 
     // Templates the user did not re-map keep the allowlist's own tag.
     const untouched = await interceptToolCall({ toolName: "bash", input: { command: "git status" } }, reviewingCtx(), state, complete);
@@ -450,11 +450,14 @@ describe("commands.classify labelling", () => {
     }));
     const derived = deriveRailState(entries as unknown as SessionEntry[]);
     const timeless = <T extends { at: number }>(rows: T[]) => rows.map(({ at, ...rest }) => rest);
-    assert.deepEqual(timeless(derived.recent), timeless(state.recent));
-    assert.deepEqual(timeless(derived.recentClassifications), timeless(state.recentClassifications));
+    // Compare per view rather than the raw spine: within-kind order is the
+    // contract; review/judgement interleaving may differ between live and replay.
+    assert.deepEqual(timeless(recentEvents(derived)), timeless(recentEvents(state)));
+    assert.deepEqual(timeless(recentClassifications(derived)), timeless(recentClassifications(state)));
+    assert.deepEqual(timeless(recentJudgements(derived)), timeless(recentJudgements(state)));
     assert.deepEqual(derived.sessionGuidance, state.classifier.sessionGuidance);
-    assert.equal(derived.lastDecision?.decision, state.classifier.lastDecision?.decision);
-    assert.equal(derived.lastDecision?.reason, state.classifier.lastDecision?.reason);
+    assert.equal(lastRailDecision(derived)?.decision, lastRailDecision(state)?.decision);
+    assert.equal(lastRailDecision(derived)?.reason, lastRailDecision(state)?.reason);
     // Turn counters are the one deliberate difference: per-turn, never per-branch.
     assert.deepEqual(derived.stats, { ...state.stats, turnRuleHits: 0, turnClassifierHits: 0, turnClassifierDenials: 0, turnBlocked: 0 });
   });
@@ -495,7 +498,7 @@ describe("out-of-roots writes resolve through modify-system", () => {
     const first = await interceptToolCall({ toolName: "write", input: { path: outside, content: "x" } }, ctx, state);
     assert.equal(first, undefined);
     assert.equal(state.approvals.write.length, 1);
-    assert.deepEqual(state.recent[0]?.decision, "allow");
+    assert.deepEqual(recentEvents(state)[0]?.decision, "allow");
 
     // Second write to the same path reuses the session memory: no second dialog
     // (the fake would answer "Deny" if one were shown).
@@ -531,7 +534,7 @@ describe("out-of-roots writes resolve through modify-system", () => {
     assert.equal(state.approvals.write.length, 0, "a cancelled ask approves nothing");
     assert.equal(state.stats.stopped, 1);
     assert.equal(state.stats.blocked, 0, "a stopped turn is not a policy block");
-    assert.equal(state.recent[0]?.decision, "stop");
+    assert.equal(recentEvents(state)[0]?.decision, "stop");
   });
 });
 
@@ -636,7 +639,7 @@ describe("classifier failure diagnostics", () => {
     assert.equal(state.stats.errors, 1, "a judge failure counts as a classifier error");
     assert.deepEqual(state.stats.errorsByKind, { "invalid response": 1 });
     assert.equal(state.classifier.lastError, `invalid response on ${MODEL} after 5 attempts: reviewer did not return JSON`);
-    const errorEvent = state.recent.find((event) => event.decision === "error");
+    const errorEvent = recentEvents(state).find((event) => event.decision === "error");
     assert.equal(errorEvent?.reason, `judge: invalid response on ${MODEL} after 5 attempts: reviewer did not return JSON`);
     const record = telemetry.map((entry) => entry.data as RailErrorTelemetry).find((data) => data.kind === "error");
     assert.equal(record?.failureKind, "invalid response");
@@ -697,13 +700,13 @@ describe("review accounting", () => {
     assert.equal(rows[0]!.unpricedCalls, 0);
     assert.ok(rows[0]!.maxLatencyMs >= 0);
 
-    const judgement = state.recentJudgements[0];
+    const judgement = recentJudgements(state)[0];
     assert.equal(judgement?.verdict, "ask");
     assert.equal(judgement?.reason, "reads the private SSH key — credential material in scope", "the ring keeps the composed one-string reason");
     assert.equal(judgement?.model, MODEL);
     assert.equal(judgement?.inputTokens, 10);
 
-    const classification = state.recentClassifications[0];
+    const classification = recentClassifications(state)[0];
     assert.deepEqual(classification?.labels, ["credentials"]);
     assert.equal(classification?.disposition, "judge", "the row says the judge ran even though the namer model is the one named");
     assert.equal(classification?.decision, "deny", "headless: the judge's ask has nobody to answer it");

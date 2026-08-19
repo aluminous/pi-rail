@@ -15,7 +15,7 @@ import { INTERCEPTED_TOOLS } from "../intercepted-tools.ts";
 import { exemptReadCallReason } from "../interceptor.ts";
 import { showRailView } from "../live-view.ts";
 import { decidePathAccess, denyReadMatch, type AccessKind } from "../policy.ts";
-import { syncCapabilityPreset, type RuntimeState } from "../state.ts";
+import { recentEvents, syncCapabilityPreset, type RuntimeState } from "../state.ts";
 
 
 export interface RailTestDeps {
@@ -120,7 +120,7 @@ export function createRailTest(deps: RailTestDeps) {
         input: plan.input,
         labels: resolution.labels,
         authorizationEvidence: named?.authorizationEvidence,
-        recentGuardDecisions: state.recent.slice(0, 8).map((event) => `${event.decision} ${event.toolName}: ${event.reason}`),
+        recentGuardDecisions: recentEvents(state).map((event) => `${event.decision} ${event.toolName}: ${event.reason}`),
         completeFn: deps.completeFn,
       });
       const usage = judge.tokenUsage;
