@@ -95,7 +95,7 @@ describe("isCommandAllowlisted", () => {
     assert.equal(isCommandAllowlisted("git remote -v", DEFAULT_COMMAND_ALLOWLIST), true);
     assert.equal(isCommandAllowlisted("git remote add origin git@github.com:x/y.git", DEFAULT_COMMAND_ALLOWLIST), false);
     assert.equal(isCommandAllowlisted("git stash list", DEFAULT_COMMAND_ALLOWLIST), true);
-    assert.equal(isCommandAllowlisted("git stash pop", DEFAULT_COMMAND_ALLOWLIST), false);
+    assert.equal(isCommandAllowlisted("git stash drop", DEFAULT_COMMAND_ALLOWLIST), false);
     assert.equal(isCommandAllowlisted("git tag", DEFAULT_COMMAND_ALLOWLIST), true);
     assert.equal(isCommandAllowlisted("git tag v1.0.0", DEFAULT_COMMAND_ALLOWLIST), false);
     assert.equal(isCommandAllowlisted("git config --get user.name", DEFAULT_COMMAND_ALLOWLIST), true);
@@ -125,6 +125,19 @@ describe("capability tags", () => {
 
   it("tags toolchain probes as run-dev-tools", () => {
     assert.deepEqual(caps("node --version"), ["run-dev-tools"]);
+  });
+
+  it("tags stash create/reapply as modify-project and keeps drop/clear off the list", () => {
+    assert.deepEqual(caps("git stash"), ["modify-project"]);
+    assert.deepEqual(caps('git stash push -m "wip"'), ["modify-project"]);
+    assert.deepEqual(caps("git stash push"), ["modify-project"], "trailing * covers the bare subcommand");
+    assert.deepEqual(caps("git stash pop"), ["modify-project"]);
+    assert.deepEqual(caps("git stash apply stash@{1}"), ["modify-project"]);
+    assert.deepEqual(caps("git stash show -p"), ["read-project"]);
+    assert.equal(isCommandAllowlisted("git stash drop", DEFAULT_COMMAND_ALLOWLIST), false);
+    assert.equal(isCommandAllowlisted("git stash drop stash@{0}", DEFAULT_COMMAND_ALLOWLIST), false);
+    assert.equal(isCommandAllowlisted("git stash clear", DEFAULT_COMMAND_ALLOWLIST), false);
+    assert.equal(isCommandAllowlisted("git stash branch topic", DEFAULT_COMMAND_ALLOWLIST), false);
   });
 
   it("unions the tags across chain segments", () => {

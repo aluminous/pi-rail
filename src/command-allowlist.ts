@@ -12,8 +12,9 @@ import { literalWordText, parseShellCommand, type ShellCommand, type ShellWord }
  * jobs — parses fine and is conservatively unmatchable.
  *
  * Two rule lists share this machinery and this grammar: the built-in
- * allowlist below (`commands.allow`, whose templates are all read-only by
- * construction) and user classification rules (`commands.classify`, which map
+ * allowlist below (`commands.allow`, whose templates are read-only by
+ * construction save the stash carve-out documented there) and user
+ * classification rules (`commands.classify`, which map
  * a template to any capability class, including custom ones). They differ only
  * in where the capability tag comes from and in which is consulted first.
  */
@@ -34,15 +35,19 @@ export interface CommandCapabilityRule {
  * (-r with outfile), tee and tree (-o) write files; env/command/xargs/
  * timeout/time run other programs; date/hostname with args can attempt to
  * set system state, so only their bare forms are listed. Mutating git
- * subcommands (remote add, tag NAME, config KEY VAL, stash push, reflog
- * expire) are excluded by pinning those subcommands to their read-only
- * spellings.
+ * subcommands (remote add, tag NAME, config KEY VAL, reflog expire) are
+ * excluded by pinning those subcommands to their read-only spellings. The one
+ * write-capable carve-out is stash create/reapply (stash, push, pop, apply):
+ * stashing PRESERVES work rather than discarding it — entries persist in the
+ * stash reflog and an apply that would clobber changes fails — while drop and
+ * clear, which do discard entries, stay off the list.
  *
  * Each template also carries the capability it resolves to, which is what
  * makes the allowlist a *cache of a label* rather than a cache of a verdict:
  * flipping `read-project` to ask in the disposition table retunes the fast
  * path too. Machine introspection (uname, whoami, printenv) is read-system;
- * toolchain probes are run-dev-tools; everything else here is read-project.
+ * toolchain probes are run-dev-tools; stash create/reapply is modify-project;
+ * everything else here is read-project.
  */
 export const DEFAULT_COMMAND_ALLOW_RULES: CommandCapabilityRule[] = [
   // File and text inspection (stdout-only)
@@ -110,6 +115,11 @@ export const DEFAULT_COMMAND_ALLOW_RULES: CommandCapabilityRule[] = [
   { template: "git remote", capability: "read-project" },
   { template: "git remote -v", capability: "read-project" },
   { template: "git stash list", capability: "read-project" },
+  { template: "git stash show *", capability: "read-project" },
+  { template: "git stash", capability: "modify-project" },
+  { template: "git stash push *", capability: "modify-project" },
+  { template: "git stash pop *", capability: "modify-project" },
+  { template: "git stash apply *", capability: "modify-project" },
   { template: "git worktree list", capability: "read-project" },
   { template: "git tag", capability: "read-project" },
   { template: "git tag -l *", capability: "read-project" },

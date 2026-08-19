@@ -67,6 +67,12 @@ describe("taxonomy", () => {
     const definition = BUILTIN_CAPABILITY_CLASSES.find((entry) => entry.id === "local-destructive")!.definition;
     assert.match(definition, /local git commit/i);
   });
+
+  it("carves stash create/reapply out of local-destructive but keeps drop and clear in", () => {
+    const definition = BUILTIN_CAPABILITY_CLASSES.find((entry) => entry.id === "local-destructive")!.definition;
+    assert.match(definition, /stash push \/ pop \/ apply\) is modify-project/);
+    assert.match(definition, /git stash drop.*git stash clear.*ARE this class/);
+  });
 });
 
 describe("severity-max", () => {
