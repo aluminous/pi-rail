@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { startApprovalMailbox } from "./src/approval-mailbox.ts";
-import { askRailApproval } from "./src/approvals.ts";
+import { askRailApproval, wireBlockedSignal } from "./src/approvals.ts";
 import { NoneBackend } from "./src/backends/none.ts";
 import { SeatbeltBackend } from "./src/backends/seatbelt.ts";
 import type { RailBackend } from "./src/backends/types.ts";
@@ -39,6 +39,9 @@ export default function (pi: ExtensionAPI) {
   // Decision telemetry lands in pi's own session log as custom entries
   // (user-approved feature: rail decision records via pi.appendEntry).
   state.appendEntry = (customType, data) => pi.appendEntry(customType, data);
+  // Pane managers (herdr) learn via the shared bus when an approval dialog is
+  // blocking on the user; harmless when nothing listens.
+  wireBlockedSignal(state, pi.events);
 
   function sandboxedOps() {
     if (!state.backend || !state.config) return undefined;
