@@ -313,10 +313,11 @@ export function clearSessionDisposition(state: CapabilityState, id: CapabilityId
  * custom classes this session deleted are dropped.
  *
  * Order is load-bearing beyond tidiness: this array is what
- * capabilityDefinitionsForPrompt serializes into the namer payload, and that
- * payload heads the cacheable prefix. Same registry ⇒ byte-identical prefix.
- * Editing the taxonomy therefore invalidates the provider's prompt cache once,
- * which is the accepted cost of an editable vocabulary.
+ * capabilityDefinitionsForPrompt serializes into the reviewers' system prompts,
+ * which Anthropic's system-prompt cache breakpoint covers. Same registry ⇒
+ * byte-identical system prompt. Editing the taxonomy therefore invalidates the
+ * provider's prompt cache once, which is the accepted cost of an editable
+ * vocabulary.
  */
 export function capabilityRegistry(
   config: { capabilities?: { classes: CapabilityClass[]; definitions: Record<string, string> } } | undefined,
@@ -511,9 +512,10 @@ export function recordScreenVerdict(state: CapabilityState, labels: CapabilityId
 }
 
 /**
- * The taxonomy block sent to the namer and the judge. Fixed for a given
- * registry, so it heads the cacheable prefix; editing the taxonomy is the one
- * thing that moves it (see capabilityRegistry on the accepted cache cost).
+ * The taxonomy block sent to the namer and the judge, inside their system
+ * prompts so provider caches cover it. Fixed for a given registry; editing the
+ * taxonomy is the one thing that moves it (see capabilityRegistry on the
+ * accepted cache cost).
  */
 export function capabilityDefinitionsForPrompt(registry: CapabilityClass[]): Array<{ id: CapabilityId; definition: string }> {
   return registry.map((entry) => ({ id: entry.id, definition: entry.definition }));

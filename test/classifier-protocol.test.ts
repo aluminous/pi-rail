@@ -5,7 +5,9 @@ import {
   ClassifierRetryableError,
   JUDGE_SYSTEM_PROMPT,
   NAMER_SYSTEM_PROMPT,
+  buildJudgeSystemPrompt,
   buildJudgeText,
+  buildNamerSystemPrompt,
   buildNamerText,
   classifierRetryClass,
   classifyClassifierFailure,
@@ -338,46 +340,81 @@ describe("projectToolCall", () => {
   });
 });
 
+describe("review system prompts", () => {
+  const projection = projectToolCall("bash", { command: "ls" }, "/repo", testConfig());
+
+  it("carries the whole static block: class definitions, active policy, cwd", () => {
+    const system = buildNamerSystemPrompt(REGISTRY, projection.policySummary, projection.cwd);
+    assert.ok(system.includes('"capabilityClasses"'));
+    assert.ok(system.includes('"activePolicy"'));
+    assert.ok(system.includes('"cwd": "/repo"'));
+    // All twelve built-in class ids are present, not a summary of them.
+    for (const id of BUILTIN_IDS) assert.ok(system.includes(`"${id}"`), id);
+  });
+
+  it("contains each reviewer's instruction prompt verbatim", () => {
+    assert.ok(buildNamerSystemPrompt(REGISTRY, projection.policySummary, "/repo").startsWith(NAMER_SYSTEM_PROMPT));
+    assert.ok(buildJudgeSystemPrompt(REGISTRY, projection.policySummary, "/repo").startsWith(JUDGE_SYSTEM_PROMPT));
+  });
+
+  it("keeps the namer and the judge on different prompts over the same static block", () => {
+    const namer = buildNamerSystemPrompt(REGISTRY, projection.policySummary, "/repo");
+    const judge = buildJudgeSystemPrompt(REGISTRY, projection.policySummary, "/repo");
+    assert.notEqual(namer, judge);
+  });
+
+  it("is byte-stable for a fixed registry, policy, and cwd, so the system breakpoint can hit", () => {
+    const again = projectToolCall("write", { path: "src/x.ts", content: "export {}" }, "/repo", testConfig());
+    assert.equal(
+      buildNamerSystemPrompt(REGISTRY, projection.policySummary, projection.cwd),
+      buildNamerSystemPrompt(REGISTRY, again.policySummary, again.cwd),
+    );
+  });
+});
+
 describe("review payloads", () => {
-  it("leads the namer payload with the static class definitions and ends with pendingAction", () => {
+  it("keeps the user text volatile-only and ends it with pendingAction", () => {
     const projection = projectToolCall("bash", { command: "ls" }, "/repo", testConfig());
-    const payload = JSON.parse(buildNamerText(REGISTRY, ["please run ls"], projection));
-    assert.deepEqual(Object.keys(payload), ["capabilityClasses", "activePolicy", "cwd", "recentUserMessages", "pendingAction"]);
-    assert.equal(payload.capabilityClasses.length, 12);
+    const text = buildNamerText(["please run ls"], projection);
+    const payload = JSON.parse(text);
+    assert.deepEqual(Object.keys(payload), ["recentUserMessages", "pendingAction"]);
     assert.deepEqual(payload.recentUserMessages, ["please run ls"]);
+    // The static block lives in the system prompt now; any copy here would be
+    // paid for on every call without ever being cacheable on Anthropic.
+    assert.ok(!text.includes("capabilityClasses"));
+    assert.ok(!text.includes("activePolicy"));
   });
 
   it("injects session guidance only when present", () => {
     const projection = projectToolCall("bash", { command: "npm run deploy" }, "/repo", testConfig());
     const guidance = ["User allowed bash (npm run deploy) with comment: staging deploys are fine"];
-    const withGuidance = JSON.parse(buildNamerText(REGISTRY, [], projection, guidance));
+    const withGuidance = JSON.parse(buildNamerText([], projection, guidance));
     assert.deepEqual(withGuidance.userSessionGuidance, guidance);
-    assert.equal("userSessionGuidance" in JSON.parse(buildNamerText(REGISTRY, [], projection)), false);
+    assert.equal("userSessionGuidance" in JSON.parse(buildNamerText([], projection)), false);
   });
 
   it("gives the judge the rail's recent decisions and the namer's labels", () => {
     const projection = projectToolCall("bash", { command: "git push --force origin main" }, "/repo", testConfig());
-    const payload = JSON.parse(
-      buildJudgeText({
-        registry: REGISTRY,
-        recentUserMessages: ["tidy up the history"],
-        projection,
-        recentGuardDecisions: ["deny bash (off-machine-effects): user denied a force push"],
-        labels: ["off-machine-effects", "local-destructive"],
-        authorizationEvidence: "tidy up the history",
-      }),
-    );
-    assert.deepEqual(Object.keys(payload), ["capabilityClasses", "activePolicy", "cwd", "recentUserMessages", "recentGuardDecisions", "pendingAction"]);
+    const text = buildJudgeText({
+      recentUserMessages: ["tidy up the history"],
+      projection,
+      recentGuardDecisions: ["deny bash (off-machine-effects): user denied a force push"],
+      labels: ["off-machine-effects", "local-destructive"],
+      authorizationEvidence: "tidy up the history",
+    });
+    const payload = JSON.parse(text);
+    assert.deepEqual(Object.keys(payload), ["recentUserMessages", "recentGuardDecisions", "pendingAction"]);
     assert.deepEqual(payload.pendingAction.capabilityLabels, ["off-machine-effects", "local-destructive"]);
     assert.equal(payload.pendingAction.authorizationEvidence, "tidy up the history");
     assert.equal(payload.recentGuardDecisions.length, 1);
+    assert.ok(!text.includes("capabilityClasses"));
   });
 
-  it("keeps the payload prefix byte-stable across calls so provider prompt caches can hit", () => {
+  it("keeps the payload prefix byte-stable across calls so automatic-prefix providers can hit", () => {
     const config = testConfig();
     const guidance = ["User allowed bash (npm test) with comment: fine"];
-    const a = buildNamerText(REGISTRY, ["same turn message"], projectToolCall("bash", { command: "npm test" }, "/repo", config), guidance);
-    const b = buildNamerText(REGISTRY, ["same turn message"], projectToolCall("write", { path: "src/x.ts", content: "export {}" }, "/repo", config), guidance);
+    const a = buildNamerText(["same turn message"], projectToolCall("bash", { command: "npm test" }, "/repo", config), guidance);
+    const b = buildNamerText(["same turn message"], projectToolCall("write", { path: "src/x.ts", content: "export {}" }, "/repo", config), guidance);
     const divergence = a.indexOf('"pendingAction"');
     assert.ok(divergence > 0);
     assert.equal(a.slice(0, divergence), b.slice(0, divergence));

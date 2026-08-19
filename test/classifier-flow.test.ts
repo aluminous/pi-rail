@@ -123,6 +123,21 @@ describe("namer", () => {
     await name(io);
     assert.ok(calls[0]?.text.includes("please push to main"));
   });
+
+  it("ships the static context in the system prompt, not the user message", async () => {
+    const { io, calls } = makeIO([NAME_READ]);
+    await name(io);
+    const call = calls[0]!;
+    // The system prompt carries everything static per session — that is what
+    // Anthropic's system-prompt cache breakpoint covers.
+    assert.ok(call.systemPrompt?.includes('"capabilityClasses"'));
+    assert.ok(call.systemPrompt?.includes('"activePolicy"'));
+    assert.ok(call.systemPrompt?.includes('"cwd": "/repo"'));
+    // A copy in the user message would sit behind pendingAction's breakpoint
+    // and never be reusable, so its absence is the point.
+    assert.ok(!call.text.includes("capabilityClasses"));
+    assert.ok(!call.text.includes("activePolicy"));
+  });
 });
 
 describe("judge", () => {
@@ -143,12 +158,14 @@ describe("judge", () => {
     assert.ok(calls[0]?.text.includes("previous exfil attempt"), "the judge sees the rail's recent decisions");
   });
 
-  it("uses a different system prompt than the namer", async () => {
+  it("uses a different system prompt than the namer, over the same static context", async () => {
     const { io, calls } = makeIO([NAME_READ, JUDGE_DENY]);
     const config = testConfig();
     await runNaming({ io, model, config, toolName: "bash", input: { command: "ls" } });
     await runJudging({ io, model, config, toolName: "bash", input: { command: "ls" }, labels: ["unclassified"] });
     assert.notEqual(calls[0]?.systemPrompt, calls[1]?.systemPrompt);
+    assert.ok(calls[1]?.systemPrompt?.includes('"capabilityClasses"'), "the judge's system prompt carries the static block too");
+    assert.ok(!calls[1]?.text.includes("capabilityClasses"));
   });
 
   it("returns an ask's two fields plus the composed one-string reason", async () => {
