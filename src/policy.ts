@@ -3,13 +3,14 @@ import path from "node:path";
 import type { ResolvedRailConfig } from "./config.ts";
 import { expandHome } from "./paths.ts";
 import { formatError, textPrefix, unique } from "./util.ts";
+import { sessionCheckoutRoot } from "./worktrees.ts";
 
 export type AccessKind = "read" | "write";
 
 export type PolicyDenialCode = "denied-by-pattern" | "outside-roots" | "unresolvable";
 
 export type PolicyDecision =
-  | { allowed: true; normalizedPath: string; matchedRoot?: string }
+  | { allowed: true; normalizedPath: string; matchedRoot?: string; worktreeRoot?: string }
   | { allowed: false; code: PolicyDenialCode; reason: string; normalizedPath: string };
 
 function stripAtPrefix(value: string): string {
@@ -222,26 +223,36 @@ export function decidePathAccess(config: ResolvedRailConfig, cwd: string, inputP
 
   const checkedPath = canonical.path;
   const checkedCwd = canonicalCwd.path;
+  // A path inside a verified sibling checkout of the session repo (a linked
+  // worktree, or the main checkout when cwd is a worktree) is judged as if
+  // cwd were that checkout's root: relative patterns — allow roots like "."
+  // and deny entries like "src/**" — re-anchor there, so the worktree gets
+  // exactly the decisions the project directory itself would get, no wider
+  // and no narrower. Absolute patterns are unaffected by the anchor.
+  const checkout = sessionCheckoutRoot(checkedCwd, checkedPath);
+  const anchor = checkout?.root ?? checkedCwd;
   const denyPatterns = kind === "read" ? config.filesystem.denyRead : config.filesystem.denyWrite;
   const allowRoots = kind === "read" ? config.filesystem.allowRead : config.filesystem.allowWrite;
-  const deniedBy = isDenied(checkedCwd, checkedPath, denyPatterns);
+  const deniedBy = isDenied(anchor, checkedPath, denyPatterns);
   if (deniedBy) {
     return { allowed: false, code: "denied-by-pattern", normalizedPath: checkedPath, reason: `${kind} denied by pattern ${deniedBy}` };
   }
   if (kind === "write" || allowRoots.length > 0) {
-    const root = matchingRoot(checkedCwd, checkedPath, allowRoots);
+    const root = matchingRoot(anchor, checkedPath, allowRoots);
     if (root === undefined) {
       return { allowed: false, code: "outside-roots", normalizedPath: checkedPath, reason: `${kind} outside allowed roots (${textPrefix(allowRoots.join(", "), 160) || "none configured"})` };
     }
-    return { allowed: true, normalizedPath: checkedPath, matchedRoot: root };
+    return { allowed: true, normalizedPath: checkedPath, matchedRoot: root, worktreeRoot: checkout?.root };
   }
-  return { allowed: true, normalizedPath: checkedPath };
+  return { allowed: true, normalizedPath: checkedPath, worktreeRoot: checkout?.root };
 }
 
 /**
  * Whether a read of this path may skip classifier review entirely: the
- * canonical path is inside the session cwd or matches an explicit allowRead
- * entry, and does not match denyRead. Evaluated regardless of
+ * canonical path is inside the session cwd, inside a verified checkout of the
+ * session repo (a registered linked worktree, or the main checkout when cwd
+ * is a worktree), or matches an explicit allowRead entry, and does not match
+ * denyRead. Evaluated regardless of
  * filesystem.enabled — the configured lists express user trust even when
  * enforcement is off. Reads only: the rail's read projection never carries
  * file content, so an allowlisted path is the whole action; write/edit
@@ -261,18 +272,28 @@ export function denyReadMatch(config: ResolvedRailConfig, cwd: string, inputPath
   const canonical = canonicalizeExistingPath(normalizeUserPath(cwd, inputPath));
   const canonicalCwd = canonicalizeExistingPath(cwd);
   if (!canonical.ok || !canonicalCwd.ok) return undefined;
-  return isDenied(canonicalCwd.path, canonical.path, config.filesystem.denyRead);
+  // Same worktree re-anchoring as decidePathAccess: a denyRead of `.env` or
+  // `secrets/**` names project-relative secrets, and another checkout of the
+  // project has them at the same relative spots.
+  const checkout = sessionCheckoutRoot(canonicalCwd.path, canonical.path);
+  return isDenied(checkout?.root ?? canonicalCwd.path, canonical.path, config.filesystem.denyRead);
 }
 
-/** Which exemption condition applies ("in session cwd" / "matches allowRead '…'"), or undefined when the read is not exempt. */
+/** Which exemption condition applies ("in session cwd" / "in linked worktree of session repo" / "matches allowRead '…'"), or undefined when the read is not exempt. */
 export function classifierExemptReadReason(config: ResolvedRailConfig, cwd: string, inputPath: string): string | undefined {
   const normalizedPath = normalizeUserPath(cwd, inputPath);
   const canonical = canonicalizeExistingPath(normalizedPath);
   if (!canonical.ok) return undefined;
   const canonicalCwd = canonicalizeExistingPath(cwd);
   if (!canonicalCwd.ok) return undefined;
-  if (isDenied(canonicalCwd.path, canonical.path, config.filesystem.denyRead)) return undefined;
+  const checkout = sessionCheckoutRoot(canonicalCwd.path, canonical.path);
+  if (isDenied(checkout?.root ?? canonicalCwd.path, canonical.path, config.filesystem.denyRead)) return undefined;
   if (isInside(canonicalCwd.path, canonical.path)) return "in session cwd";
+  // A verified checkout of the session repo is the project under another
+  // path, so its reads are trusted exactly like in-cwd reads. Trust here
+  // rests on the bidirectional registry check in sessionCheckoutRoot, not on
+  // the candidate's own say-so; see src/worktrees.ts.
+  if (checkout !== undefined) return checkout.linked ? "in linked worktree of session repo" : "in main checkout of session repo";
   const root = matchingRoot(canonicalCwd.path, canonical.path, config.filesystem.allowRead);
   return root === undefined ? undefined : `matches allowRead '${root}'`;
 }

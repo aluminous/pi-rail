@@ -231,7 +231,10 @@ async function enforcePathPolicy(
   for (const kind of spec.access) {
     const decision = decidePathAccess(config, ctx.cwd, target, kind);
     if (decision.allowed) {
-      addTraceStage(trace, "path-policy", "pass", decision.matchedRoot !== undefined ? `${kind} allowed by root '${decision.matchedRoot}'` : `${kind} allowed: no deny pattern matches (blacklist mode)`);
+      // Name the worktree anchor when one applied, so /rail explain shows why
+      // an out-of-cwd path was treated as the project.
+      const worktreeNote = decision.worktreeRoot !== undefined ? ` (anchored at session repo checkout ${decision.worktreeRoot})` : "";
+      addTraceStage(trace, "path-policy", "pass", decision.matchedRoot !== undefined ? `${kind} allowed by root '${decision.matchedRoot}'${worktreeNote}` : `${kind} allowed: no deny pattern matches (blacklist mode)${worktreeNote}`);
       if (kind === "read") allowedReadPath = decision.normalizedPath;
       continue;
     }
@@ -262,9 +265,10 @@ async function enforcePathPolicy(
 
 /**
  * Stage 2: deterministic classifier exemption for reads. A trusted path is
- * the whole action for a read (its projection carries no content), so in-cwd
- * and allowlisted reads skip review entirely — whether or not filesystem
- * enforcement is on; enabled:false only disables blocking, not trust.
+ * the whole action for a read (its projection carries no content), so in-cwd,
+ * session-worktree, and allowlisted reads skip review entirely — whether or
+ * not filesystem enforcement is on; enabled:false only disables blocking, not
+ * trust.
  */
 export function exemptReadCallReason(spec: InterceptedToolSpec, input: Record<string, unknown>, cwd: string, config: ResolvedRailConfig, allowedReadPath: string | undefined): string | undefined {
   if (!spec.access.includes("read") || spec.access.includes("write")) return undefined;
@@ -301,7 +305,7 @@ function classifyRead(
   }
   const reason = exemptReadCallReason(spec, input, cwd, config, allowedReadPath);
   if (reason === undefined) {
-    addTraceStage(trace, "read-exemption", "not exempt", "not in cwd, allowRead, pi docs, or user skills — naming required");
+    addTraceStage(trace, "read-exemption", "not exempt", "not in cwd, a session-repo worktree, allowRead, pi docs, or user skills — naming required");
     return { labels: [], needsNaming: true };
   }
   const label: CapabilityId = reason.startsWith("matches allowRead") ? "read-system" : "read-project";

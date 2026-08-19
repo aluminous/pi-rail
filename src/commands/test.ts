@@ -157,7 +157,8 @@ export function createRailTest(deps: RailTestDeps) {
     } else {
       const decision = decidePathAccess(config, ctx.cwd, target, kind);
       if (decision.allowed) {
-        lines.push(`  [ALLOW] ${kind} ${decision.matchedRoot !== undefined ? `allowed by root '${decision.matchedRoot}'` : "allowed: no deny pattern matches (blacklist mode)"}`);
+        const worktreeNote = decision.worktreeRoot !== undefined ? ` (anchored at session repo checkout ${decision.worktreeRoot})` : "";
+        lines.push(`  [ALLOW] ${kind} ${decision.matchedRoot !== undefined ? `allowed by root '${decision.matchedRoot}'` : "allowed: no deny pattern matches (blacklist mode)"}${worktreeNote}`);
       } else if (decision.code === "denied-by-pattern" && kind === "read") {
         lines.push(`  [ASK] ${decision.reason} → credentials label (no longer a hard block)`);
       } else if (decision.code === "outside-roots") {
