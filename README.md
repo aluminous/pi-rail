@@ -73,7 +73,8 @@ Commands — everything lives under `/rail`, with argument autocomplete:
 - `/rail on`: enable Pi Rail.
 - `/rail off`: disable for the next agent turn, then re-enable automatically.
 - `/rail off session`: disable until the session ends.
-- `/rail readonly` (or `ro`, or ctrl+alt+r): toggle session read-only mode — `write`/`edit` are blocked, `bash` must be reviewed (and is blocked outright if the classifier is off), and a session disposition preset denies the writing capability classes.
+- `/rail readonly` (or `ro`, or ctrl+shift+t): toggle session read-only mode — `write`/`edit` are blocked, `bash` must be reviewed (and is blocked outright if the classifier is off), and a session disposition preset denies the writing capability classes. The toggle is also announced into the agent's context, so the model knows the ground rules changed.
+- ctrl+shift+r: toggle the rail off for the upcoming agent turn (it re-enables itself when the turn ends, like `/rail off`); pressing it again while armed — or while the rail is off for the session — re-enables immediately.
 - `/rail model`: choose the reviewer models interactively. The dialog has two tabs — Tab switches between `namer` and `judge` — and the header shows what each one currently resolves to.
 - `/rail model auto|current|off|provider/model-id`: set the namer model directly and save it globally. `auto` (the default) picks the best available known-good model, preferring subscription providers.
 - `/rail model judge current|provider/model-id`: set the judge model directly and save it globally. Bare `/rail model judge` (or `judge status`) prints the configured and resolved judge model. Neither `off` nor `auto` is accepted: the judge cannot be disabled, and `auto` is the namer's cheap-model list.
@@ -622,16 +623,23 @@ carving explicit exceptions out of an allowed wildcard — for example allowing
 - While a reviewer call is in flight, pi's streaming spinner reads `Classifying...` (namer) or `Judging...` (judge), so a rail wait is distinguishable from the agent model thinking.
 - A `read` matching `denyRead` is **not** hard-blocked any more: it is labelled `credentials`, which defaults to `judge`. Reading a test-fixture key and reading toward exfiltration are different actions, and telling them apart is a judgment call. `denyWrite` matches stay hard blocks — writes to secret and config paths are containment, not policy.
 - Writes and edits are never exempted by path alone: their content goes through the deterministic content screen, and anything it trips on goes to the namer.
-- Reviewer timeouts/network failures are retried with bounded exponential backoff (250ms, growing 4x) up to five attempts and surfaced to the user. `classifier.timeoutMs` is an idle timeout, not a total deadline: the reviewer streams its response and the clock resets on every token, so a slow-but-progressing model can take as long as it needs while a stalled request still fails fast. If no usable namer model is available, or fail-closed naming still fails after retries, Pi Rail stops the current turn for user intervention without exiting Pi. A judge failure instead degrades to asking you.
+- Reviewer failures are retried up to five attempts with a class-aware schedule: timeouts, rate limits, and network failures back off exponentially (250ms, growing 4x), while a malformed reply retries immediately with the parse error fed back — the call succeeded and nothing is healing in the background, so there is nothing to wait for. Auth failures, unknown models, and other 4xx errors are terminal. `classifier.timeoutMs` is an idle timeout, not a total deadline: the reviewer streams its response and the clock resets on every token, so a slow-but-progressing model can take as long as it needs while a stalled request still fails fast. If no usable namer model is available, or fail-closed naming still fails after retries, Pi Rail stops the current turn for user intervention without exiting Pi. A judge failure instead degrades to asking you.
 
 ## Approval prompts and session guidance
 
 When the rail needs a human decision — a class set to `ask`, a judge verdict
 of `ask`, or a path outside the configured roots — the prompt offers four
 choices: **Allow**, **Allow with comment**, **Deny**, and **Deny with
-comment**. The prompt names the capabilities that were matched and the row
-that decided, so a block is always attributable ("`off-machine-effects`, which
-is set to ask (default)"). Comments become *session guidance*: user-authored
+comment**. **Esc is neither**: it stops the turn — recorded and reported as a
+`stop`, not a denial, because reaching for the interrupt key says "not now",
+not "never", and a false deny would bias the judge against an action you never
+actually judged. The prompt names the capabilities that were matched and the
+row that decided, so a block is always attributable ("`off-machine-effects`,
+which is set to ask (default)"). When the judge routed the ask, its verdict
+carries two labeled lines — *What it does* (the action in plain terms) and
+*Why it's an ask* (the policy or risk that escalated it) — never a restatement
+of the command, which is displayed alongside, and never a yes/no question:
+an ask is an approval escalation, and your answer is the decision. Comments become *session guidance*: user-authored
 notes injected into the namer and the judge for the rest of the session, so
 "allow — staging deploys are fine today" or "deny — never touch prod configs"
 tunes behavior without editing config files. Deny comments are echoed to the
@@ -745,15 +753,27 @@ sessions simply skip persistence. Sessions recorded before the rename carry
 `customType: "guard"`; the analysis tooling reads both, so an existing corpus
 stays usable.
 
-`classifier.telemetry` controls verbosity:
+These records are also the rail's own memory: session guidance, the recent
+decisions shown to the judge, and the status counters are **derived from the
+records along the current session branch**, not kept as freestanding state.
+Rewinding with `/tree` therefore rewinds the rail too — a denial you navigate
+away from stops biasing the judge, and returns if you navigate forward to
+that branch again — and resuming or forking a session restores the memory its
+branch actually accumulated instead of starting blank.
 
-- `"minimal"` (default): decision, capability labels, resolved disposition and
-  the row that decided, content-screen verdict, judge fields (model, verdict,
-  latency, tokens) when the judge ran, attempts, latency, token usage, namer
-  model, reason, and a truncated projection of the tool input.
+`classifier.telemetry` picks the detail tier; the memory-core fields
+(decision, labels, target, reason, the user's answer and comment) are always
+written when a session is persisted, because replay depends on them:
+
+- `"minimal"` (default): adds resolved disposition and the row that decided,
+  content-screen verdict, judge fields (model, verdict, latency, tokens) when
+  the judge ran, attempts, latency, token usage, namer model, and a truncated
+  projection of the tool input.
 - `"full"`: complete projection including the policy summary, for eval-case
   extraction.
-- `"off"`: no telemetry.
+- `"off"`: the memory core only — extra detail is dropped by omitting keys,
+  never by zeroing them, so analysis cannot mistake "not recorded" for
+  "measured zero".
 
 Note that session files can be shared (`pi share` uploads the whole file), so
 records stay minimal by default even though the session already contains the
@@ -771,6 +791,7 @@ session (false-positive candidates worth adding to `eval/cases.ts`).
 
 - [`pi-sandbox`](https://github.com/carderne/pi-sandbox) (Chris Arderne) — the inspiration for Pi Rail: OS-level sandboxing for Pi with interactive permission prompts, on macOS `sandbox-exec` and Linux `bubblewrap`. Pi Rail adds the semantic layer on top of similar containment — capability naming, the disposition table, the judge; if you want a mature prompt-oriented sandbox without model review, especially on Linux, start there.
 - [`pi-guard`](https://github.com/jdiamond/pi-guard) (Jason Diamond) — a deterministic permission system for pi tools: allow/ask/deny rules with extensible matchers, no OS sandbox. Pi Rail's command allowlist plays a similar role, but its decisions sit inside Seatbelt containment and fall through to the classifier instead of rules alone. (This project was itself named pi-guard before being renamed to avoid the clash; an existing `guard.json` still loads — see [Configuration](#configuration).)
+- [herdr](https://herdr.dev) — while a rail approval dialog is open, the rail emits `herdr:blocked` on pi's extension bus (with a label naming the ask), so herdr's pane state shows *waiting for input* instead of *working*. Refcounted and paired on every exit path; a no-op when herdr's integration isn't listening.
 
 ## Limitations
 

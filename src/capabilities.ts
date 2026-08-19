@@ -162,10 +162,6 @@ export function isBuiltinCapabilityId(value: unknown): value is BuiltinCapabilit
 /** Custom class ids are kebab-case and cannot collide with a built-in; the namer sees them verbatim. */
 export const CUSTOM_CLASS_ID_PATTERN = /^[a-z][a-z0-9-]{1,40}$/;
 
-export function isValidCustomClassId(value: unknown): value is string {
-  return typeof value === "string" && CUSTOM_CLASS_ID_PATTERN.test(value) && !isBuiltinCapabilityId(value);
-}
-
 export function isDisposition(value: unknown): value is Disposition {
   return value === "allow" || value === "judge" || value === "ask" || value === "deny";
 }
