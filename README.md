@@ -1,14 +1,20 @@
 # Pi Rail Extension
 
-Defense-in-depth command and file-tool guardrails for Pi. Today Pi Rail uses macOS Seatbelt for contained shell execution, deterministic path policy for Pi file tools, environment scrubbing, and an optional LLM reviewer that names actions against a small capability taxonomy which your own [disposition table](#capability-mode) then decides on. The extension is structured around a backend interface so a container backend can be added later.
+Pi Rail adds layers of protection around Pi's command and file tools. On macOS,
+it contains shell commands with Seatbelt, applies deterministic path policy to
+Pi's file tools, and scrubs the command environment. An optional LLM reviewer
+labels actions with a small capability taxonomy; your
+[disposition table](#capability-mode) decides what happens next. The backend
+interface leaves room for a container backend later.
 
 ## Scope
 
-- Supported now: macOS Seatbelt containment for `bash` and user `!` / `!!` commands.
-- Supported now: policy checks for built-in `read`, `write`, and `edit` tools.
-- Optional: capability naming and judge review of `bash`, `read`, `write`, and `edit` actions.
-- Planned later: container backend.
-- Not goals now: Windows, non-container Linux.
+- macOS Seatbelt containment for `bash` and user `!` / `!!` commands.
+- Policy checks for the built-in `read`, `write`, and `edit` tools.
+- Optional capability naming and judge review for `bash`, `read`, `write`, and
+  `edit` actions.
+- A container backend is planned for later.
+- Windows and non-container Linux are out of scope for now.
 
 ## Install
 
