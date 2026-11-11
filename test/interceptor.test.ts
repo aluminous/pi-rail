@@ -281,6 +281,22 @@ describe("commands.classify labelling", () => {
     assert.equal(state.stats.ruleHits, 1);
   });
 
+  // A flags allowlist that refuses a word hands the command on: here to no
+  // other rule, so the namer decides — the rule never stretches to cover it.
+  it("sends a command whose flags a rule does not list to the namer, and traces why", async () => {
+    const state = classifyState({ disposition: "allow", backend: "seatbelt" });
+    state.initialized = true;
+    state.config!.commands.classify = [{ template: "kubectl get *", capability: "k8s-ops", flags: ["-n", "-o"] }];
+    const { complete, seen } = reviewer(['{"labels":["off-machine-effects"]}']);
+    assert.equal(await interceptToolCall({ toolName: "bash", input: { command: "kubectl get pods -n prod" } }, reviewingCtx(), state, complete), undefined);
+    assert.equal(seen.calls, 0);
+    const result = await interceptToolCall({ toolName: "bash", input: { command: "kubectl get pods --kubeconfig=/x" } }, reviewingCtx(["Deny"]), state, complete);
+    assert.equal(result?.block, true);
+    assert.equal(seen.calls, 1, "the namer named the command the rule refused");
+    const stage = state.traces[0]!.stages.find((entry) => entry.stage === "command-allowlist" || entry.stage === "commands.classify");
+    assert.match(stage?.detail ?? "", /`kubectl get \*` does not list `--kubeconfig=\/x`/);
+  });
+
   // The session layer folds into state.config, so a class and a classify rule
   // that exist only in this session decide the very next command — no config
   // file, no reload, and no namer call.

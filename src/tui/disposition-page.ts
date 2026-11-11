@@ -179,7 +179,7 @@ export class DispositionPage extends Container {
     }
 
     const current = rows[this.selected];
-    if (current) this.body.addChild(new Text(theme.fg("muted", `  ${current.definition}`), 0, 0));
+    if (current) this.body.addChild(new Text(theme.fg("muted", `  ${current.extends ? `extends ${current.extends} · ` : ""}${current.definition}`), 0, 0));
     this.body.addChild(new Text(theme.fg("muted", "  ↑↓ row · ←→/Enter cycle · a add · e edit · d delete · Ctrl+S saves · Esc closes"), 0, 0));
     this.body.addChild(new Text(theme.fg("muted", "  the resolved filesystem/network rules are /rail policy rules"), 0, 0));
   }

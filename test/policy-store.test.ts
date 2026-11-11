@@ -97,9 +97,9 @@ describe("parseOp", () => {
     });
   });
 
-  it("rejects fields from later phases instead of ignoring them", () => {
-    bad({ op: "classify", template: "git worktree prune *", capability: "modify-project", flags: ["--dry-run"] }, /unexpected key flags on classify/);
-    bad({ op: "add-class", id: "x-cleanup", definition: "x", extends: "local-destructive" }, /unexpected key extends on add-class/);
+  it("rejects fields it does not know instead of ignoring them", () => {
+    bad({ op: "classify", template: "git worktree prune *", capability: "modify-project", unless: ["--force"] }, /unexpected key unless on classify/);
+    bad({ op: "add-class", id: "x-cleanup", definition: "x", parent: "local-destructive" }, /unexpected key parent on add-class/);
   });
 
   it("rejects unknown ops and malformed values, one diagnostic each", () => {

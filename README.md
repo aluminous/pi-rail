@@ -73,7 +73,7 @@ Commands — everything lives under `/rail`, with argument autocomplete:
 - `/rail on`: enable Pi Rail.
 - `/rail off`: disable for the next agent turn, then re-enable automatically.
 - `/rail off session`: disable until the session ends.
-- `/rail readonly` (or `ro`, or ctrl+shift+t): toggle session read-only mode — `write`/`edit` are blocked, `bash` must be reviewed (and is blocked outright if the classifier is off), and a session disposition preset denies the writing capability classes. The toggle is also announced into the agent's context, so the model knows the ground rules changed.
+- `/rail readonly` (or `ro`, or ctrl+shift+t): toggle session read-only mode — `write`/`edit` are blocked, `bash` must be reviewed (and is blocked outright if the classifier is off), and a session disposition preset denies the writing capability classes — along with any custom class that `extends` one of them or extends nothing (see [`extends`](#custom-capability-classes)). The toggle is also announced into the agent's context, so the model knows the ground rules changed.
 - ctrl+shift+r: toggle the rail off for the upcoming agent turn (it re-enables itself when the turn ends, like `/rail off`); pressing it again while armed — or while the rail is off for the session — re-enables immediately.
 - `/rail model`: choose the reviewer models interactively. The dialog has two tabs — Tab switches between `namer` and `judge` — and the header shows what each one currently resolves to.
 - `/rail model auto|current|off|provider/model-id`: set the namer model directly and save it globally. `auto` (the default) picks the best available known-good model, preferring subscription providers.
@@ -201,8 +201,13 @@ it. Dropping an inherited entry is an explicit `remove`:
 Every list takes both forms: `filesystem.allowRead`, `filesystem.denyRead`,
 `filesystem.allowWrite`, `filesystem.denyWrite`, `environment.allow`,
 `environment.unset`, `network.allowedDomains`, `network.deniedDomains`, and
-`commands.allow`. `commands.classify` takes a bare array or `{"add": [...]}`
-of rule objects; classify rules cannot be removed by a later layer yet.
+`commands.allow`, whose added entries may also be `{"template", "flags"}`
+objects (removes name the template). A plain string restating an entry
+already present keeps that entry's flags; an object entry, or an
+`allow-command` op, states the whole rule and replaces them — an
+`allow-command` without `flags` sets the entry back to "any flags".
+`commands.classify` takes a bare array or `{"add": [...]}` of rule objects;
+classify rules cannot be removed by a later layer yet.
 
 `/rail policy rules` annotates each entry with where it came from — `default`,
 `global`, `project`, `session`, or the grant that added it, as in
@@ -225,12 +230,14 @@ and the operations it produced. Grants live in a config file's `grants` array
       "request": "i want to allow cleaning up worktrees",
       "created": "2026-11-11",
       "ops": [
-        { "op": "add-class", "id": "worktree-cleanup", "disposition": "allow",
+        { "op": "add-class", "id": "worktree-cleanup", "extends": "local-destructive", "disposition": "allow",
           "definition": "Removing or pruning linked git worktrees of this repo. Deleting anything else is local-destructive instead." },
-        { "op": "classify", "template": "git worktree prune", "capability": "worktree-cleanup" }
+        { "op": "classify", "template": "git worktree remove *", "flags": [], "capability": "worktree-cleanup" },
+        { "op": "classify", "template": "git worktree prune *", "flags": ["--dry-run", "-n", "-v"], "capability": "worktree-cleanup" }
       ],
       "examples": [
-        { "tool": "bash", "input": { "command": "git worktree prune" }, "expect": ["allow"] }
+        { "tool": "bash", "input": { "command": "git worktree prune" }, "expect": ["allow"] },
+        { "tool": "bash", "input": { "command": "git worktree remove --force ../x" }, "expect": ["ask", "judge", "deny"] }
       ]
     }
   ]
@@ -244,11 +251,11 @@ unknown field on an op is an error for that op:
 | op | fields |
 |---|---|
 | `set-disposition` | `capability`, `disposition` |
-| `add-class` | `id`, `definition`, optional `name`, `disposition` |
+| `add-class` | `id`, `definition`, optional `name`, `disposition`, `extends` |
 | `remove-class` | `id` (custom classes only) |
 | `set-definition` | `capability`, `definition` |
-| `classify` | `template`, `capability` |
-| `allow-command` | `template` |
+| `classify` | `template`, `capability`, optional `flags` |
+| `allow-command` | `template`, optional `flags` |
 | `add-to-list` / `remove-from-list` | `list` (any list above except `commands.classify`), `values` |
 
 A file's ordinary keys are its base policy and mean exactly these ops; a grant
@@ -398,6 +405,26 @@ across layers so a project config adding one class keeps the global ones:
 boundary ("X, but Y is class Z instead") rather than a description. An invalid
 entry is skipped with a diagnostic and the rest of the config still loads.
 
+**`extends`.** A custom class may name the built-in class it narrows:
+`"extends": "local-destructive"`. It must be one of the twelve built-ins (a
+chain through custom classes could be removed from under it), and it decides
+one thing — how session presets treat the class:
+
+- A preset that denies the parent denies the child: read-only mode tightens a
+  `worktree-cleanup` class that extends `local-destructive`, whatever its row
+  says.
+- A custom class with **no** `extends` is treated by every preset as a writing
+  class, so read-only mode denies it. The safe behaviour does not depend on
+  the author remembering the declaration.
+- A class extending a built-in the preset leaves alone (`read-project`,
+  `run-dev-tools`, …) is left alone too — declare that for a custom class of
+  read-only commands you want usable in read-only mode.
+
+An explicit disposition on the parent does **not** flow to the child: carving
+an allowed sub-class out of a judged parent is the point. The policy page shows
+the parent in the class's footer line; it is set in config or by an
+`add-class` op (the page's add form does not ask for it).
+
 Editing the taxonomy changes the payload prefix the namer sees, which
 invalidates the provider's prompt cache once — the accepted cost of a
 vocabulary you can edit.
@@ -489,8 +516,9 @@ are deliberately absent (see the comment in `src/command-allowlist.ts`).
 Each built-in template carries a capability tag: inspection and read-only git
 are `read-project`, machine introspection (`uname`, `whoami`, `printenv`) is
 `read-system`, and toolchain version probes are `run-dev-tools`. A chain takes
-the union of its segments' tags. Templates you add in `commands.allow` are
-plain strings and default to `read-project`.
+the union of its segments' tags. Templates you add in `commands.allow` default
+to `read-project`; an entry is a plain string, or `{"template": "…", "flags":
+[...]}` to accept only the listed flags (see [flags](#flags-allowlists)).
 
 Commands are parsed with a minimal shell grammar, and a chain (`&&`, `||`,
 `;`, `|`, newlines) is exempt only when *every* command in it matches a rule:
@@ -507,10 +535,17 @@ command goes to the namer.
 ```json
 {
   "commands": {
-    "allow": ["grep *", "git status *", "make lint"]
+    "allow": [
+      "grep *", "git status *", "make lint",
+      { "template": "git cat-file *", "flags": ["-p", "-t", "-s", "-e"] }
+    ]
   }
 }
 ```
+
+(`git cat-file --textconv` and `--filters` run configured programs; the flags
+allowlist keeps them out of the deterministic allow without a denylist that
+`--text` would slip past.)
 
 ### User command classification
 
@@ -550,13 +585,81 @@ unmatchable no matter which list a rule would have come from. The union of the
 matched capabilities across segments is the action's label set, exactly as it
 is for allowlisted commands.
 
-**Precedence.** Your classify rules are consulted before the built-in
-allowlist, so a template the allowlist already tags can be re-classified —
-`{"template": "git log *", "capability": "off-machine-effects"}` overrides the
-built-in `read-project` tag. The reverse order would be useless: every
-allowlist template resolves to `allow`, so an allowlist-first lookup could
-never be tightened by a classify rule. Within the list the first matching rule
-wins, so put `kubectl get *` above `kubectl *` if you want the narrower one.
+**Precedence: your rules first, then the most specific.** Every rule — the
+built-in allowlist, your `commands.allow` entries, and classify rules from
+every layer — is one pool. Any rule from your config (global, project, or
+session; base keys or a grant) **always wins over a built-in default** that
+also matches: the defaults are all allow-tagged inspection, so letting a more
+specific default beat a broad rule of yours could only loosen what you wrote.
+Among the rules of the tier that won, the most specific decides, in this order:
+
+1. more literal words (`kubectl get *` beats `kubectl *`);
+2. at equal count, an exact template beats one ending in `*` (`git stash`
+   beats `git stash *` for the bare command);
+3. a rule with a `flags` allowlist beats one without — it is the narrower
+   statement about the same words;
+4. the later layer: global < project < session, and within a file base keys
+   before its grants, earlier grants before later ones;
+5. the stricter resolved disposition (with read-only mode's preset applied).
+
+So `{"template": "git *", "capability": "local-destructive"}` re-labels every
+git command, `git status` included. To keep a built-in allowed under a broad
+rule of your own, restate it — a restated default is yours, and then wins by
+specificity:
+
+```json
+{
+  "commands": {
+    "allow": ["git status *", "git log *"],
+    "classify": [{ "template": "git *", "capability": "local-destructive" }]
+  }
+}
+```
+
+Declaration order never matters, so a narrow carve-out works in both
+directions without anyone ordering anything: `kubectl get *` → `read-system`
+inside a broad `kubectl *` → `k8s-ops` (`ask`), and equally `docker system
+prune *` → `local-destructive` inside a broad `docker *` → `run-dev-tools`.
+`/rail test`, `/rail explain`, and the policy tab of `/rail status` say which
+rule won and, when another rule also matched, that it was outranked and why
+("built-in default, a user rule matches", "more literal words", …).
+
+#### Flags allowlists
+
+A classify rule or an allow entry may carry `"flags": [...]`. When present,
+every word after the template's literal words that starts with `-` must be
+accepted, or the rule **does not match** and the command falls to the
+next-ranked rule, or to the namer:
+
+```json
+{ "template": "git worktree remove *", "flags": [], "capability": "worktree-cleanup" }
+```
+
+matches `git worktree remove ../x` but not `git worktree remove --force ../x`
+— nor `--forc`, which git accepts as an abbreviation of `--force`. That is why
+this is an allowlist: a denylist of `--force` would leak. The exact rules:
+
+- `--dry-run` accepts exactly `--dry-run`; `--dry-run=value` is accepted only
+  when `--dry-run=` is listed (list both to accept both spellings). No prefix
+  or abbreviation matching.
+- `-n` is one short flag. A single-dash word in the command is a cluster:
+  with `-n` and `-v` listed, `-nv` passes and `-nf` does not. A longer
+  single-dash entry (`-name`) accepts that exact word. Attached values for
+  short flags (`-C=`, `-n5`) are not supported: a cluster with an unlisted
+  letter fails.
+- `--` is always accepted and ends flag checking; words after it are
+  positional. A lone `-` is positional. `-1` is a flag and fails unless listed.
+- The template's own literal words are never checked, and words that do not
+  start with `-` are positional (so a flag's separate value is not checked).
+- A word containing `*`, `?`, `[`, or `{` fails the check (before `--`):
+  quoting is not visible to the matcher, and unquoted the shell would expand
+  `*` (with a file named `--force` in the directory) or `{--force,x}` into a
+  flag the allowlist never saw.
+- `"flags": []` means no flags at all; no `flags` key means any flags, as
+  before.
+- Entries must start with `-` and contain no whitespace; `-`, `--`,
+  `--name=value`, and `-x=` are refused with a diagnostic, as is `flags` on a
+  template without a trailing `*` (there would be nothing to check).
 
 **The safety asymmetry.** When every segment matches and the labels resolve to
 `ask`, `judge`, or `deny`, the rail acts on that directly and never calls the
@@ -575,16 +678,17 @@ Classification is labelling, not permission. The labels go through the same
 disposition table and the same severity-max as any others, so a class you set
 to `deny` denies whether the label came from a rule or from a model, and
 read-only mode's preset still denies a command you classified into one of the
-built-in writing classes. Note the preset's reach, which classify does not
-change: it lists built-in classes by construction, so a *custom* class set to
-`allow` is not tightened by read-only mode — for a command you want read-only
-mode to stop, classify it into `modify-project`/`modify-system` or set its
-class to something stricter than `allow`.
+built-in writing classes — or into a custom class that extends one, or extends
+nothing (see [`extends`](#custom-capability-classes)). A custom class
+extending `read-project` or another class the preset leaves alone stays
+usable in read-only mode. Plain `commands.allow` entries are `read-project`
+and are not tightened by the preset.
 
 The list takes a bare array or `{"add": [...]}`, and like every list it only
 appends: a later layer's rules go after the ones it inherits (a rule for a
-template already listed re-maps it in place instead). Each entry must be
-`{"template": …, "capability": …}` and nothing else. The capability must be a
+template already listed replaces it, class and flags together, and ranks as
+the later layer's). Each entry must be `{"template": …, "capability": …}` plus
+an optional `"flags": [...]`, and nothing else. The capability must be a
 class known by the time the rule is folded: a built-in, or a custom class from
 this or any earlier layer — the same file may declare it, since a file's
 taxonomy is applied before its rules, and a session grant may classify into a
@@ -897,6 +1001,7 @@ Pi Rail is a defense-in-depth containment layer, not a complete adversarial secu
 - The namer only names; the disposition table decides. A prompt-injected namer can at worst mislabel a capability, and the table still refuses a class you set to deny. Neither reviewer can override deterministic deny rules or Seatbelt.
 - The judge holds decision authority only for classes you explicitly delegated to it, only for one action at a time, and never above a deny that severity-max already produced.
 - Disabling filesystem or network restrictions deliberately removes those hard boundaries; reviewer decisions can be wrong or unavailable.
+- Read-only mode does not tighten plain `commands.allow` entries: they are tagged `read-project`, which the read-only preset leaves alone, so classify a writing command into a writing class instead of allowlisting it.
 
 ## Future container backend
 

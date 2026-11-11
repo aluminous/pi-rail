@@ -170,7 +170,7 @@ export function sessionDispositionEdits(state: RuntimeState): Record<CapabilityI
 /** Custom classes this session added (not yet saved), in edit order. */
 export function sessionAddedClasses(state: RuntimeState): CapabilityClass[] {
   return state.sessionPolicy.edits.flatMap((op) =>
-    op.op === "add-class" ? [{ id: op.id, name: op.name ?? op.id, definition: op.definition, default: op.disposition ?? "ask" }] : [],
+    op.op === "add-class" ? [{ id: op.id, name: op.name ?? op.id, definition: op.definition, default: op.disposition ?? "ask", ...(op.extends ? { extends: op.extends } : {}) }] : [],
   );
 }
 

@@ -13,7 +13,8 @@ import type { EffectivePolicy } from "./backends/types.ts";
 import { capabilityRegistry, getEffectiveDisposition, usedCapabilityStats, type CapabilityStats } from "./capabilities.ts";
 import { classifierEnabled, judgeModelSpec } from "./classifier.ts";
 import { configSourceLabel, type ProvenanceListKey, type ResolvedRailConfig } from "./config.ts";
-import { effectiveDispositionLabel, provenanceLabel, withSessionLayer, type Provenance } from "./policy-store.ts";
+import { describeFlags, outrankedRules, type CommandRule } from "./command-allowlist.ts";
+import { commandRulesOf, effectiveDispositionLabel, provenanceLabel, withSessionLayer, type Provenance } from "./policy-store.ts";
 import { getPersistentConfigPath } from "./persistent-settings.ts";
 import { resolveConfigPath } from "./policy.ts";
 import {
@@ -535,17 +536,42 @@ function listSection(view: StatusView, title: string, listKey: ProvenanceListKey
 }
 
 /**
- * User template → capability rules, shown only when there are any: an empty
- * "(none)" table on every policy page would be noise for the many configs that
- * never classify anything.
+ * One rule's entry text: the template, its flags allowlist when it has one,
+ * the class for a classify rule, and — when another rule with the same
+ * template always beats it — which one and why, so a rule that can never
+ * decide anything does not read as if it did.
  */
-function classifySection(view: StatusView): string[] {
+function ruleEntry(rule: CommandRule, outranked: ReturnType<typeof outrankedRules>): string {
+  const flags = rule.flags ? ` [flags: ${describeFlags(rule.flags)}]` : "";
+  const target = rule.source === "classify" ? ` → ${rule.capability}` : "";
+  const loser = outranked.get(rule);
+  const note = loser ? ` (outranked by ${loser.source === "classify" ? "classify rule" : "rule"} → ${loser.capability}: ${loser.reason})` : "";
+  return `${rule.template}${flags}${target}${note}`;
+}
+
+/**
+ * The command rule pool as the matcher sees it. The classify table is shown
+ * only when there are classify rules: an empty "(none)" table on every policy
+ * page would be noise for the many configs that never classify anything.
+ */
+function commandRulesSection(view: StatusView): string[] {
   const { config, theme, width } = view;
-  if (config.commands.classify.length === 0) return [];
-  const source = sourceLookup(config, "commands.classify", false, theme);
+  const set = commandRulesOf(config);
+  const outranked = outrankedRules(set);
+  const allowSource = sourceLookup(config, "commands.allow", false, theme);
+  const classifySource = sourceLookup(config, "commands.classify", false, theme);
+  const allow = set.rules.filter((rule) => rule.source === "allow");
+  const classify = set.rules.filter((rule) => rule.source === "classify");
   return [
-    muted(theme, "Classified by template:"),
-    ...renderTable(theme, ENTRY_COLUMNS, config.commands.classify.map((rule) => [`${rule.template} → ${rule.capability}`, source(rule.template)]), width, { indent: "    " }),
+    muted(theme, "Exempt from review:"),
+    ...renderTable(theme, ENTRY_COLUMNS, allow.map((rule) => [ruleEntry(rule, outranked), allowSource(rule.template)]), width, { indent: "    ", empty: "(none)" }),
+    ...(classify.length > 0
+      ? [
+          muted(theme, "Classified by template:"),
+          ...renderTable(theme, ENTRY_COLUMNS, classify.map((rule) => [ruleEntry(rule, outranked), classifySource(rule.template)]), width, { indent: "    " }),
+        ]
+      : []),
+    ...note(theme, width, "any user rule beats a built-in default (restate a default to keep it under a broad rule of yours); then the most specific rule wins: more literal words, exact over `*`, a flags allowlist, the later layer, the stricter disposition — /rail test <command> shows the winner"),
   ];
 }
 
@@ -582,8 +608,7 @@ function policyTab(view: StatusView): string[] {
     ...listSection(view, "Unset", "environment.unset", config.environment.unset, false),
     "",
     heading(theme, "Command rules"),
-    ...listSection(view, "Exempt from review", "commands.allow", config.commands.allow, false),
-    ...classifySection(view),
+    ...commandRulesSection(view),
     "",
     heading(theme, "Config sources"),
     ...renderTable(theme, [{ header: "source", min: 12 }, { header: "label", min: 6 }], config.sources.map((source) => [source, configSourceLabel(source)]), width),

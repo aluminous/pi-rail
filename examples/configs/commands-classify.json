@@ -25,16 +25,29 @@
         "name": "Infrastructure plan",
         "definition": "Read-only infrastructure-as-code inspection: rendering a plan or diff without applying it.",
         "disposition": "allow"
+      },
+      {
+        "id": "worktree-cleanup",
+        "name": "Worktree cleanup",
+        "extends": "local-destructive",
+        "definition": "Removing or pruning linked git worktrees of this repository without forcing. A forced remove, or deleting anything else, is local-destructive instead.",
+        "disposition": "allow"
       }
     ]
   },
   "commands": {
+    "allow": [
+      { "template": "git cat-file *", "flags": ["-p", "-t", "-s", "-e"] }
+    ],
     "classify": [
       { "template": "kubectl *", "capability": "k8s-ops" },
+      { "template": "helm version *", "capability": "read-system" },
       { "template": "helm *", "capability": "k8s-ops" },
       { "template": "terraform plan *", "capability": "infra-plan" },
       { "template": "terraform show *", "capability": "infra-plan" },
-      { "template": "terraform apply *", "capability": "off-machine-effects" }
+      { "template": "terraform apply *", "capability": "off-machine-effects" },
+      { "template": "git worktree remove *", "flags": [], "capability": "worktree-cleanup" },
+      { "template": "git worktree prune *", "flags": ["--dry-run", "-n", "-v", "--verbose"], "capability": "worktree-cleanup" }
     ]
   }
 }

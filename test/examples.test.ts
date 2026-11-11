@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { explainCommandMatch, matchedCapabilities } from "../src/command-allowlist.ts";
+import { commandRulesOf } from "../src/policy-store.ts";
 import { readdirSync } from "node:fs";
 import { DEFAULT_CONFIG, mergeConfig, type RailConfig } from "../src/config.ts";
-import { getEffectiveDisposition } from "../src/capabilities.ts";
+import { applyReadOnlyPreset, createCapabilityState, getEffectiveDisposition } from "../src/capabilities.ts";
 import { testConfig } from "./helpers.ts";
 
 function readExample(name: string): RailConfig {
@@ -41,9 +42,9 @@ describe("command classification example configuration", () => {
   it("routes its commands into the classes it declares, end to end", () => {
     const config = mergeConfig(testConfig(), readExample("commands-classify.json"), "example");
     assert.deepEqual(config.diagnostics, [], "the profile loads without diagnostics");
-    assert.deepEqual(config.capabilities.classes.map((entry) => entry.id), ["k8s-ops", "infra-plan"]);
+    assert.deepEqual(config.capabilities.classes.map((entry) => entry.id), ["k8s-ops", "infra-plan", "worktree-cleanup"]);
 
-    const labels = (command: string) => matchedCapabilities(explainCommandMatch(command, { classify: config.commands.classify, allow: config.commands.allow }));
+    const labels = (command: string) => matchedCapabilities(explainCommandMatch(command, commandRulesOf(config)));
     const disposition = (command: string) => {
       const ids = labels(command);
       assert.ok(ids.length > 0, `expected ${command} to be classified`);
@@ -56,6 +57,25 @@ describe("command classification example configuration", () => {
     assert.deepEqual(disposition("terraform plan -out plan.bin"), ["allow"]);
     assert.deepEqual(disposition("terraform apply plan.bin"), ["ask"], "the built-in off-machine-effects row still decides");
     assert.deepEqual(labels("terraform destroy"), [], "an unmapped subcommand is left to the namer");
+
+    // Specificity: the narrow read carve-out wins over the broad rule above it.
+    assert.deepEqual(labels("helm version --short"), ["read-system"]);
+    assert.deepEqual(labels("helm list"), ["k8s-ops"]);
+
+    // Flags allowlists: the unforced remove is the class; --force and its
+    // abbreviation fall through to the namer.
+    assert.deepEqual(disposition("git worktree remove ../wt"), ["allow"]);
+    assert.deepEqual(labels("git worktree remove --force ../wt"), []);
+    assert.deepEqual(labels("git worktree remove --forc ../wt"), []);
+    assert.deepEqual(labels("git worktree prune -nv"), ["worktree-cleanup"]);
+    assert.deepEqual(labels("git cat-file -p HEAD"), ["read-project"]);
+    assert.deepEqual(labels("git cat-file --textconv HEAD:x"), [], "a flag that runs programs is not on the allowlist");
+
+    // extends: read-only mode reaches the custom class through its parent.
+    const readOnly = createCapabilityState();
+    applyReadOnlyPreset(readOnly);
+    assert.equal(getEffectiveDisposition(config, readOnly, "worktree-cleanup").disposition, "deny");
+    assert.equal(getEffectiveDisposition(config, readOnly, "k8s-ops").disposition, "deny", "a parentless custom class is a writing class to the preset");
   });
 });
 

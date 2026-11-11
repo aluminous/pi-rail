@@ -114,7 +114,7 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
         value: row.id,
         label: dispositionSummary(row),
         searchText: `${row.id} ${row.value} ${row.name}`,
-        description: row.definition,
+        description: row.extends ? `extends ${row.extends} · ${row.definition}` : row.definition,
       }));
       items.push({
         value: "add",

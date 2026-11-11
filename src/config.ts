@@ -48,6 +48,8 @@ export interface CapabilityClassConfig {
   name?: unknown;
   definition?: unknown;
   disposition?: unknown;
+  /** A built-in class id this class narrows: presets that deny the parent deny it too. */
+  extends?: unknown;
 }
 
 export interface CapabilitiesConfig {
@@ -71,11 +73,21 @@ export interface ConfigListEdit {
 /** One list in a config file. A bare array means "add these to what is inherited". */
 export type ConfigList = string[] | ConfigListEdit;
 
-/** One `commands.classify` entry as written in config: a template and the class it resolves to. */
+/** One `commands.classify` entry as written in config: a template, the class it resolves to, and optionally a flags allowlist. */
 export interface CommandClassifyConfig {
   template?: unknown;
   capability?: unknown;
+  flags?: unknown;
 }
+
+/** A `commands.allow` entry with a flags allowlist; a plain string entry accepts any flags. */
+export interface CommandAllowConfig {
+  template: string;
+  flags: string[];
+}
+
+/** `commands.allow`: a list whose added entries may also be `{template, flags}` objects. */
+export type ConfigAllowList = Array<string | CommandAllowConfig> | { add?: Array<string | CommandAllowConfig>; remove?: string[] };
 
 /** `commands.classify` as a bare array or `{"add": [...]}`; the entries are objects rather than strings. */
 export type ConfigRuleList = CommandClassifyConfig[] | { add?: CommandClassifyConfig[] };
@@ -101,7 +113,7 @@ export interface RailConfig {
     deniedDomains?: ConfigList;
   };
   commands?: {
-    allow?: ConfigList;
+    allow?: ConfigAllowList;
     classify?: ConfigRuleList;
   };
   /** Capability disposition table: class id → allow | judge | ask | deny. Omitted classes keep their default. */
@@ -152,7 +164,13 @@ export interface ResolvedRailConfig {
   };
   commands: {
     allow: string[];
-    /** User template → capability mappings, in precedence order (first match wins). */
+    /**
+     * Flags allowlists for `allow` entries, keyed by template. A template is
+     * the identity of an allow entry (as for classify rules), so it has at
+     * most one flags list; a template absent here accepts any flags.
+     */
+    allowFlags: Record<string, string[]>;
+    /** User template → capability mappings. Order is only the last tiebreak: the most specific matching rule wins. */
     classify: CommandCapabilityRule[];
   };
   /** Fully resolved disposition table: every capability class has a row. */
@@ -335,6 +353,7 @@ const DEFAULTS_SANS_PROVENANCE: Omit<ResolvedRailConfig, "provenance"> = {
   },
   commands: {
     allow: [...DEFAULT_COMMAND_ALLOWLIST],
+    allowFlags: {},
     // No built-in classify rules: the whole point of the list is that the
     // classes it reaches are the ones this user decided to name.
     classify: [],

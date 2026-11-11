@@ -5,12 +5,12 @@
 // telemetry, recent decisions, traces, or lastDecision. Reuses the same stage
 // helpers the interceptor consults, so verdicts cannot drift.
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { capabilityName, resolveCapabilities, type CapabilityId, type CapabilityResolution } from "../capabilities.ts";
+import { capabilityName, getEffectiveDisposition, resolveCapabilities, type CapabilityId, type CapabilityResolution } from "../capabilities.ts";
 import { describeClassifierFailure } from "../classifier-protocol.ts";
 import { classifierEnabled, judgeModelSpec, judgeToolCall, nameToolCall, resolveClassifierModel, resolveJudgeModel, type CompleteFn, type NamerResult } from "../classifier.ts";
 import { describeSegmentMatch, explainCommandMatch, matchedCapabilities } from "../command-allowlist.ts";
 import { loadConfig, type ResolvedRailConfig } from "../config.ts";
-import { effectiveDispositionLabel } from "../policy-store.ts";
+import { commandRulesOf, effectiveDispositionLabel } from "../policy-store.ts";
 import { screenToolCall } from "../content-screen.ts";
 import { INTERCEPTED_TOOLS } from "../intercepted-tools.ts";
 import { exemptReadCallReason } from "../interceptor.ts";
@@ -224,7 +224,7 @@ export function createRailTest(deps: RailTestDeps) {
 
   async function testCommand(ctx: ExtensionContext, config: ResolvedRailConfig, command: string): Promise<string[]> {
     const lines: string[] = [];
-    const match = explainCommandMatch(command, { classify: config.commands.classify, allow: config.commands.allow });
+    const match = explainCommandMatch(command, commandRulesOf(config, (capability) => getEffectiveDisposition(config, state.capabilities, capability).disposition));
     const enforcing = config.filesystem.enabled && state.initialized && state.backend?.name === "seatbelt";
     // What the matched rules would resolve to, which is what decides whether
     // the deterministic verdict stands on its own or needs the sandbox.

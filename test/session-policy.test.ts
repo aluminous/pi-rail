@@ -202,14 +202,14 @@ describe("session policy persistence", () => {
     const manager = SessionManager.inMemory();
     manager.appendCustomEntry(RAIL_SESSION_POLICY_TYPE, {
       version: 1,
-      grants: [{ id: "later", request: "r", created: "c", ops: [{ op: "classify", template: "x *", capability: "read-project", flags: ["-n"] }] }],
+      grants: [{ id: "later", request: "r", created: "c", ops: [{ op: "classify", template: "x *", capability: "read-project", flags: ["n"] }] }],
       edits: [{ op: "set-disposition", capability: "credentials", disposition: "deny" }, { op: "teleport" }],
     });
     const diagnostics = restoreSessionPolicy(state, manager.getEntries());
     assert.equal(diagnostics.length, 2);
-    assert.match(diagnostics.join("\n"), /unexpected key flags/);
+    assert.match(diagnostics.join("\n"), /flag "n" must start with "-"/);
     assert.deepEqual(state.sessionPolicy.edits, [{ op: "set-disposition", capability: "credentials", disposition: "deny" }]);
-    assert.deepEqual(state.sessionPolicy.grants[0]?.ops, [], "an op from a later phase is refused, not half-applied");
+    assert.deepEqual(state.sessionPolicy.grants[0]?.ops, [], "a malformed op is refused, not half-applied");
   });
 });
 

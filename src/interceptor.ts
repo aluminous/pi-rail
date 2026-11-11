@@ -4,6 +4,7 @@ import { askRailApproval } from "./approvals.ts";
 import {
   capabilityName,
   capabilityRegistry,
+  getEffectiveDisposition,
   recordCapabilityDecided,
   recordCapabilityHits,
   recordCapabilityOutcome,
@@ -33,7 +34,7 @@ import {
 } from "./classifier.ts";
 import { describeSegmentMatch, explainCommandMatch, matchedCapabilities } from "./command-allowlist.ts";
 import type { ResolvedRailConfig } from "./config.ts";
-import { effectiveDispositionLabel } from "./policy-store.ts";
+import { commandRulesOf, effectiveDispositionLabel } from "./policy-store.ts";
 import { screenToolCall, type ContentScreenVerdict } from "./content-screen.ts";
 import { addTraceStage, type DecisionTrace } from "./decision-trace.ts";
 import { actionTarget, describeAction, INTERCEPTED_TOOLS, type InterceptedToolSpec } from "./intercepted-tools.ts";
@@ -452,7 +453,7 @@ function sandboxEnforcing(state: RuntimeState, config: ResolvedRailConfig): bool
  */
 function classifyCommand(input: Record<string, unknown>, state: RuntimeState, config: ResolvedRailConfig, trace: DecisionTrace): LabelStage {
   if (typeof input.command !== "string") return { labels: [], needsNaming: true };
-  const match = explainCommandMatch(input.command, { classify: config.commands.classify, allow: config.commands.allow });
+  const match = explainCommandMatch(input.command, commandRulesOf(config, (capability) => getEffectiveDisposition(config, state.capabilities, capability).disposition));
   // The stage is named for the list that did the work, so a trace says whether
   // a verdict came from the user's own classification or from the built-ins.
   const stage = match.segments?.some((segment) => segment.source === "classify") ? "commands.classify" : "command-allowlist";

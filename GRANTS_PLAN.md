@@ -299,13 +299,7 @@ Each leaves the project working and is useful without the next.
    `examples/configs` and the README.
 2. **Matcher and classes.** Specificity, `flags`, `extends`, the read-only
    rule for parentless classes.
-   **Spike: worktree-membership predicate.** A time-boxed proof of concept
-   of a rule condition "this positional argument is a registered worktree of
-   the session repo", built on `src/worktrees.ts`. Keep it only if it is
-   exact without running git across: relative paths, `git -C`, a preceding
-   `cd` in the chain, symlinked paths, the main worktree itself, and stale
-   registry entries — and if anything it cannot resolve fails to match rather
-   than guessing. Otherwise drop it and leave positional checks to the namer.
+   The worktree-membership spike ran here and was dropped (see Decisions).
 3. **Grants by hand.** Gates, corpus diff, `/rail grant check`, the grants
    tab, promote/revoke, the `grant` field on telemetry records.
 4. **Session-layer sandbox lists.** Experiment with `updateConfig` first;
@@ -331,7 +325,23 @@ Each leaves the project working and is useful without the next.
 - **The corpus redacts credential shapes**, under the floor rules in
   [Replay corpus](#replay-corpus) so redaction cannot sway a replay toward
   "safe".
-- **Worktree membership as a rule predicate is decided by a spike** (see
-  Phases), not up front.
+- **Worktree membership as a rule predicate: dropped after the spike.** It
+  passed every listed case, but git matches the argument as a *suffix* of
+  registered worktree paths before treating it as a path (with `lnk -> nest`,
+  `git worktree remove lnk/x` removed `q/lnk/x`, not `nest/x`). Exactness
+  would mean mirroring git and bash internals per version, the answer depends
+  on environment the command does not show, and git already refuses to remove
+  anything that is not a clean registered worktree. Positional checks stay
+  with the namer.
+- **User rules outrank built-in defaults before specificity applies.** A
+  broad user rule (`git *` → strict) must not lose to a more specific
+  built-in allow; specificity ranks only within the winning tier. Restating a
+  built-in claims it as a user rule.
+- **Grant-added classes are rules-only by default.** Seen live: with the
+  worktree grant in place the namer labelled `git worktree remove --force`
+  with both `worktree-cleanup` and `local-destructive`; only severity-max
+  kept it from being allowed. A class meant to be reached by classify rules
+  must not be in the namer's vocabulary at all, or one mislabel widens it.
+  `add-class` takes `namer: true` to opt in.
 - **Project-layer grants in a shared repo** get a line in the trust prompt
   and nothing more; `.pi/rail.json` already carries the same risk.

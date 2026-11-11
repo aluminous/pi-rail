@@ -11,6 +11,7 @@ import {
   capabilityRegistry,
   getEffectiveDisposition,
   isBuiltinCapabilityId,
+  type BuiltinCapabilityId,
   type CapabilityClass,
   type CapabilityId,
   type CapabilityStats,
@@ -90,6 +91,8 @@ export interface DispositionRow {
   sessionEdited: boolean;
   /** The full definition text, for the edit form (`definition` is the shortened footer form). */
   fullDefinition: string;
+  /** Custom classes: the built-in this one extends, which is how presets reach it. */
+  extends?: BuiltinCapabilityId;
 }
 
 /** Buckets that partition the seven outcomes: auto-allowed, brought to the user, auto-denied. */
@@ -141,6 +144,7 @@ export function dispositionRows(config: ResolvedRailConfig | undefined, state: R
       // so only a set-definition edit counts as editing something that already existed.
       sessionEdited: definitionEdits.has(entry.id),
       fullDefinition: entry.definition,
+      ...(entry.extends ? { extends: entry.extends } : {}),
     };
   });
 }
@@ -222,7 +226,13 @@ export function saveDispositions(
   // to land in a config that already declares the class.
   for (const op of edits) {
     if (op.op !== "add-class") continue;
-    writer.capabilityClass(op.id, { id: op.id, ...(op.name ? { name: op.name } : {}), definition: op.definition, disposition: op.disposition ?? "ask" });
+    writer.capabilityClass(op.id, {
+      id: op.id,
+      ...(op.name ? { name: op.name } : {}),
+      definition: op.definition,
+      disposition: op.disposition ?? "ask",
+      ...(op.extends ? { extends: op.extends } : {}),
+    });
     result.added.push(op.id);
   }
   for (const op of edits) {
@@ -265,6 +275,7 @@ function toPersistedClass(entry: CapabilityClass): PersistedCapabilityClass {
     ...(entry.name && entry.name !== entry.id ? { name: entry.name } : {}),
     definition: entry.definition,
     disposition: entry.default,
+    ...(entry.extends ? { extends: entry.extends } : {}),
   };
 }
 

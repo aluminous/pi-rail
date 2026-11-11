@@ -18,16 +18,26 @@
  */
 import {
   CUSTOM_CLASS_ID_PATTERN,
+  BUILTIN_CAPABILITY_IDS,
   getEffectiveDisposition,
   isBuiltinCapabilityId,
   isDisposition,
   isStricter,
+  type BuiltinCapabilityId,
   type CapabilityClass,
   type CapabilityId,
   type Disposition,
   type EffectiveDisposition,
 } from "./capabilities.ts";
-import { commandTemplateProblem, type CommandCapabilityRule } from "./command-allowlist.ts";
+import {
+  capabilityForTemplate,
+  DEFAULT_COMMAND_ALLOWLIST,
+  commandFlagsProblem,
+  commandTemplateProblem,
+  type CommandCapabilityRule,
+  type CommandRule,
+  type CommandRuleSet,
+} from "./command-allowlist.ts";
 import type { ProvenanceListKey, RailBackendName, RailConfig, ResolvedClassifierConfig, ResolvedRailConfig, StatusLineMode } from "./config.ts";
 
 // ── Layers and provenance ────────────────────────────────────────────────────
@@ -101,11 +111,11 @@ function isSandboxList(list: StringListKey): boolean {
  */
 export type PolicyOp =
   | { op: "set-disposition"; capability: CapabilityId; disposition: Disposition }
-  | { op: "add-class"; id: string; name?: string; definition: string; disposition?: Disposition }
+  | { op: "add-class"; id: string; name?: string; definition: string; disposition?: Disposition; extends?: BuiltinCapabilityId }
   | { op: "remove-class"; id: string }
   | { op: "set-definition"; capability: CapabilityId; definition: string }
-  | { op: "classify"; template: string; capability: CapabilityId }
-  | { op: "allow-command"; template: string }
+  | { op: "classify"; template: string; capability: CapabilityId; flags?: string[] }
+  | { op: "allow-command"; template: string; flags?: string[] }
   | { op: "add-to-list"; list: StringListKey; values: string[] }
   | { op: "remove-from-list"; list: StringListKey; values: string[] };
 
@@ -114,11 +124,11 @@ export type PolicyOpName = PolicyOp["op"];
 /** Fields each op accepts beyond `op`. Anything else is an error for that op; a missing required field fails its own check below. */
 const OP_FIELDS: Record<PolicyOpName, { required: string[]; optional: string[] }> = {
   "set-disposition": { required: ["capability", "disposition"], optional: [] },
-  "add-class": { required: ["id", "definition"], optional: ["name", "disposition"] },
+  "add-class": { required: ["id", "definition"], optional: ["name", "disposition", "extends"] },
   "remove-class": { required: ["id"], optional: [] },
   "set-definition": { required: ["capability", "definition"], optional: [] },
-  classify: { required: ["template", "capability"], optional: [] },
-  "allow-command": { required: ["template"], optional: [] },
+  classify: { required: ["template", "capability"], optional: ["flags"] },
+  "allow-command": { required: ["template"], optional: ["flags"] },
   "add-to-list": { required: ["list", "values"], optional: [] },
   "remove-from-list": { required: ["list", "values"], optional: [] },
 };
@@ -214,8 +224,9 @@ const DISPOSITION_SHAPE = `"allow", "judge", "ask", or "deny"`;
 
 /**
  * Validates one op on its own. Unknown fields are an error rather than
- * ignored, so a field from a later phase (`flags`, `extends`) is refused
- * loudly instead of loading as a broader rule than its author wrote.
+ * ignored, so a field from a later phase is refused loudly instead of loading
+ * as a broader rule than its author wrote — the reason a `flags` this build
+ * did not understand could never have quietly meant "any flags".
  */
 export function parseOp(raw: unknown, where: string, diagnostics: string[]): PolicyOp | undefined {
   const fail = (message: string): undefined => {
@@ -248,6 +259,10 @@ export function parseOp(raw: unknown, where: string, diagnostics: string[]): Pol
       if (!definition) return fail("definition must be a non-empty string");
       if (raw.name !== undefined && typeof raw.name !== "string") return fail("name must be a string");
       if (raw.disposition !== undefined && !isDisposition(raw.disposition)) return fail(`disposition must be ${DISPOSITION_SHAPE}`);
+      // Built-in parents only: a preset is a fixed guarantee over the
+      // built-ins, and a chain through custom classes could be removed or
+      // redeclared out from under it.
+      if (raw.extends !== undefined && !isBuiltinCapabilityId(raw.extends)) return fail(`extends must be a built-in class id (${BUILTIN_CAPABILITY_IDS.join(", ")})`);
       const label = typeof raw.name === "string" ? raw.name.trim() : "";
       return {
         op: "add-class",
@@ -255,6 +270,7 @@ export function parseOp(raw: unknown, where: string, diagnostics: string[]): Pol
         ...(label ? { name: label } : {}),
         definition,
         ...(raw.disposition !== undefined ? { disposition: raw.disposition as Disposition } : {}),
+        ...(raw.extends !== undefined ? { extends: raw.extends as BuiltinCapabilityId } : {}),
       };
     }
     case "remove-class": {
@@ -276,13 +292,17 @@ export function parseOp(raw: unknown, where: string, diagnostics: string[]): Pol
       if (problem) return fail(problem);
       const capability = nonEmpty("capability");
       if (!capability) return fail("capability must be a non-empty string");
-      return { op: "classify", template: raw.template.trim(), capability };
+      const flags = parseFlags(raw.template, raw.flags);
+      if (typeof flags === "string") return fail(flags);
+      return { op: "classify", template: normalizeTemplate(raw.template), capability, ...(flags ? { flags } : {}) };
     }
     case "allow-command": {
       if (typeof raw.template !== "string") return fail("template must be a string");
       const problem = commandTemplateProblem(raw.template);
       if (problem) return fail(problem);
-      return { op: "allow-command", template: raw.template.trim() };
+      const flags = parseFlags(raw.template, raw.flags);
+      if (typeof flags === "string") return fail(flags);
+      return { op: "allow-command", template: normalizeTemplate(raw.template), ...(flags ? { flags } : {}) };
     }
     case "add-to-list":
     case "remove-from-list": {
@@ -291,6 +311,20 @@ export function parseOp(raw: unknown, where: string, diagnostics: string[]): Pol
       return { op: name as "add-to-list" | "remove-from-list", list: raw.list, values: [...raw.values] };
     }
   }
+}
+
+/** A validated copy of an op's `flags`, undefined when absent, or the problem as a string. */
+function parseFlags(template: string, raw: unknown): string[] | undefined | string {
+  if (raw === undefined) return undefined;
+  const problem = commandFlagsProblem(template, raw);
+  if (problem) return problem;
+  // Duplicates say nothing extra; dropping them keeps restatement checks exact.
+  return [...new Set(raw as string[])];
+}
+
+/** Templates are a rule's identity as written, trimmed (the matcher splits on whitespace either way). */
+function normalizeTemplate(template: string): string {
+  return template.trim();
 }
 
 const EXAMPLE_KEYS = ["tool", "input", "expect", "why"];
@@ -391,7 +425,7 @@ export function serializeGrant(grant: Grant): Record<string, unknown> {
     id: grant.id,
     request: grant.request,
     created: grant.created,
-    ops: grant.ops.map((op) => ({ ...op })),
+    ops: grant.ops.map((op) => structuredClone(op)),
     ...(grant.examples !== undefined ? { examples: structuredClone(grant.examples) } : {}),
   };
 }
@@ -445,6 +479,74 @@ function compileList(list: StringListKey, raw: unknown, where: string, diagnosti
   if (raw.add) out.push({ op: { op: "add-to-list", list, values: [...raw.add] }, where: `${where}.add` });
 }
 
+const ALLOW_SHAPE = `expected an array of templates (a string, or {"template": "…", "flags": [...]}), or {"add": [...], "remove": [...]}`;
+
+/**
+ * The added entries of `commands.allow`, which may mix plain templates with
+ * `{template, flags}` objects. Plain strings stay one add-to-list op (exactly
+ * what the list compiled to before flags existed); each object becomes its
+ * own allow-command op, so one bad object costs only itself. A non-string,
+ * non-object entry still drops the whole list, as for every other list.
+ */
+function compileAllowEntries(entries: unknown[], where: string, diagnostics: string[], out: LocatedOp[]): void {
+  let pending: string[] = [];
+  const flush = () => {
+    if (pending.length > 0) out.push({ op: { op: "add-to-list", list: "commands.allow", values: pending }, where });
+    pending = [];
+  };
+  entries.forEach((entry, index) => {
+    if (typeof entry === "string") {
+      pending.push(entry);
+      return;
+    }
+    flush();
+    const at = `${where}[${index}]`;
+    const entryObject = entry as Record<string, unknown>;
+    const extra = unexpectedKeys(entryObject, ["template", "flags"]);
+    if (extra.length > 0) {
+      diagnostics.push(`Ignoring ${at}: unexpected ${keyList(extra)} — an entry is a template string or {"template": "…", "flags": [...]}`);
+      return;
+    }
+    const op = parseOp({ op: "allow-command", ...entryObject }, at, diagnostics);
+    if (op) out.push({ op, where: at });
+  });
+  flush();
+}
+
+/** commands.allow in either list form, with object entries allowed among the adds. */
+function compileAllowList(raw: unknown, where: string, diagnostics: string[], out: LocatedOp[]): void {
+  if (raw === undefined) return;
+  const entriesOk = (value: unknown): value is unknown[] => Array.isArray(value) && value.every((entry) => typeof entry === "string" || isObject(entry));
+  if (Array.isArray(raw)) {
+    if (!entriesOk(raw)) {
+      diagnostics.push(`Ignoring ${where}: ${ALLOW_SHAPE}`);
+      return;
+    }
+    compileAllowEntries(raw, where, diagnostics, out);
+    return;
+  }
+  if (!isObject(raw)) {
+    diagnostics.push(`Ignoring ${where}: ${ALLOW_SHAPE}`);
+    return;
+  }
+  if ("replace" in raw || "values" in raw) {
+    diagnostics.push(legacyListDiagnostic(where));
+    return;
+  }
+  const extra = unexpectedKeys(raw, ["add", "remove"]);
+  if (extra.length > 0) {
+    diagnostics.push(`Ignoring ${where}: unexpected ${keyList(extra)} — ${ALLOW_SHAPE}`);
+    return;
+  }
+  if ((raw.add !== undefined && !entriesOk(raw.add)) || (raw.remove !== undefined && !isStringArray(raw.remove))) {
+    diagnostics.push(`Ignoring ${where}: ${ALLOW_SHAPE}`);
+    return;
+  }
+  // Removes before adds, as compileList: see there.
+  if (raw.remove) out.push({ op: { op: "remove-from-list", list: "commands.allow", values: [...raw.remove] }, where: `${where}.remove` });
+  if (raw.add) compileAllowEntries(raw.add, `${where}.add`, diagnostics, out);
+}
+
 /** commands.classify: each entry becomes its own classify op, so one bad entry costs only itself. */
 function compileClassify(raw: unknown, where: string, diagnostics: string[], out: LocatedOp[]): void {
   if (raw === undefined) return;
@@ -474,9 +576,9 @@ function compileClassify(raw: unknown, where: string, diagnostics: string[], out
       diagnostics.push(`Ignoring ${at}: ${RULE_SHAPE}`);
       return;
     }
-    const extra = unexpectedKeys(entry, ["template", "capability"]);
+    const extra = unexpectedKeys(entry, ["template", "capability", "flags"]);
     if (extra.length > 0) {
-      diagnostics.push(`Ignoring ${at}: unexpected ${keyList(extra)} — an entry is {"template": "…", "capability": "…"}`);
+      diagnostics.push(`Ignoring ${at}: unexpected ${keyList(extra)} — an entry is {"template": "…", "capability": "…", "flags"?: [...]}`);
       return;
     }
     const op = parseOp({ op: "classify", ...entry }, at, diagnostics);
@@ -567,7 +669,7 @@ export function compileConfigLayer(rawConfig: Partial<RailConfig>, name: FileLay
   }
   if (isObject(raw.commands)) {
     const commands = raw.commands as Record<string, unknown>;
-    compileList("commands.allow", commands.allow, `${file}.commands.allow`, diagnostics, base);
+    compileAllowList(commands.allow, `${file}.commands.allow`, diagnostics, base);
     compileClassify(commands.classify, `${file}.commands.classify`, diagnostics, base);
   }
 
@@ -634,7 +736,11 @@ function cloneForApply(config: ResolvedRailConfig): ResolvedRailConfig {
     filesystem: { ...config.filesystem, allowRead: [...config.filesystem.allowRead], denyRead: [...config.filesystem.denyRead], allowWrite: [...config.filesystem.allowWrite], denyWrite: [...config.filesystem.denyWrite] },
     environment: { allow: [...config.environment.allow], unset: [...config.environment.unset] },
     network: { ...config.network, allowedDomains: [...config.network.allowedDomains], deniedDomains: [...config.network.deniedDomains] },
-    commands: { allow: [...config.commands.allow], classify: config.commands.classify.map((rule) => ({ ...rule })) },
+    commands: {
+      allow: [...config.commands.allow],
+      allowFlags: Object.fromEntries(Object.entries(config.commands.allowFlags).map(([template, flags]) => [template, [...flags]])),
+      classify: config.commands.classify.map((rule) => ({ ...rule, ...(rule.flags ? { flags: [...rule.flags] } : {}) })),
+    },
     dispositions: { ...config.dispositions },
     capabilities: { classes: config.capabilities.classes.map((entry) => ({ ...entry })), definitions: { ...config.capabilities.definitions } },
     classifier: { ...config.classifier },
@@ -704,6 +810,7 @@ function applyOp(config: ResolvedRailConfig, op: PolicyOp, provenance: Provenanc
         // name is exactly the case for bringing them in, and it is the one default
         // that cannot silently widen what the agent may do.
         default: op.disposition ?? "ask",
+        ...(op.extends ? { extends: op.extends } : {}),
       };
       const at = config.capabilities.classes.findIndex((existing) => existing.id === op.id);
       // Same-id redeclaration keeps its position, so the namer payload order
@@ -742,20 +849,35 @@ function applyOp(config: ResolvedRailConfig, op: PolicyOp, provenance: Provenanc
       if (!knownClass(config, op.capability)) {
         return skip(`"${op.capability}" is not a known capability class — declare it (capabilities.classes or an add-class op) first`);
       }
-      const rule: CommandCapabilityRule = { template: op.template, capability: op.capability };
+      const rule: CommandCapabilityRule = { template: op.template, capability: op.capability, ...(op.flags ? { flags: [...op.flags] } : {}) };
       const rules = config.commands.classify;
       const at = rules.findIndex((existing) => existing.template === op.template);
       // A restatement credits the layer that introduced the rule; a template
-      // pointed at a different class is a real change, re-mapped in place so
-      // first-match order does not move.
-      if (at !== -1 && rules[at]!.capability === op.capability) return;
+      // pointed at a different class or given different flags is a real
+      // change, replaced whole (an op states the entire rule) and credited to
+      // this layer, which is also what ranks it.
+      if (at !== -1 && rules[at]!.capability === op.capability && sameFlags(rules[at]!.flags, op.flags)) return;
       if (at === -1) rules.push(rule);
       else rules[at] = rule;
       config.provenance.lists["commands.classify"][op.template] = provenance;
       return;
     }
-    case "allow-command":
+    case "allow-command": {
+      const current = config.commands.allowFlags[op.template];
+      const present = config.commands.allow.includes(op.template);
+      // Same flags (or a new entry): an ordinary list add, restatement rules
+      // and all. Different flags on an entry already present: the op states
+      // the whole rule, so its flags replace the old ones — absent flags
+      // included, which means "any flags" — and the entry becomes this
+      // layer's, since its meaning is now this layer's.
+      if (op.flags) config.commands.allowFlags[op.template] = [...op.flags];
+      else delete config.commands.allowFlags[op.template];
+      if (present && !sameFlags(current, op.flags)) {
+        config.provenance.lists["commands.allow"][op.template] = provenance;
+        return;
+      }
       return applyListAdd(config, "commands.allow", [op.template], provenance);
+    }
     case "add-to-list":
     case "remove-from-list": {
       if (provenance.layer === "session" && isSandboxList(op.list)) {
@@ -766,10 +888,19 @@ function applyOp(config: ResolvedRailConfig, op: PolicyOp, provenance: Provenanc
         const drop = new Set(op.values);
         setList(config, op.list, getList(config, op.list).filter((value) => !drop.has(value)));
         for (const value of op.values) delete config.provenance.lists[op.list][value];
+        // A dropped allow entry takes its flags with it, so re-adding the
+        // template later starts from "any flags" as written, not a stale list.
+        if (op.list === "commands.allow") for (const value of op.values) delete config.commands.allowFlags[value];
       }
       return;
     }
   }
+}
+
+/** Two flags allowlists say the same thing: both absent, or the same set. */
+export function sameFlags(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return a.length === b.length && a.every((flag) => b.includes(flag));
 }
 
 /**
@@ -957,6 +1088,7 @@ export function editSessionAddClass(session: SessionLayer, entry: CapabilityClas
     ...(entry.name && entry.name !== entry.id ? { name: entry.name } : {}),
     definition: entry.definition,
     disposition: entry.default,
+    ...(entry.extends ? { extends: entry.extends } : {}),
   };
   const kept = session.edits.filter((existing) => !((existing.op === "remove-class" || existing.op === "add-class") && existing.id === entry.id));
   // Class ops lead the list so a row edit for the class (which validates
@@ -1078,18 +1210,31 @@ export function applyOpsToRawConfig(raw: RailConfig, ops: readonly PolicyOp[]): 
     next[key] = created;
     return created;
   };
-  const editList = (list: StringListKey, add: string[], remove: string[]) => {
+  // Entries are strings, except that commands.allow may hold {template, flags}
+  // objects; both compare by template. `replace` is allow-command's "this op
+  // states the whole rule" (an existing entry is rewritten, flags and all),
+  // against add-to-list's restatement, which leaves an existing entry alone.
+  type Entry = string | { template: string; flags: string[] };
+  const entryKey = (entry: unknown): unknown => (isObject(entry) && typeof entry.template === "string" ? entry.template : entry);
+  const editList = (list: StringListKey, add: Entry[], remove: string[], replace = false) => {
     const [top, key] = list.split(".") as [string, string];
     const holder = section(top);
     const current = holder[key];
-    let form: { add?: string[]; remove?: string[] } = Array.isArray(current) ? { add: [...(current as string[])] } : isObject(current) ? { ...(current as { add?: string[]; remove?: string[] }) } : {};
+    let form: { add?: Entry[]; remove?: string[] } = Array.isArray(current) ? { add: [...(current as Entry[])] } : isObject(current) ? { ...(current as { add?: Entry[]; remove?: string[] }) } : {};
     if (remove.length > 0) {
-      form.add = (form.add ?? []).filter((value) => !remove.includes(value));
+      form.add = (form.add ?? []).filter((value) => !remove.includes(entryKey(value) as string));
       form.remove = [...(form.remove ?? []), ...remove.filter((value) => !(form.remove ?? []).includes(value))];
     }
     if (add.length > 0) {
-      form.remove = form.remove?.filter((value) => !add.includes(value));
-      form.add = [...(form.add ?? []), ...add.filter((value) => !(form.add ?? []).includes(value))];
+      const addKeys = add.map(entryKey);
+      form.remove = form.remove?.filter((value) => !addKeys.includes(value));
+      const kept = [...(form.add ?? [])];
+      for (const entry of add) {
+        const at = kept.findIndex((existing) => entryKey(existing) === entryKey(entry));
+        if (at === -1) kept.push(entry);
+        else if (replace) kept[at] = entry;
+      }
+      form.add = kept;
     }
     if (form.remove && form.remove.length === 0) delete form.remove;
     if (form.add && form.add.length === 0 && !form.remove) form = {};
@@ -1104,7 +1249,13 @@ export function applyOpsToRawConfig(raw: RailConfig, ops: readonly PolicyOp[]): 
       case "add-class": {
         const capabilities = section("capabilities");
         const classes = Array.isArray(capabilities.classes) ? [...capabilities.classes] : [];
-        const entry = { id: op.id, ...(op.name ? { name: op.name } : {}), definition: op.definition, ...(op.disposition ? { disposition: op.disposition } : {}) };
+        const entry = {
+          id: op.id,
+          ...(op.name ? { name: op.name } : {}),
+          definition: op.definition,
+          ...(op.disposition ? { disposition: op.disposition } : {}),
+          ...(op.extends ? { extends: op.extends } : {}),
+        };
         const at = classes.findIndex((existing) => isObject(existing) && existing.id === op.id);
         if (at === -1) classes.push(entry);
         else classes[at] = entry;
@@ -1130,14 +1281,14 @@ export function applyOpsToRawConfig(raw: RailConfig, ops: readonly PolicyOp[]): 
         const current = commands.classify;
         const rules = Array.isArray(current) ? [...current] : isObject(current) && Array.isArray(current.add) ? [...current.add] : [];
         const at = rules.findIndex((rule) => isObject(rule) && rule.template === op.template);
-        const rule = { template: op.template, capability: op.capability };
+        const rule = { template: op.template, capability: op.capability, ...(op.flags ? { flags: [...op.flags] } : {}) };
         if (at === -1) rules.push(rule);
         else rules[at] = rule;
         commands.classify = rules;
         break;
       }
       case "allow-command":
-        editList("commands.allow", [op.template], []);
+        editList("commands.allow", [op.flags ? { template: op.template, flags: [...op.flags] } : op.template], [], true);
         break;
       case "add-to-list":
         editList(op.list, op.values, []);
@@ -1169,9 +1320,75 @@ export function effectiveDispositionLabel(entry: EffectiveDisposition): string {
   return provenanceLabel(entry.provenance);
 }
 
+// ── Command rules for the matcher ────────────────────────────────────────────
+
+const LAYER_ORDER: Record<PolicyLayerName, number> = { default: 0, global: 1, project: 2, session: 3 };
+
+/**
+ * A rule's fold position as the matcher's ranking step (d) reads it:
+ * [layer, grant], where grant is 0 for a layer's base keys and 1 + the
+ * grant's index in the fold for a named grant (session-edits included, which
+ * the session layer applies last). Fold order is exactly "later overrides
+ * earlier", so ranking by it keeps that meaning without the matcher knowing
+ * anything about layers.
+ */
+export function provenanceRank(config: ResolvedRailConfig, provenance: Provenance | undefined): [number, number] {
+  if (!provenance) return [0, 0];
+  const layer = LAYER_ORDER[provenance.layer];
+  if (!provenance.grantId) return [layer, 0];
+  const at = config.grants.findIndex((grant) => grant.layer === provenance.layer && grant.id === provenance.grantId);
+  return [layer, at === -1 ? 0 : at + 1];
+}
+
+/**
+ * The matcher's rule pool for a resolved config: every classify rule and
+ * every allow entry, each with its flags, its fold rank, and a provenance
+ * label for explanations. `disposition` resolves a class for ranking step (e);
+ * by default the folded table without any session preset — the interceptor
+ * passes one that includes the preset.
+ */
+export function commandRulesOf(config: ResolvedRailConfig, disposition?: (capability: CapabilityId) => Disposition): CommandRuleSet {
+  const rules: CommandRule[] = [];
+  const classifyProvenance = config.provenance.lists["commands.classify"];
+  for (const rule of config.commands.classify) {
+    const provenance = classifyProvenance[rule.template];
+    rules.push({
+      template: rule.template,
+      capability: rule.capability,
+      ...(rule.flags ? { flags: rule.flags } : {}),
+      source: "classify",
+      // No classify rule is built in, so one without provenance (a config
+      // assembled in code rather than folded) still ranks above the defaults.
+      rank: provenance ? provenanceRank(config, provenance) : [LAYER_ORDER.global, 0],
+      ...(provenance ? { origin: provenanceLabel(provenance) } : {}),
+    });
+  }
+  const allowProvenance = config.provenance.lists["commands.allow"];
+  for (const template of config.commands.allow) {
+    const provenance = allowProvenance[template];
+    const flags = config.commands.allowFlags[template];
+    rules.push({
+      template,
+      capability: capabilityForTemplate(template),
+      ...(flags ? { flags } : {}),
+      source: "allow",
+      rank: provenance ? provenanceRank(config, provenance) : [DEFAULT_COMMAND_ALLOWLIST.includes(template) ? LAYER_ORDER.default : LAYER_ORDER.global, 0],
+      ...(provenance ? { origin: provenanceLabel(provenance) } : {}),
+    });
+  }
+  return { rules, disposition: disposition ?? ((capability) => getEffectiveDisposition(config, undefined, capability).disposition) };
+}
+
 // ── Direction ────────────────────────────────────────────────────────────────
 
 export type OpDirection = "widening" | "tightening" | "neutral";
+
+/** Every command `older` accepts, `newer` accepts too: no flags list (any flags), or a superset. */
+function flagsCover(newer: readonly string[] | undefined, older: readonly string[] | undefined): boolean {
+  if (newer === undefined) return true;
+  if (older === undefined) return false;
+  return older.every((flag) => newer.includes(flag));
+}
 
 const DENY_LISTS: StringListKey[] = ["filesystem.denyRead", "filesystem.denyWrite", "network.deniedDomains", "environment.unset"];
 
@@ -1201,6 +1418,13 @@ export function opDirection(op: PolicyOp, before: ResolvedRailConfig): OpDirecti
       // A redeclaration with new wording moves the namer's boundaries, which
       // is never provably one direction.
       if (existing.definition !== op.definition) return "widening";
+      if (existing.extends !== op.extends) {
+        // Dropping the parent can only bring presets down on the class (a
+        // parentless class is a writing class to every preset); any other
+        // change of parent may take a preset's deny away.
+        if (op.extends !== undefined) return "widening";
+        return disposition === existing.default || isStricter(disposition, existing.default) ? "tightening" : "widening";
+      }
       if (disposition === existing.default) return "neutral";
       return isStricter(disposition, existing.default) ? "tightening" : "widening";
     }
@@ -1219,12 +1443,20 @@ export function opDirection(op: PolicyOp, before: ResolvedRailConfig): OpDirecti
     }
     case "classify": {
       const existing = before.commands.classify.find((rule) => rule.template === op.template);
-      if (existing?.capability === op.capability) return "neutral";
-      // A deterministic deny label is the strictest outcome there is.
-      return getEffectiveDisposition(before, undefined, op.capability).disposition === "deny" ? "tightening" : "widening";
+      if (existing && existing.capability === op.capability && sameFlags(existing.flags, op.flags)) return "neutral";
+      // A deterministic deny label is the strictest outcome there is — for the
+      // commands the new rule matches. Replacing a rule whose flags matched
+      // MORE commands hands the difference to whatever ranks next, which may
+      // be an allow, so that is only tightening when the new flags cover the
+      // old ones.
+      const deny = getEffectiveDisposition(before, undefined, op.capability).disposition === "deny";
+      return deny && (!existing || flagsCover(op.flags, existing.flags)) ? "tightening" : "widening";
     }
     case "allow-command":
-      return before.commands.allow.includes(op.template) ? "neutral" : "widening";
+      // Narrowing an allow entry's flags is not provably tightening either:
+      // the commands it stops matching fall to the next-ranked rule, which
+      // may be looser than the namer would have been.
+      return before.commands.allow.includes(op.template) && sameFlags(before.commands.allowFlags[op.template], op.flags) ? "neutral" : "widening";
     case "add-to-list": {
       const current = getList(before, op.list);
       if (op.values.every((value) => current.includes(value))) {

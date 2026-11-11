@@ -58,6 +58,14 @@ export interface CapabilityClass {
   /** Prompt text: the namer's entire description of this class. */
   definition: string;
   default: Disposition;
+  /**
+   * Custom classes only: the built-in class this one narrows. It decides how
+   * presets treat the class (presetDenies) and nothing else — in particular an
+   * explicit disposition on the parent does NOT flow to the child, because
+   * carving an allowed sub-class out of a judged parent is the point of
+   * declaring one.
+   */
+  extends?: BuiltinCapabilityId;
 }
 
 export const BUILTIN_CAPABILITY_CLASSES: CapabilityClass[] = [
@@ -265,7 +273,8 @@ export function createCapabilityStats(): CapabilityStats {
  * Classes read-only mode denies. Writes and edits are already blocked
  * deterministically; this covers bash. Built-in ids by construction: the preset
  * is a fixed guarantee about read-only mode, so it cannot depend on classes a
- * user may rename or delete.
+ * user may rename or delete. Custom classes are reached through their
+ * declared parent (presetDenies).
  */
 export const READ_ONLY_PRESET_DENY: BuiltinCapabilityId[] = [
   "modify-project",
@@ -274,6 +283,24 @@ export const READ_ONLY_PRESET_DENY: BuiltinCapabilityId[] = [
   "off-machine-effects",
   "persistence",
 ];
+
+/**
+ * Whether a preset denies class `id`. A built-in is denied when the preset
+ * names it. A custom class is denied when it extends a class the preset names
+ * — read-only mode tightens a `worktree-cleanup` that extends
+ * local-destructive — and also when it extends nothing at all: a custom class
+ * with no declared parent is treated as a writing class, so the safe
+ * behaviour never depends on the author remembering the declaration. A custom
+ * class extending a class the preset leaves alone (read-project, say) is left
+ * alone too. An id in no layer is not reached here; it already resolves to
+ * ask.
+ */
+export function presetDenies(preset: { deny: readonly BuiltinCapabilityId[] }, config: ResolvedRailConfig | undefined, id: CapabilityId): boolean {
+  if (isBuiltinCapabilityId(id)) return preset.deny.includes(id);
+  const custom = config?.capabilities.classes.find((entry) => entry.id === id);
+  if (!custom) return false;
+  return custom.extends === undefined || preset.deny.includes(custom.extends);
+}
 
 export function applyReadOnlyPreset(state: CapabilityState): void {
   state.preset = { name: "read-only", deny: READ_ONLY_PRESET_DENY };
@@ -371,7 +398,7 @@ export function getEffectiveDisposition(
     resolved = { id, disposition: configured, scope: provenance.layer === "session" ? "session" : "config", provenance };
   }
   const preset = state?.preset;
-  if (preset && isBuiltinCapabilityId(id) && preset.deny.includes(id) && isStricter("deny", resolved.disposition)) {
+  if (preset && presetDenies(preset, config, id) && isStricter("deny", resolved.disposition)) {
     resolved = { id, disposition: "deny", scope: "preset", source: preset.name };
   }
   return resolved;

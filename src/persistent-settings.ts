@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { CapabilityId, Disposition } from "./capabilities.ts";
+import type { BuiltinCapabilityId, CapabilityId, Disposition } from "./capabilities.ts";
 import { globalRailConfigPath, type CapabilitiesConfig, type RailConfig, type StatusLineMode } from "./config.ts";
 import { applyOpsToRawConfig, type Grant, type PolicyOp } from "./policy-store.ts";
 
@@ -10,6 +10,7 @@ export interface PersistedCapabilityClass {
   name?: string;
   definition: string;
   disposition?: Disposition;
+  extends?: BuiltinCapabilityId;
 }
 
 /** The global config file, resolved per call so a redirected agent dir (tests) is honoured. */

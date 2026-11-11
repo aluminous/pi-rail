@@ -46,6 +46,12 @@ temp directory, which a file cannot name portably.
   waiting for a model to happen to use the class you defined. `terraform apply`
   is mapped to the built-in `off-machine-effects` rather than to a custom
   class, which shows the same list re-pointing a command at a stricter built-in.
+  It also shows the most-specific-rule-wins ordering (`helm version *` →
+  `read-system` carves the local version probe out of the broad `helm *` →
+  `k8s-ops`, whichever is listed first), `flags` allowlists (`git worktree remove *`
+  with `"flags": []` stays out of reach of `--force` and its abbreviations;
+  `git cat-file *` is allowed only with its read-only flags), and a class that
+  `extends` `local-destructive`, so read-only mode still denies it.
 
 `network.enabled` means “enforce network restrictions.” With it set to `false`,
 networking is unrestricted. To deny all networking, set it to `true` and
