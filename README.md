@@ -787,6 +787,44 @@ path approvals, and errors.
 candidates, flagging ones where the same command was executed later in the
 session (false-positive candidates worth adding to `eval/cases.ts`).
 
+### Replay corpus
+
+Session telemetry truncates commands and paths because session files can be
+shared, which makes replaying a policy change against past decisions inexact.
+So the rail also keeps a separate, local replay corpus: one JSON line per
+decision (capability reviews, path approvals, deterministic policy blocks)
+with the timestamp, cwd, tool, the **full** command or path, the capability
+labels and whether the namer supplied them, the content-screen verdict, the
+resolved disposition and deciding row, the outcome, the user's answer
+(marked `forwarded` when it came from the parent session), and the judge's
+verdict. It does not keep token usage, latency, free-text reasons, comments,
+or any write/edit content — a write keeps only a sha256 and a byte length.
+
+- **Where:** `<agent dir>/rail-corpus/<YYYY-MM>.jsonl` (`~/.pi/agent/rail-corpus/`
+  by default), one append-only file per UTC month; directory `0700`, files
+  `0600`. Headless subagent children append to the same files.
+- **Redaction:** credential shapes in commands — the content screen's
+  credential patterns (AWS/GitHub/GitLab/Slack/OpenAI/Google keys, JWTs,
+  private keys, SSH key bodies), the value of a credential-named key
+  (`API_KEY=…`, `--password=…`, `"password":"…"`), the token after
+  `Bearer`/`Basic`, and high-entropy tokens and large base64 blobs — are
+  replaced by one typed shell word such as `‹redacted:aws-key›`, so the
+  command still parses into the same commands and arguments. Expansions like
+  `API_KEY=$TOKEN` are references and are left alone. A redacted record
+  carries `redacted: true` and the list of kinds. Paths, and references to
+  credential stores like `~/.aws/credentials`, are never redacted: they are
+  what the rules match on. Positional secrets with no key or shape to
+  recognise them by (`mysql -psecret`, `curl -u user:pass`,
+  `--password secret`) are not redacted.
+- **Cap:** at most 12 months and about 50 MB; whole month files are pruned,
+  oldest first, once per process.
+- **Off switch:** `"corpus": { "enabled": false }`. The corpus is independent
+  of `classifier.telemetry`, is never written while the rail is disabled,
+  never leaves the machine, and is never part of the session file.
+
+Nothing reads the corpus yet; it exists so that later policy tooling has
+history to replay against.
+
 ## Related extensions
 
 - [`pi-sandbox`](https://github.com/carderne/pi-sandbox) (Chris Arderne) — the inspiration for Pi Rail: OS-level sandboxing for Pi with interactive permission prompts, on macOS `sandbox-exec` and Linux `bubblewrap`. Pi Rail adds the semantic layer on top of similar containment — capability naming, the disposition table, the judge; if you want a mature prompt-oriented sandbox without model review, especially on Linux, start there.

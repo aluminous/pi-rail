@@ -16,6 +16,7 @@ import type { ClassifierState } from "./classifier.ts";
 import type { ResolvedRailConfig } from "./config.ts";
 import { TRACE_LIMIT, type DecisionTrace } from "./decision-trace.ts";
 import type { AccessKind } from "./policy.ts";
+import type { CorpusWriter } from "./replay-corpus.ts";
 
 export interface RailEvent {
   at: number;
@@ -210,6 +211,13 @@ export interface RuntimeState {
   subagentAckWarned: Set<string>;
   /** Writes a custom entry to pi's session log (pi.appendEntry). Undefined in tests without session wiring. */
   appendEntry?: (customType: string, data: unknown) => void;
+  /**
+   * The local replay corpus writer (src/replay-corpus.ts), wired once by
+   * index.ts like appendEntry. Undefined in tests without corpus wiring, so
+   * nothing a test drives can write into the developer's real agent dir.
+   * Process-lifetime: resetSessionState leaves it alone.
+   */
+  corpus?: CorpusWriter;
   /**
    * Emits the shared-bus blocked signal (`herdr:blocked`) around user-facing
    * asks; wired once by index.ts via wireBlockedSignal, like appendEntry.

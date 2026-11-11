@@ -13,6 +13,7 @@ import {
   type CapabilityId,
   type CapabilityOutcome,
   type CapabilityResolution,
+  type Disposition,
 } from "./capabilities.ts";
 import { classifierFailureContext, classifyClassifierFailure, describeClassifierFailure } from "./classifier-protocol.ts";
 import {
@@ -36,6 +37,7 @@ import { screenToolCall, type ContentScreenVerdict } from "./content-screen.ts";
 import { addTraceStage, type DecisionTrace } from "./decision-trace.ts";
 import { actionTarget, describeAction, INTERCEPTED_TOOLS, type InterceptedToolSpec } from "./intercepted-tools.ts";
 import { classifierExemptReadReason, decidePathAccess, denyReadMatch, normalizeUserPath, type AccessKind } from "./policy.ts";
+import { appendCorpusDecision } from "./replay-corpus.ts";
 import { appendRailTelemetry, type RailJudgeTelemetry, type UserAnswer } from "./telemetry.ts";
 import {
   recordApprovalDenied,
@@ -151,6 +153,8 @@ async function askPathApproval(params: {
   state: RuntimeState;
   kind: AccessKind;
   toolName: string;
+  /** The raw tool input, for the replay corpus: telemetry here carries only the normalized path. */
+  input: Record<string, unknown>;
   path: string;
   reason: string;
   trace: DecisionTrace;
@@ -160,12 +164,42 @@ async function askPathApproval(params: {
    * record must carry the labels itself or session replay could not rebuild
    * the per-class stats the live path records for this dialog.
    */
-  capability?: { labels: CapabilityId[]; decidedBy: CapabilityId; screenTripped?: boolean };
+  capability?: {
+    labels: CapabilityId[];
+    decidedBy: CapabilityId;
+    screenTripped?: boolean;
+    /** Corpus only (never spread into telemetry): the table's verdict and the namer's own labels. */
+    resolvedDisposition: Disposition;
+    namerLabels?: CapabilityId[];
+  };
 }): Promise<PathApprovalResult> {
   // Memory-core capability fields for every record this dialog writes.
   const capabilityFields = params.capability
     ? { labels: params.capability.labels, decidedBy: params.capability.decidedBy, screenTripped: params.capability.screenTripped }
     : {};
+  // The corpus twin of each approval record below. This dialog is the whole
+  // decision for a capability-routed write (no review record follows), so the
+  // corpus record carries the table fields itself.
+  const corpus = (answer: UserAnswer, shown: boolean, extra: { forwarded?: boolean; remembered?: boolean } = {}) =>
+    appendCorpusDecision(params.state, {
+      kind: "approval",
+      tool: params.toolName,
+      cwd: params.ctx.cwd,
+      input: params.input,
+      access: params.kind,
+      ...(params.capability
+        ? {
+            labels: params.capability.labels,
+            namerLabels: params.capability.namerLabels,
+            screenTripped: params.capability.screenTripped,
+            resolvedDisposition: params.capability.resolvedDisposition,
+            decidedBy: params.capability.decidedBy,
+          }
+        : {}),
+      outcome: answer === "approved" ? "allow" : answer === "denied" ? "deny" : "stop",
+      userAnswer: shown ? answer : undefined,
+      ...extra,
+    });
   if (isApprovedPath(params.state.approvals[params.kind], params.path)) {
     addTraceStage(params.trace, "ask", "approved", `${params.kind} ${params.path} already approved this session`);
     // A capability-routed repeat still mutates the per-class stats (the caller
@@ -183,6 +217,7 @@ async function askPathApproval(params: {
         remembered: true,
         ...capabilityFields,
       });
+      corpus("approved", false, { remembered: true });
     }
     return { answer: "approved" };
   }
@@ -201,6 +236,8 @@ async function askPathApproval(params: {
     recordApprovalDenied(params.state);
     addTraceStage(params.trace, "ask", "unanswerable", `${params.kind} ${params.path} needs approval but ${outcome.detail}`);
     appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "denied", reason: params.reason, ...capabilityFields });
+    // No dialog was shown (nobody could answer), so no userAnswer: replay must not read this as the user's denial.
+    corpus("denied", false);
     return {
       answer: "denied",
       block: {
@@ -215,6 +252,7 @@ async function askPathApproval(params: {
     recordApprovalStopped(params.state, params.toolName, params.kind, params.path);
     addTraceStage(params.trace, "ask", "stopped", `user stopped the turn at the ${params.kind} approval for ${params.path}${via}`);
     appendRailTelemetry(params.state, { kind: "approval", tool: params.toolName, access: params.kind, path: params.path, outcome: "stopped", reason: params.reason, forwarded: forwarded || undefined, ...capabilityFields });
+    corpus("stopped", true, { forwarded });
     return { answer: "stopped", block: stopTurnAtAsk(params.ctx, `${params.kind} access to ${params.path}`) };
   }
   if (answer.comment) {
@@ -232,6 +270,7 @@ async function askPathApproval(params: {
     forwarded: forwarded || undefined,
     ...capabilityFields,
   });
+  corpus(answer.approved ? "approved" : "denied", true, { forwarded });
   if (answer.approved) {
     params.state.approvals[params.kind].push(params.path);
     recordApprovalGranted(params.state, params.toolName, params.kind, params.path);
@@ -289,6 +328,7 @@ async function enforcePathPolicy(
   const block = (reason: string): ToolCallBlock => {
     recordPolicyBlock(state, event.toolName, reason);
     appendRailTelemetry(state, { kind: "block", tool: event.toolName, reason });
+    appendCorpusDecision(state, { kind: "block", tool: event.toolName, cwd: ctx.cwd, input, outcome: "block", reason });
     return { block: true, reason: `${reason}. Do not work around the rail; choose an allowed path or ask the user.` };
   };
 
@@ -320,7 +360,7 @@ async function enforcePathPolicy(
       // Whitelist read mode is an explicit narrowing by the user; keep the
       // existing per-path approval rather than routing it through read-system.
       addTraceStage(trace, "path-policy", "ask", `${decision.reason} → approval`);
-      const approval = await askPathApproval({ ctx, state, kind, toolName: event.toolName, path: decision.normalizedPath, reason: decision.reason, trace });
+      const approval = await askPathApproval({ ctx, state, kind, toolName: event.toolName, input, path: decision.normalizedPath, reason: decision.reason, trace });
       if (approval.block) return { outcome: "block", block: approval.block };
       continue;
     }
@@ -442,11 +482,12 @@ function classifyCommand(input: Record<string, unknown>, state: RuntimeState, co
  * which is what constrains a named bash command — and equally a command a
  * `commands.classify` rule labelled with one of those classes.
  */
-function enforceReadOnlyMode(toolName: string, input: Record<string, unknown>, state: RuntimeState, config: ResolvedRailConfig, spec: InterceptedToolSpec, trace: DecisionTrace): ToolCallBlock | undefined {
+function enforceReadOnlyMode(toolName: string, input: Record<string, unknown>, cwd: string, state: RuntimeState, config: ResolvedRailConfig, spec: InterceptedToolSpec, trace: DecisionTrace): ToolCallBlock | undefined {
   const block = (reason: string): ToolCallBlock => {
     recordPolicyBlock(state, toolName, reason);
     addTraceStage(trace, "readonly", "block", reason);
     appendRailTelemetry(state, { kind: "block", tool: toolName, reason });
+    appendCorpusDecision(state, { kind: "block", tool: toolName, cwd, input, outcome: "block", reason });
     return { block: true, reason: `${reason}. Do not work around the rail; ask the user to toggle read-only mode off (/rail readonly) if changes are wanted.` };
   };
   if (spec.access.includes("write")) return block(`${toolName} blocked: rail is in read-only mode`);
@@ -496,7 +537,7 @@ async function runInterceptStages(
   completeFn: CompleteFn | undefined,
 ): Promise<ToolCallBlock | undefined> {
   if (state.readOnly) {
-    const denied = enforceReadOnlyMode(event.toolName, input, state, config, spec, trace);
+    const denied = enforceReadOnlyMode(event.toolName, input, ctx.cwd, state, config, spec, trace);
     if (denied) return denied;
   }
 
@@ -753,6 +794,21 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       usage: totalUsage(params.named, judge),
       projection,
     });
+    appendCorpusDecision(state, {
+      kind: "review",
+      tool: event.toolName,
+      cwd: ctx.cwd,
+      input: event.input as Record<string, unknown>,
+      labels: resolution.labels,
+      namerLabels: params.named?.labels,
+      screenTripped: params.screen?.tripped,
+      resolvedDisposition: resolution.disposition,
+      decidedBy: resolution.decidedBy.id,
+      outcome: decision,
+      userAnswer,
+      forwarded,
+      judgeVerdict: judgeTelemetry?.verdict,
+    });
     return result.block;
   };
 
@@ -778,10 +834,17 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       state,
       kind: params.pathApproval.kind,
       toolName: event.toolName,
+      input: event.input as Record<string, unknown>,
       path: params.pathApproval.path,
       reason: params.pathApproval.reason,
       trace,
-      capability: { labels: resolution.labels, decidedBy: resolution.decidedBy.id, screenTripped: params.screen?.tripped },
+      capability: {
+        labels: resolution.labels,
+        decidedBy: resolution.decidedBy.id,
+        screenTripped: params.screen?.tripped,
+        resolvedDisposition: resolution.disposition,
+        namerLabels: params.named?.labels,
+      },
     });
     // askPathApproval owns the counters, telemetry, and recent event for this
     // dialog; only the per-class stats are still ours to record.

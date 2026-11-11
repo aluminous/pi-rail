@@ -110,6 +110,8 @@ export interface RailConfig {
   /** Custom capability classes and built-in definition overrides — the editable half of the taxonomy. */
   capabilities?: CapabilitiesConfig;
   classifier?: ClassifierConfig;
+  /** The local replay corpus (src/replay-corpus.ts): full decision inputs, redacted, outside the session file. */
+  corpus?: { enabled?: boolean };
   seatbelt?: Record<string, unknown>;
   container?: Record<string, unknown>;
 }
@@ -174,6 +176,7 @@ export interface ResolvedRailConfig {
     definitions: Record<string, string>;
   };
   classifier: ResolvedClassifierConfig;
+  corpus: { enabled: boolean };
   seatbelt: Record<string, unknown>;
   container: Record<string, unknown>;
   diagnostics: string[];
@@ -353,6 +356,9 @@ const DEFAULTS_SANS_PROVENANCE: Omit<ResolvedRailConfig, "provenance"> = {
     failClosed: true,
     telemetry: "minimal",
   },
+  // On by default: replay of a policy change is only as good as the history
+  // behind it, and the store is local, private (0600), and redacted.
+  corpus: { enabled: true },
   seatbelt: {},
   container: {},
   diagnostics: [],
@@ -575,6 +581,7 @@ export function mergeConfig(base: ResolvedRailConfig, override: Partial<RailConf
     dispositions: { ...base.dispositions },
     capabilities: { classes: [...base.capabilities.classes], definitions: { ...base.capabilities.definitions } },
     classifier: { ...base.classifier },
+    corpus: { ...base.corpus },
     seatbelt: { ...base.seatbelt },
     container: { ...base.container },
     diagnostics,
@@ -729,6 +736,13 @@ export function mergeConfig(base: ResolvedRailConfig, override: Partial<RailConf
         `Ignoring ${source}.classifier.rules: the prose rule tiers are gone. Capability mode names actions from the class taxonomy and decides via the disposition table — use "dispositions" and "capabilities.definitions" instead.`,
       );
     }
+  }
+
+  if (isObject(override.corpus)) {
+    if (typeof override.corpus.enabled === "boolean") next.corpus.enabled = override.corpus.enabled;
+    else if (override.corpus.enabled !== undefined) diagnostics.push(`Ignoring ${source}.corpus.enabled: expected true or false`);
+  } else if (override.corpus !== undefined) {
+    diagnostics.push(`Ignoring ${source}.corpus: expected an object`);
   }
 
   if (isObject(override.seatbelt)) next.seatbelt = { ...next.seatbelt, ...override.seatbelt };

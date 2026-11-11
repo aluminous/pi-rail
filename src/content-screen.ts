@@ -86,17 +86,31 @@ const AGENT_DIRECTIVE_PATTERNS: NamedPattern[] = [
   { pattern: /\bthis (action|command|change|operation) is (pre-?approved|approved|authorized|authorised|safe)\b/i, detail: "asserts this action is approved" },
 ];
 
-const CREDENTIAL_CONTENT_PATTERNS: NamedPattern[] = [
-  { pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/, detail: "private key header" },
-  { pattern: /\bssh-(rsa|ed25519|dss|ecdsa)\s+AAAA/, detail: "SSH public key material" },
-  { pattern: /\bsk-[A-Za-z0-9_\-]{20,}/, detail: "OpenAI-style secret key" },
-  { pattern: /\bghp_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/, detail: "GitHub token" },
-  { pattern: /\bglpat-[A-Za-z0-9_\-]{16,}/, detail: "GitLab token" },
-  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}/, detail: "Slack token" },
-  { pattern: /\bAKIA[0-9A-Z]{16}\b/, detail: "AWS access key id" },
-  { pattern: /\bAIza[0-9A-Za-z_\-]{35}\b/, detail: "Google API key" },
-  { pattern: /\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\./, detail: "JWT" },
+/**
+ * Credential shapes in content. Each carries the typed `redaction` kind the
+ * replay corpus (src/replay-corpus.ts) stamps into its placeholder, so the
+ * screen and the corpus redactor share one list: a shape the screen learns to
+ * see is a shape the corpus learns to hide.
+ */
+export const CREDENTIAL_CONTENT_PATTERNS: ReadonlyArray<NamedPattern & { redaction: string }> = [
+  { pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/, detail: "private key header", redaction: "private-key" },
+  { pattern: /\bssh-(rsa|ed25519|dss|ecdsa)\s+AAAA/, detail: "SSH public key material", redaction: "ssh-key" },
+  { pattern: /\bsk-[A-Za-z0-9_\-]{20,}/, detail: "OpenAI-style secret key", redaction: "sk-key" },
+  { pattern: /\bghp_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/, detail: "GitHub token", redaction: "github-token" },
+  { pattern: /\bglpat-[A-Za-z0-9_\-]{16,}/, detail: "GitLab token", redaction: "gitlab-token" },
+  { pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}/, detail: "Slack token", redaction: "slack-token" },
+  { pattern: /\bAKIA[0-9A-Z]{16}\b/, detail: "AWS access key id", redaction: "aws-key" },
+  { pattern: /\bAIza[0-9A-Za-z_\-]{35}\b/, detail: "Google API key", redaction: "google-api-key" },
+  { pattern: /\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\./, detail: "JWT", redaction: "jwt" },
 ];
+
+/**
+ * A credential-named key (`API_KEY`, `client-secret`, `password`, …), without
+ * its separator. The screen uses it with `[:=]` to spot a credential being
+ * assigned; the replay corpus (src/replay-corpus.ts) uses it to find the value
+ * to redact, so both agree on what a credential name is.
+ */
+export const CREDENTIAL_KEY_PATTERN = /\b[A-Za-z0-9_\-]*(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|ci[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd)\b/i;
 
 /** Credential surfaces named in the text: exfil-shaped commands read them, poisoned notes legitimize them. */
 const CREDENTIAL_REFERENCE_PATTERNS: NamedPattern[] = [
@@ -107,7 +121,7 @@ const CREDENTIAL_REFERENCE_PATTERNS: NamedPattern[] = [
   { pattern: /\.config\/(gcloud|gh)\b|\bLibrary\/Keychains\b|\bkeychain\b/i, detail: "references a credential store path" },
   { pattern: /\bid_(rsa|dsa|ecdsa|ed25519)\b/, detail: "references an SSH private key" },
   {
-    pattern: /\b[A-Za-z0-9_\-]*(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|ci[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|password|passwd)\b\s*[:=]/i,
+    pattern: new RegExp(`${CREDENTIAL_KEY_PATTERN.source}\\s*[:=]`, "i"),
     detail: "assigns a credential-named value",
   },
 ];
@@ -193,23 +207,34 @@ function shannonEntropy(value: string): number {
   return entropy;
 }
 
+/** A large base64 blob: key material, archives, or encoded payloads. Exported (global) for the corpus redactor. */
+export const BASE64_BLOB_PATTERN = /[A-Za-z0-9+/]{200,}={0,2}/g;
+/** Candidate runs for the entropy test. Exported (global) for the corpus redactor. */
+export const HIGH_ENTROPY_RUN_PATTERN = /[A-Za-z0-9+/=_\-]{40,}/g;
+const HIGH_ENTROPY_MIN_BITS = 4.3;
+
 /**
- * Long high-entropy runs and large base64 blobs. The 4.3 bits/char bar clears
- * 40-char hex (git SHAs top out near 3.9) while catching base64 secrets.
+ * The entropy bar on one candidate run. The 4.3 bits/char bar clears 40-char
+ * hex (git SHAs top out near 3.9) while catching base64 secrets.
  */
+export function isHighEntropyToken(token: string): boolean {
+  return token.length >= 40 && shannonEntropy(token) >= HIGH_ENTROPY_MIN_BITS;
+}
+
+/** Long high-entropy runs and large base64 blobs. */
 function highEntropyHit(text: string): ScreenHit | undefined {
-  const base64Blob = text.match(/[A-Za-z0-9+/]{200,}={0,2}/);
+  const base64Blob = text.match(new RegExp(BASE64_BLOB_PATTERN.source));
   if (base64Blob) return { kind: "credential-shape", detail: `large base64 blob (${base64Blob[0].length} chars)` };
-  for (const match of text.matchAll(/[A-Za-z0-9+/=_\-]{40,}/g)) {
+  for (const match of text.matchAll(HIGH_ENTROPY_RUN_PATTERN)) {
     const token = match[0];
-    if (shannonEntropy(token) >= 4.3) {
+    if (isHighEntropyToken(token)) {
       return { kind: "credential-shape", detail: `high-entropy token (${token.length} chars, ${shannonEntropy(token).toFixed(1)} bits/char)` };
     }
   }
   return undefined;
 }
 
-function matchAll(patterns: NamedPattern[], text: string, kind: ScreenHitKind, hits: ScreenHit[]): void {
+function matchAll(patterns: ReadonlyArray<NamedPattern>, text: string, kind: ScreenHitKind, hits: ScreenHit[]): void {
   for (const entry of patterns) {
     if (entry.pattern.test(text)) hits.push({ kind, detail: entry.detail });
   }

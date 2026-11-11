@@ -11,6 +11,7 @@ import { createRailSmoke } from "./src/commands/smoke.ts";
 import { loadConfig, type ResolvedRailConfig } from "./src/config.ts";
 import { interceptToolCall } from "./src/interceptor.ts";
 import { compileFilesystemPolicy, summarizeDegradedPatterns } from "./src/policy.ts";
+import { createCorpusWriter, defaultCorpusDir } from "./src/replay-corpus.ts";
 import { applyDerivedRailState } from "./src/session-replay.ts";
 import { createRuntimeState, resetSessionState, resetTurnStats } from "./src/state.ts";
 import { registerRailMessageRenderer, updateRailStatus } from "./src/status.ts";
@@ -40,6 +41,11 @@ export default function (pi: ExtensionAPI) {
   // Decision telemetry lands in pi's own session log as custom entries
   // (user-approved feature: rail decision records via pi.appendEntry).
   state.appendEntry = (customType, data) => pi.appendEntry(customType, data);
+  // The replay corpus: full decision inputs, redacted, in a private local
+  // store outside the session file (src/replay-corpus.ts). One writer per
+  // process, so its once-per-process prune runs once; headless subagent
+  // children wire their own and append to the same month files.
+  state.corpus = createCorpusWriter({ dir: defaultCorpusDir() });
   // Pane managers (herdr) learn via the shared bus when an approval dialog is
   // blocking on the user; harmless when nothing listens.
   wireBlockedSignal(state, pi.events);
