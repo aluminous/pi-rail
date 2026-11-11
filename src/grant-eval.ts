@@ -691,16 +691,21 @@ function sensitiveItemsFor(op: PolicyOp, index: number, before: ResolvedRailConf
   }
   if ((op.op === "add-to-list" || op.op === "remove-from-list") && opDirectionValue === "widening") {
     if (op.list.startsWith("filesystem.") && !items.some((entry) => entry.kind === "removes-deny-entry")) {
-      item("filesystem-widening", `widens filesystem access: ${describeOp(op).toLowerCase()}`);
+      item("filesystem-widening", `widens filesystem access: ${lowerFirst(describeOp(op))}`);
     } else if (op.list.startsWith("network.") && !items.some((entry) => entry.kind === "removes-deny-entry")) {
-      item("network-widening", `widens network access: ${describeOp(op).toLowerCase()}`);
+      item("network-widening", `widens network access: ${lowerFirst(describeOp(op))}`);
     } else if (op.list.startsWith("environment.")) {
       // Not on the plan's list, but the same kind of change: an environment
       // widening hands variables (tokens among them) to every sandboxed command.
-      item("environment-widening", `passes more of the environment to commands: ${describeOp(op).toLowerCase()}`);
+      item("environment-widening", `passes more of the environment to commands: ${lowerFirst(describeOp(op))}`);
     }
   }
   return items;
+}
+
+/** "Add x to y" → "add x to y": only the verb, so paths and domain names keep their case. */
+function lowerFirst(text: string): string {
+  return text.charAt(0).toLowerCase() + text.slice(1);
 }
 
 function listOf(config: ResolvedRailConfig, list: StringListKey): string[] | undefined {

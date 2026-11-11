@@ -256,7 +256,7 @@ describe("foldPolicy", () => {
 });
 
 describe("the session layer", () => {
-  it("refuses filesystem, network, and environment list ops, and accepts commands lists", () => {
+  it("applies filesystem, network, and environment list ops like commands lists (the sandbox follows: src/session-policy.ts)", () => {
     const ops: PolicyOp[] = [
       { op: "add-to-list", list: "filesystem.allowWrite", values: ["/anywhere"] },
       { op: "remove-from-list", list: "filesystem.denyRead", values: ["~/.ssh"] },
@@ -266,15 +266,15 @@ describe("the session layer", () => {
       { op: "allow-command", template: "make lint" },
     ];
     const effective = withSessionLayer(testConfig(), sessionWith(parsedGrant("sandboxy", ops)));
-    assert.ok(!effective.filesystem.allowWrite.includes("/anywhere"));
-    assert.ok(effective.filesystem.denyRead.includes("~/.ssh"));
-    assert.ok(!effective.network.allowedDomains.includes("evil.example"));
-    assert.ok(!effective.environment.allow.includes("AWS_SECRET_ACCESS_KEY"));
+    assert.ok(effective.filesystem.allowWrite.includes("/anywhere"));
+    assert.ok(!effective.filesystem.denyRead.includes("~/.ssh"));
+    assert.ok(effective.network.allowedDomains.includes("evil.example"));
+    assert.ok(effective.environment.allow.includes("AWS_SECRET_ACCESS_KEY"));
     assert.ok(effective.commands.allow.includes("just *"));
     assert.ok(effective.commands.allow.includes("make lint"));
-    const refused = effective.diagnostics.filter((line) => /applies only from a config file/.test(line));
-    assert.equal(refused.length, 4);
-    assert.match(refused[0]!, /session grant sandboxy ops\[0\] \(add-to-list\): filesystem\.allowWrite applies only from a config file/);
+    assert.deepEqual(effective.provenance.lists["filesystem.allowWrite"]["/anywhere"], { layer: "session", grantId: "sandboxy" });
+    assert.equal(effective.provenance.lists["filesystem.denyRead"]["~/.ssh"], undefined);
+    assert.deepEqual(effective.diagnostics, testConfig().diagnostics);
   });
 
   it("claims a default commands entry when a session grant restates it, but not a config layer's", () => {
@@ -474,5 +474,14 @@ describe("opDirection", () => {
   it("treats emptying allowRead as widening (back to blacklist mode)", () => {
     const whitelist = foldPolicy(DEFAULT_CONFIG, [layer("global", G, { filesystem: { allowRead: ["~/src"] } })]);
     assert.equal(opDirection({ op: "remove-from-list", list: "filesystem.allowRead", values: ["~/src"] }, whitelist), "widening");
+  });
+
+  it("treats emptying environment.allow as widening (every variable passes) and its first entry as tightening", () => {
+    const allow = DEFAULT_CONFIG.environment.allow;
+    assert.equal(opDirection({ op: "remove-from-list", list: "environment.allow", values: [...allow] }, DEFAULT_CONFIG), "widening");
+    assert.equal(opDirection({ op: "remove-from-list", list: "environment.allow", values: ["TERM"] }, DEFAULT_CONFIG), "tightening");
+    const open = foldPolicy(DEFAULT_CONFIG, [layer("global", G, { environment: { allow: { remove: [...allow] } } })]);
+    assert.deepEqual(open.environment.allow, []);
+    assert.equal(opDirection({ op: "add-to-list", list: "environment.allow", values: ["PATH"] }, open), "tightening");
   });
 });

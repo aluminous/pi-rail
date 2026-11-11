@@ -489,6 +489,60 @@ describe("evaluateGrant gates", () => {
   });
 });
 
+// ── Session-layer sandbox lists (GRANTS_PLAN phase 4) ────────────────────────
+
+describe("session grants on filesystem, network, and environment lists", () => {
+  const docs = path.join(fixture.dir, "docs");
+  const elsewhere = path.join(fixture.dir, "elsewhere");
+  mkdirSync(docs, { recursive: true });
+  mkdirSync(elsewhere, { recursive: true });
+  writeFileSync(path.join(docs, "guide.md"), "hi");
+  writeFileSync(path.join(elsewhere, "notes.md"), "hi");
+  // Whitelist reads, so a read outside the roots is a path approval.
+  const whitelist = () => testConfig((c) => {
+    c.classifier.enabled = true;
+    c.filesystem.allowRead = ["."];
+  });
+
+  it("passes the gates at the session layer, with the dry run reading the candidate's lists, and stays sensitive", async () => {
+    const readDocs = grant("read-docs", [{ op: "add-to-list", list: "filesystem.allowRead", values: [docs] }], [
+      { tool: "read", input: { path: path.join(docs, "guide.md") }, expect: ["allow"] },
+      { tool: "read", input: { path: path.join(elsewhere, "notes.md") }, expect: ["ask"] },
+    ]);
+    const before = dryRunAction(whitelist(), { tool: "read", input: { path: path.join(docs, "guide.md") } }, { cwd });
+    assert.equal(before.outcome, "ask");
+    assert.equal(before.decidedBy, "path-approval");
+
+    const report = await evaluateGrant(readDocs, evalContext({ base: whitelist(), session: createSessionLayer() }));
+    assert.equal(report.ok, true, report.failures.join("\n"));
+    assert.deepEqual(report.gates.structural.failures, [], "the session layer no longer refuses the op");
+    assert.deepEqual(report.gates.examples.results.map((result) => `${result.outcome}:${result.verdict}`), ["allow:pass", "ask:pass"]);
+    assert.equal(report.widening, true);
+    assert.deepEqual(report.sensitive.map((item) => item.kind), ["filesystem-widening"]);
+    assert.ok(report.sensitive[0]!.reason.includes(docs), `the path keeps its case: ${report.sensitive[0]!.reason}`);
+  });
+
+  it("gates a tightening deny-list grant at the session layer, with a block that satisfies deny", async () => {
+    const guard = grant("guard-generated", [{ op: "add-to-list", list: "filesystem.denyWrite", values: ["generated"] }], [
+      { tool: "write", input: { path: "generated/out.ts", content: "x" }, expect: ["deny"] },
+    ]);
+    const report = await evaluateGrant(guard, evalContext({ session: createSessionLayer() }));
+    assert.equal(report.ok, true, report.failures.join("\n"));
+    assert.equal(report.widening, false);
+    assert.deepEqual(report.sensitive, []);
+    assert.equal(report.gates.examples.results[0]!.outcome, "block");
+  });
+
+  it("keeps network and environment widenings sensitive at the session layer", async () => {
+    const report = await evaluateGrant(grant("net-env", [
+      { op: "add-to-list", list: "network.allowedDomains", values: ["paste.example"] },
+      { op: "remove-from-list", list: "environment.allow", values: [...testConfig().environment.allow] },
+    ], [{ tool: "bash", input: { command: "rm -rf /" }, expect: ["deny", "ask", "judge"] }]), evalContext({ session: createSessionLayer() }));
+    assert.deepEqual(report.gates.structural.failures, []);
+    assert.deepEqual(report.sensitive.map((item) => `${item.opIndex}:${item.kind}`), ["0:network-widening", "1:environment-widening"]);
+  });
+});
+
 // ── Sensitive ops ────────────────────────────────────────────────────────────
 
 describe("sensitive ops", () => {

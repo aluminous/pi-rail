@@ -92,16 +92,6 @@ function isStringListKey(value: unknown): value is StringListKey {
   return typeof value === "string" && (STRING_LIST_KEYS as string[]).includes(value);
 }
 
-/**
- * Lists the session layer refuses. The Seatbelt profile is compiled from these
- * once, when the rail enables; a session op that moved the JS path policy
- * without moving the sandbox would make the two disagree, which is worse than
- * saying no (GRANTS_PLAN phase 4 re-points the sandbox and lifts this).
- */
-function isSandboxList(list: StringListKey): boolean {
-  return list.startsWith("filesystem.") || list.startsWith("network.") || list.startsWith("environment.");
-}
-
 // ── Ops and grants ───────────────────────────────────────────────────────────
 
 /**
@@ -897,9 +887,10 @@ function applyOp(config: ResolvedRailConfig, op: PolicyOp, provenance: Provenanc
     }
     case "add-to-list":
     case "remove-from-list": {
-      if (provenance.layer === "session" && isSandboxList(op.list)) {
-        return skip(`${op.list} applies only from a config file for now — the sandbox profile is compiled when the rail starts, and a session change would leave it disagreeing with the file tools`);
-      }
+      // Every list, sandbox-backed ones included, applies at every layer. The
+      // session layer moves filesystem/network/environment lists mid-session;
+      // the sandbox follows in the same step (src/session-policy.ts,
+      // commitPolicyChange), or the change is undone.
       if (op.op === "add-to-list") applyListAdd(config, op.list, op.values, provenance);
       else {
         const drop = new Set(op.values);
@@ -1525,8 +1516,9 @@ export function opDirection(op: PolicyOp, before: ResolvedRailConfig, provenance
       }
       if (DENY_LISTS.includes(op.list)) return "tightening";
       // An empty allowRead is blacklist mode (read anything not denied); its
-      // first entry switches to whitelist mode, which only narrows.
-      if (op.list === "filesystem.allowRead" && current.length === 0) return "tightening";
+      // first entry switches to whitelist mode, which only narrows. An empty
+      // environment.allow likewise passes every variable not unset.
+      if ((op.list === "filesystem.allowRead" || op.list === "environment.allow") && current.length === 0) return "tightening";
       return "widening";
     }
     case "remove-from-list": {
@@ -1534,8 +1526,9 @@ export function opDirection(op: PolicyOp, before: ResolvedRailConfig, provenance
       const removed = op.values.filter((value) => current.includes(value));
       if (removed.length === 0) return "neutral";
       if (DENY_LISTS.includes(op.list)) return "widening";
-      // Emptying allowRead flips back to blacklist mode: the widest read policy.
-      if (op.list === "filesystem.allowRead" && current.every((value) => removed.includes(value))) return "widening";
+      // Emptying allowRead flips back to blacklist mode: the widest read
+      // policy. Emptying environment.allow passes the whole environment.
+      if ((op.list === "filesystem.allowRead" || op.list === "environment.allow") && current.every((value) => removed.includes(value))) return "widening";
       return "tightening";
     }
   }

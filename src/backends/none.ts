@@ -17,6 +17,10 @@ export class NoneBackend implements RailBackend {
     return { command: "bash", args: ["-c", command], cwd, env };
   }
 
+  applyPolicy(_config: ResolvedRailConfig): void {
+    // Nothing is sandboxed, so there is nothing to re-point.
+  }
+
   describeEffectivePolicy(): undefined {
     return undefined;
   }

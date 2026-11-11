@@ -291,9 +291,10 @@ Write a grant as a JSON file — one grant object — and hand it to the rail:
   promote a session grant to the global / project config, `d` demotes a file
   grant to the session, `r` (twice) revokes. Each takes effect on the next tool
   call: a change to a file grant refolds the live policy from the files at
-  once. Filesystem, network, and environment list changes in a file grant are
-  the exception — the sandbox profile is compiled when the rail starts, so
-  those apply at restart, and the view says so.
+  once, filesystem, network, and environment lists included — the Seatbelt
+  profile is re-pointed in the same step (see [Session scope](#session-scope)).
+  Only `filesystem.enabled`, `network.enabled`, and the `seatbelt` overrides
+  wait for a restart, and the view says so.
 
 [`examples/grants/worktree-cleanup.json`](examples/grants/worktree-cleanup.json)
 is a complete grant that passes its own gates. The file shape:
@@ -414,11 +415,22 @@ restored from the latest record, whichever branch it was written on. A new
 session starts with an empty session layer, and an in-memory session writes
 nothing.
 
-Filesystem, network, and environment lists cannot change at the session layer
-yet: the Seatbelt profile is compiled from them when the rail starts, and a
-session change would leave the sandbox and the file tools disagreeing. Those
-ops are refused with a diagnostic; put them in a config file. `commands.*`
-lists work at session scope.
+Filesystem, network, and environment lists change at the session layer like
+any other list. The Seatbelt profile follows in the same step as the file
+tools' path policy: every change that moves one of those lists — a session
+grant applied or revoked, a file grant promoted, demoted, revoked, or saved —
+re-points the sandbox (sandbox-runtime's `updateConfig`) before the next
+command is wrapped. If the sandbox refuses the update, the change is undone in
+both engines and the error is shown; nothing is ever enforced more widely by
+the file tools than by the sandbox, or the other way round. A command that is
+already running keeps the filesystem profile and environment it started with;
+its network does not — the proxy checks the domain lists per connection, so a
+running command's next connection already follows the new lists. Widening any
+of these lists is a sensitive op, so at the session layer it is only reachable
+through the grant confirmation's per-op approval (or a config file you edit
+yourself). What still applies only at restart: `filesystem.enabled`,
+`network.enabled` (whether the proxy runs at all is fixed when the sandbox
+starts), and the `seatbelt` overrides.
 
 ## Capability mode
 
@@ -859,7 +871,7 @@ Reads are blacklist-based by default: tools and sandboxed commands can read ordi
 
 Writes are whitelist-based by default: tools and sandboxed commands can write to the project directory, including local `.git` metadata for normal source-control operations, temp directories, and common development caches such as npm/pnpm/yarn, Cargo registry/git caches, Gradle caches/wrapper, Maven local repository, Go module/build caches, pip caches, NuGet packages, Ivy/Coursier, Bazel, uv, Ruff, and pre-commit caches. Sensitive paths in `denyWrite` remain hard-blocked even if they overlap an allowed write root.
 
-Linked git worktrees of the session repo are trusted like the project directory: a path inside a worktree registered by the session repo is treated as in-project by the read exemption and the deterministic path policy, with relative allow/deny patterns (a `denyWrite` of `.env` or `src/**`, the `.` write root) re-anchored at the worktree root so the worktree gets exactly the decisions the project itself would get. Membership is verified bidirectionally without running git: the worktree's `.git` file must point into the session repo's `.git/worktrees/<name>`, and that registry entry's `gitdir` must point back at the same `.git` file — so a forged `.git` file cannot claim membership; only a `git worktree add` performed through the rail creates the reverse link. Limitation: this trust currently applies to the classifier and file-tool path policy only. With the Seatbelt backend enabled, the sandbox profile compiles literal write roots when the rail enables, so sandboxed bash still cannot write into a worktree outside those roots (worktrees under `/tmp` or the project directory are covered by the default roots).
+Linked git worktrees of the session repo are trusted like the project directory: a path inside a worktree registered by the session repo is treated as in-project by the read exemption and the deterministic path policy, with relative allow/deny patterns (a `denyWrite` of `.env` or `src/**`, the `.` write root) re-anchored at the worktree root so the worktree gets exactly the decisions the project itself would get. Membership is verified bidirectionally without running git: the worktree's `.git` file must point into the session repo's `.git/worktrees/<name>`, and that registry entry's `gitdir` must point back at the same `.git` file — so a forged `.git` file cannot claim membership; only a `git worktree add` performed through the rail creates the reverse link. Limitation: this trust currently applies to the classifier and file-tool path policy only. With the Seatbelt backend enabled, the sandbox profile holds literal write roots compiled from the configured lists, and a worktree appearing does not add one, so sandboxed bash still cannot write into a worktree outside those roots (worktrees under `/tmp` or the project directory are covered by the default roots). A session grant adding the worktree's path to `filesystem.allowWrite` fixes that live: the profile is re-pointed as the grant applies (see [Session scope](#session-scope)), no restart needed.
 
 The macOS keychain is the one place the two engines deliberately disagree.
 `~/Library/Keychains` stays in `denyRead`, so Pi's `read` tool still treats the
@@ -1135,6 +1147,7 @@ Pi Rail is a defense-in-depth containment layer, not a complete adversarial secu
 - The namer only names; the disposition table decides. A prompt-injected namer can at worst mislabel a capability, and the table still refuses a class you set to deny. Neither reviewer can override deterministic deny rules or Seatbelt.
 - The judge holds decision authority only for classes you explicitly delegated to it, only for one action at a time, and never above a deny that severity-max already produced.
 - Disabling filesystem or network restrictions deliberately removes those hard boundaries; reviewer decisions can be wrong or unavailable.
+- Session-layer changes to filesystem, network, and environment lists re-point the Seatbelt profile for the *next* command. A command already running keeps the filesystem profile and environment it was spawned with (a revoked write root stays writable to it until it exits); only its network follows the new domain lists, connection by connection. `filesystem.enabled`, `network.enabled`, and the `seatbelt` overrides change only at restart.
 - Read-only mode does not tighten plain `commands.allow` entries: they are tagged `read-project`, which the read-only preset leaves alone, so classify a writing command into a writing class instead of allowlisting it.
 
 ## Future container backend

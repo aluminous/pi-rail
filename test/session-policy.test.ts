@@ -2,20 +2,24 @@
 // named session grants, the snapshot that survives resume without rewinding
 // with /tree, and moving grants between the session and a config file.
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SandboxStaleError, type RailBackend } from "../src/backends/types.ts";
 import { explainCommandMatch, matchedCapabilities } from "../src/command-allowlist.ts";
-import { mergeConfig, type RailConfig } from "../src/config.ts";
+import { mergeConfig, type RailConfig, type ResolvedRailConfig } from "../src/config.ts";
 import { addClass, describeDispositionSource, dispositionRow, hasUnsavedChanges, saveDispositions, setRowDisposition } from "../src/dispositions.ts";
+import { decidePathAccess } from "../src/policy.ts";
 import type { Grant } from "../src/policy-store.ts";
 import {
   RAIL_SESSION_POLICY_TYPE,
   addSessionGrant,
   demoteGrantToSession,
   listSessionGrants,
+  markPolicyApplied,
   promoteSessionGrant,
+  reloadBaseConfig,
   removeSessionGrant,
   restoreSessionPolicy,
   sessionDispositionEdit,
@@ -83,11 +87,14 @@ describe("state.config sees the session layer", () => {
       id: "wide-open",
       request: "let me write anywhere",
       created: "2026-11-11",
-      ops: [{ op: "add-to-list", list: "filesystem.allowWrite", values: ["/"] }],
+      ops: [
+        { op: "add-to-list", list: "filesystem.allowWrite", values: ["/"] },
+        { op: "set-disposition", capability: "ghost", disposition: "allow" },
+      ],
     });
     assert.equal(diagnostics.length, 1);
-    assert.match(diagnostics[0]!, /filesystem\.allowWrite applies only from a config file/);
-    assert.ok(!state.config!.filesystem.allowWrite.includes("/"));
+    assert.match(diagnostics[0]!, /unknown capability class "ghost"/);
+    assert.ok(state.config!.filesystem.allowWrite.includes("/"), "a sandbox list applies at the session layer");
     assert.deepEqual(listSessionGrants(state).map((grant) => grant.id), ["wide-open"]);
     assert.equal(removeSessionGrant(state, "wide-open"), true);
     assert.equal(removeSessionGrant(state, "wide-open"), false);
@@ -177,7 +184,7 @@ describe("session policy persistence", () => {
     const manager = SessionManager.inMemory();
     manager.appendCustomEntry(RAIL_SESSION_POLICY_TYPE, {
       version: 1,
-      grants: [{ id: "wide", request: "r", created: "c", ops: [{ op: "add-to-list", list: "network.allowedDomains", values: ["x.example"] }] }],
+      grants: [{ id: "wide", request: "r", created: "c", ops: [{ op: "add-to-list", list: "network.allowedDomains", values: ["x.example"] }, { op: "set-disposition", capability: "ghost", disposition: "allow" }] }],
       edits: [],
     });
     const state = createRuntimeState();
@@ -185,7 +192,8 @@ describe("session policy persistence", () => {
     state.config = testConfig();
     const diagnostics = sessionPolicyDiagnostics(state);
     assert.equal(diagnostics.length, 1);
-    assert.match(diagnostics[0]!, /session grant wide .*network\.allowedDomains applies only from a config file/);
+    assert.match(diagnostics[0]!, /session grant wide .*unknown capability class "ghost"/);
+    assert.ok(state.config!.network.allowedDomains.includes("x.example"), "the restored network op applies");
 
     const clean = createRuntimeState();
     clean.config = testConfig();
@@ -251,6 +259,176 @@ describe("moving named grants to and from config files", () => {
       assert.match(demoteGrantToSession(state, { layer: "global", file }, "worktree-cleanup")!, /already has a grant/);
     } finally {
       fixture.cleanup();
+    }
+  });
+});
+
+// ── Re-pointing the sandbox (GRANTS_PLAN phase 4) ────────────────────────────
+
+describe("sandbox-backed lists move both engines in one step", () => {
+  interface Applied {
+    allowWrite: string[];
+    allowedDomains: string[];
+    unset: string[];
+    /** Whether the file tools saw this very config while the backend applied it. */
+    sameAsFileTools: boolean;
+  }
+
+  /** A state with an initialized fake backend that records every applyPolicy (and throws `fail` when given). */
+  function sandboxed(options: { fail?: () => Error; persistent?: SessionManager } = {}) {
+    const fixture = makeFixtureDir();
+    const cwd = path.join(fixture.dir, "project");
+    const outside = path.join(fixture.dir, "outside");
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const state = options.persistent ? wiredState(options.persistent) : createRuntimeState();
+    state.config = testConfig((c) => (c.filesystem.allowWrite = ["."]));
+    const applied: Applied[] = [];
+    const backend = {
+      name: "fake",
+      applyPolicy(config: ResolvedRailConfig) {
+        if (options.fail) throw options.fail();
+        applied.push({
+          allowWrite: [...config.filesystem.allowWrite],
+          allowedDomains: [...config.network.allowedDomains],
+          unset: [...config.environment.unset],
+          sameAsFileTools: state.config === config,
+        });
+      },
+    } as unknown as RailBackend;
+    state.backend = backend;
+    state.initialized = true;
+    markPolicyApplied(backend, state.config!);
+    const writable = () => decidePathAccess(state.config!, cwd, path.join(outside, "file.txt"), "write").allowed;
+    return { state, applied, cwd, outside, writable, cleanup: fixture.cleanup };
+  }
+
+  const writeOutside = (outside: string): Grant => ({
+    id: "write-outside",
+    request: "let me write to the outside dir",
+    created: "2026-11-12",
+    ops: [{ op: "add-to-list", list: "filesystem.allowWrite", values: [outside] }],
+  });
+
+  it("re-points the sandbox at the config the file tools read, on add and on removal", () => {
+    const { state, applied, outside, writable, cleanup } = sandboxed();
+    try {
+      assert.equal(writable(), false);
+      assert.deepEqual(addSessionGrant(state, writeOutside(outside)), []);
+      assert.equal(applied.length, 1);
+      assert.ok(applied[0]!.allowWrite.includes(outside));
+      assert.equal(applied[0]!.sameAsFileTools, true, "the backend applied exactly what the file tools now read");
+      assert.equal(writable(), true);
+
+      assert.equal(removeSessionGrant(state, "write-outside"), true);
+      assert.equal(applied.length, 2);
+      assert.ok(!applied[1]!.allowWrite.includes(outside));
+      assert.equal(writable(), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("leaves the sandbox alone for changes that move no sandbox list", () => {
+    const { state, applied, cleanup } = sandboxed();
+    try {
+      setSessionDisposition(state, "network-fetch", "deny");
+      addSessionGrant(state, worktreeGrant);
+      removeSessionGrant(state, worktreeGrant.id);
+      assert.deepEqual(applied, []);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("fails closed: a refused update leaves both engines and the session file on the previous policy", () => {
+    const manager = SessionManager.inMemory();
+    const { state, outside, writable, cleanup } = sandboxed({ fail: () => new Error("profile rejected"), persistent: manager });
+    try {
+      assert.throws(() => addSessionGrant(state, writeOutside(outside)), /could not be re-pointed, so the change was undone: profile rejected/);
+      assert.deepEqual(listSessionGrants(state), [], "the grant is not in the layer");
+      assert.ok(!state.config!.filesystem.allowWrite.includes(outside));
+      assert.equal(writable(), false, "the file tools did not widen");
+      assert.equal(snapshots(manager).length, 0, "nothing was persisted");
+      assert.equal(state.initialized, true, "the sandbox kept its previous profile, so bash keeps running");
+      // A change the sandbox does not have to follow still goes through.
+      setSessionDisposition(state, "network-fetch", "deny");
+      assert.equal(snapshots(manager).length, 1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("blocks bash when the backend could not restore its previous profile either", () => {
+    const { state, outside, writable, cleanup } = sandboxed({ fail: () => new SandboxStaleError("both updates failed") });
+    try {
+      assert.throws(() => addSessionGrant(state, writeOutside(outside)), /bash is blocked until the rail restarts/);
+      assert.equal(state.initialized, false);
+      assert.match(state.lastError!, /both updates failed/);
+      assert.equal(writable(), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("only moves the file tools while no backend is initialized (initialize compiles the effective config)", () => {
+    const { state, applied, outside, writable, cleanup } = sandboxed();
+    try {
+      state.initialized = false;
+      addSessionGrant(state, writeOutside(outside));
+      assert.deepEqual(applied, []);
+      assert.equal(writable(), true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("promotes without a reload and never re-points the sandbox at a policy without the grant", () => {
+    const { state, applied, outside, writable, cleanup } = sandboxed();
+    try {
+      addSessionGrant(state, writeOutside(outside));
+      assert.equal(promoteSessionGrant(state, "write-outside", { layer: "global", file: "/nonexistent/rail.json" }, () => {}), undefined);
+      assert.deepEqual(listSessionGrants(state), []);
+      assert.ok(applied.every((entry) => entry.allowWrite.includes(outside)), JSON.stringify(applied));
+      assert.equal(writable(), true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("re-points the sandbox when a reload brings new lists, holding the restart-only switches", () => {
+    const { state, applied, outside, writable, cleanup } = sandboxed();
+    try {
+      const file = "/virtual/rail.json";
+      const raw = { filesystem: { allowWrite: [outside] }, network: { enabled: false, allowedDomains: ["files.example"] }, environment: { unset: ["SECRET_THING"] } };
+      const notes = reloadBaseConfig(state, () => mergeConfig(testConfig((c) => (c.filesystem.allowWrite = ["."])), raw as RailConfig, file));
+      assert.equal(applied.length, 1);
+      assert.ok(applied[0]!.allowWrite.includes(outside));
+      assert.ok(applied[0]!.allowedDomains.includes("files.example"));
+      assert.ok(applied[0]!.unset.includes("SECRET_THING"));
+      assert.equal(applied[0]!.sameAsFileTools, true);
+      assert.equal(writable(), true);
+      assert.equal(state.config!.network.enabled, true, "network.enabled waits for a restart");
+      assert.equal(notes.length, 1);
+      assert.match(notes[0]!, /^network\.enabled changed on disk and apply when the rail next starts/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("holds the previous lists in both engines when the sandbox refuses a reload, and applies the rest", () => {
+    const { state, outside, writable, cleanup } = sandboxed({ fail: () => new Error("profile rejected") });
+    try {
+      const raw = { filesystem: { allowWrite: [outside] }, commands: { allow: ["just *"] } };
+      const notes = reloadBaseConfig(state, () => mergeConfig(testConfig((c) => (c.filesystem.allowWrite = ["."])), raw as RailConfig, "/virtual/rail.json"));
+      assert.equal(notes.length, 1);
+      assert.match(notes[0]!, /could not be re-pointed.*profile rejected.*apply when the rail next starts/);
+      assert.equal(writable(), false);
+      assert.ok(!state.config!.filesystem.allowWrite.includes(outside));
+      assert.ok(state.config!.commands.allow.includes("just *"), "what the sandbox does not enforce still reloads");
+      assert.equal(state.config!.provenance.lists["filesystem.allowWrite"][outside], undefined);
+    } finally {
+      cleanup();
     }
   });
 });

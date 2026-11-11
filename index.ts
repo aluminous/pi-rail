@@ -12,7 +12,7 @@ import { loadConfig, type ResolvedRailConfig } from "./src/config.ts";
 import { interceptToolCall } from "./src/interceptor.ts";
 import { compileFilesystemPolicy, summarizeDegradedPatterns } from "./src/policy.ts";
 import { createCorpusWriter, defaultCorpusDir } from "./src/replay-corpus.ts";
-import { restoreSessionPolicy, sessionPolicyDiagnostics } from "./src/session-policy.ts";
+import { markPolicyApplied, restoreSessionPolicy, sessionPolicyDiagnostics } from "./src/session-policy.ts";
 import { applyDerivedRailState } from "./src/session-replay.ts";
 import { createRuntimeState, resetSessionState, resetTurnStats } from "./src/state.ts";
 import { registerRailMessageRenderer, updateRailStatus } from "./src/status.ts";
@@ -53,9 +53,10 @@ export default function (pi: ExtensionAPI) {
 
   function sandboxedOps() {
     if (!state.backend || !state.config) return undefined;
+    const fallback = state.config;
     return createSandboxedBashOps({
       backend: state.backend,
-      config: state.config,
+      config: () => state.config ?? fallback,
       enabled: () => state.enabled,
       initialized: () => state.initialized,
       lastError: () => state.lastError,
@@ -87,7 +88,15 @@ export default function (pi: ExtensionAPI) {
     state.backend = makeBackend(config);
     const support = await state.backend.supported();
     if (!support.ok) throw new Error(support.reason);
-    await state.backend.initialize(config, ctx);
+    // The effective config, session layer included: a restored session grant
+    // that moves a sandbox list is compiled into the profile from the start,
+    // and every later change re-points it (commitPolicyChange).
+    await state.backend.initialize(state.config!, ctx);
+    // A change committed while initialize was awaited found no initialized
+    // backend to re-point; catch up before bash may run (a no-op otherwise).
+    const effective = state.config!;
+    state.backend.applyPolicy(effective);
+    markPolicyApplied(state.backend, effective);
     state.initialized = true;
   }
 

@@ -6,7 +6,7 @@ import type { ResolvedRailConfig } from "../config.ts";
 import { existingRealPath } from "../paths.ts";
 import { compileFilesystemPolicy, findMatchingPattern, resolveConfigPath } from "../policy.ts";
 import { asStringArray, formatError, unique } from "../util.ts";
-import type { EffectivePolicy, RailBackend, WrappedCommand } from "./types.ts";
+import { SandboxStaleError, type EffectivePolicy, type RailBackend, type WrappedCommand } from "./types.ts";
 
 type SandboxManagerApi = typeof import("@anthropic-ai/sandbox-runtime")["SandboxManager"];
 
@@ -95,16 +95,17 @@ function keychainReadAllowlist(config: ResolvedRailConfig, cwd: string): string[
 }
 
 export function getSeatbeltRuntimeConfig(config: ResolvedRailConfig, cwd = process.cwd()): SandboxRuntimeConfig {
-  // TODO(worktree trust): this profile compiles LITERAL roots once, when the
-  // rail enables. The policy engine now trusts verified linked worktrees of
-  // the session repo (src/worktrees.ts) for file tools and the classifier,
-  // but a worktree outside the compiled write roots is still unwritable for
-  // sandboxed bash — and worktrees are typically created mid-session, after
-  // this compile, so even enumerating <gitdir>/worktrees/* here would not
-  // close the gap. Fixing it means recompiling and re-initializing the
-  // sandbox (or re-running enable) when a worktree appears; until then the
-  // README documents the limitation next to the filesystem docs. Worktrees
-  // under /tmp or the project directory are covered by the default roots.
+  // TODO(worktree trust): this profile compiles LITERAL roots from the
+  // configured lists — at initialize, and again whenever those lists change
+  // (SeatbeltBackend.applyPolicy). The policy engine also trusts verified
+  // linked worktrees of the session repo (src/worktrees.ts) for file tools
+  // and the classifier, but nothing recompiles when a worktree appears, so a
+  // worktree outside the write roots stays unwritable for sandboxed bash
+  // until a write root covering it is added (a session grant does it live).
+  // Closing the gap automatically means calling applyPolicy when a worktree
+  // is registered; the README documents the limitation next to the
+  // filesystem docs. Worktrees under /tmp or the project directory are
+  // covered by the default roots.
   //
   // Config pattern lists arrive pre-resolved through the shared compiler; only
   // the seatbelt-specific system allowlists are resolved here.
@@ -189,10 +190,27 @@ export function getSeatbeltRuntimeConfig(config: ResolvedRailConfig, cwd = proce
   } as SandboxRuntimeConfig;
 }
 
+/** What initialize fixes for the backend's lifetime: switches and overrides, not lists. */
+function fixedSettings(config: ResolvedRailConfig): string {
+  return JSON.stringify({ filesystem: config.filesystem.enabled, network: config.network.enabled, seatbelt: config.seatbelt });
+}
+
+/** A runtime config's identity for "did anything change" (functions in seatbelt overrides are fixed, see fixedSettings). */
+function runtimeKey(runtime: SandboxRuntimeConfig): string {
+  return JSON.stringify(runtime);
+}
+
 export class SeatbeltBackend implements RailBackend {
   name = "seatbelt";
   private initialized = false;
   private manager: SandboxManagerApi | undefined;
+  /** The cwd the profile's relative patterns resolve against, fixed at initialize. */
+  private cwd: string | undefined;
+  /** fixedSettings() of the config initialize compiled. */
+  private fixed: string | undefined;
+  /** The runtime config in force, and its key; what a failed applyPolicy restores. */
+  private applied: SandboxRuntimeConfig | undefined;
+  private appliedKey: string | undefined;
 
   async supported(): Promise<{ ok: true } | { ok: false; reason: string }> {
     if (process.platform !== "darwin") {
@@ -214,13 +232,66 @@ export class SeatbeltBackend implements RailBackend {
     return { ok: true };
   }
 
-  async initialize(config: ResolvedRailConfig, _ctx: ExtensionContext): Promise<void> {
+  async initialize(config: ResolvedRailConfig, ctx: ExtensionContext): Promise<void> {
     const support = await this.supported();
     if (!support.ok) throw new Error(support.reason);
     const manager = this.manager ?? (await getSandboxManager());
-    await manager.initialize(getSeatbeltRuntimeConfig(config, _ctx.cwd));
+    const runtime = getSeatbeltRuntimeConfig(config, ctx.cwd);
+    await manager.initialize(runtime);
+    // sandbox-runtime's state is module-wide and initialize() returns early,
+    // keeping its old config, when an earlier initialize was never reset.
+    // Setting the config explicitly makes this profile the one in force
+    // either way.
+    manager.updateConfig(runtime);
     this.manager = manager;
+    this.cwd = ctx.cwd;
+    this.fixed = fixedSettings(config);
+    this.applied = runtime;
+    this.appliedKey = runtimeKey(runtime);
     this.initialized = true;
+  }
+
+  /**
+   * Re-points the live profile (RailBackend.applyPolicy). Verified on macOS
+   * against sandbox-runtime 0.0.61 (GRANTS_PLAN phase 4): wrapWithSandbox
+   * compiles the Seatbelt profile from the module config on every wrap, and
+   * the proxy reads network.allowedDomains / deniedDomains per connection,
+   * so after updateConfig the next wrapped command sees an added or removed
+   * write root, an added denyRead / denyWrite, and the env -u list from
+   * credentials.envVars, and the next connection sees the new domain lists.
+   *
+   * In-flight commands: a command already running keeps the filesystem
+   * profile and environment it was spawned with — Seatbelt profiles are
+   * fixed at exec. Its network is the exception: the proxy consults the
+   * domain lists per connection, so a running command's next connection
+   * already follows the new lists, in both directions.
+   *
+   * filesystem.enabled, network.enabled and the `seatbelt` overrides are not
+   * re-pointed: whether the proxy listeners exist at all is decided at
+   * initialize, so those apply at restart and a config that changes them is
+   * refused here.
+   */
+  applyPolicy(config: ResolvedRailConfig): void {
+    if (!this.initialized || !this.manager || this.cwd === undefined || !this.applied) throw new Error("Seatbelt backend is not initialized");
+    if (fixedSettings(config) !== this.fixed) {
+      throw new Error("filesystem.enabled, network.enabled and the seatbelt overrides are compiled when the rail starts and apply at restart");
+    }
+    // Compiled before anything changes: a throw here leaves the profile alone.
+    const next = getSeatbeltRuntimeConfig(config, this.cwd);
+    const key = runtimeKey(next);
+    if (key === this.appliedKey) return;
+    try {
+      this.manager.updateConfig(next);
+    } catch (error) {
+      try {
+        this.manager.updateConfig(this.applied);
+      } catch (restoreError) {
+        throw new SandboxStaleError(`Seatbelt could not apply the new policy (${formatError(error)}) nor restore the previous one (${formatError(restoreError)})`);
+      }
+      throw error;
+    }
+    this.applied = next;
+    this.appliedKey = key;
   }
 
   async wrapBash(command: string, cwd: string, env: Record<string, string>): Promise<WrappedCommand> {

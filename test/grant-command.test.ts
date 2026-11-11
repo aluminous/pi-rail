@@ -305,6 +305,73 @@ describe("/rail grant add — the confirmation", () => {
     mock.restoreAll();
   });
 
+  it("applies a filesystem grant to the session only with its op toggled, re-pointing the sandbox", async (t) => {
+    t.mock.method(console, "log", () => {});
+    await withTempAgentDirAsync(async (agentDir) => {
+      const cwd = path.join(agentDir, "project");
+      const outside = path.join(agentDir, "outside");
+      mkdirSync(cwd, { recursive: true });
+      mkdirSync(outside, { recursive: true });
+      const target = path.join(outside, "notes.md");
+      const writeOutside: Grant = {
+        id: "write-outside",
+        request: "let tools write to ../outside",
+        created: "2026-11-12",
+        ops: [{ op: "add-to-list", list: "filesystem.allowWrite", values: [outside] }],
+        examples: [{ tool: "bash", input: { command: "rm -rf ~" }, expect: ["deny", "ask", "judge"] }],
+      };
+      const file = writeGrantFile(agentDir, writeOutside);
+      const sandboxedSetup = (harness: Harness) => {
+        const { state, commands } = setup(harness.ctx);
+        // Only the project is writable, so the outside dir (under the temp dir) is not already a root.
+        state.baseConfig!.filesystem.allowWrite = ["."];
+        state.config = state.baseConfig;
+        const applied: string[][] = [];
+        state.backend = { name: "seatbelt", applyPolicy: (config: { filesystem: { allowWrite: string[] } }) => void applied.push([...config.filesystem.allowWrite]) } as unknown as RailBackend;
+        state.initialized = true;
+        return { state, commands, applied };
+      };
+      const writable = (state: RuntimeState) => dryRunAction(state.config!, { tool: "write", input: { path: target, content: "x" } }, { cwd }).trace.some((stage) => stage.stage === "path-policy" && stage.outcome === "pass");
+
+      // Headless: sensitive, so nothing applies.
+      const headless = makeCtx(cwd, "print");
+      const first = sandboxedSetup(headless);
+      await first.commands.runGrant(`add ${file}`, headless.ctx);
+      assert.deepEqual(first.state.sessionPolicy.grants, []);
+      assert.deepEqual(first.applied, []);
+
+      // Enter alone drops the only (sensitive) op.
+      const dropped = makeCtx(cwd, "tui");
+      const second = sandboxedSetup(dropped);
+      await second.commands.runGrant(`add ${file}`, dropped.ctx);
+      const page = dropped.panel() as GrantConfirmPage;
+      assert.match(page.render(160).join("\n"), /\[ \] op 1: widens filesystem access: add .*outside to the write roots/);
+      page.handleInput(ENTER);
+      await settled();
+      assert.deepEqual(second.state.sessionPolicy.grants, []);
+      assert.match(page.render(160).join("\n"), /none is approved — nothing to apply/);
+      assert.deepEqual(second.applied, []);
+
+      // Toggled: applied, the sandbox follows, and the dry run reads the new root.
+      const kept = makeCtx(cwd, "tui");
+      const third = sandboxedSetup(kept);
+      assert.equal(writable(third.state), false);
+      await third.commands.runGrant(`add ${file}`, kept.ctx);
+      const toggles = kept.panel() as GrantConfirmPage;
+      toggles.handleInput("<up>");
+      toggles.handleInput(SENSITIVE_TOGGLE_KEY);
+      assert.deepEqual(toggles.approvedOps(), [0]);
+      toggles.handleInput("<down>");
+      toggles.handleInput(ENTER);
+      await settled();
+      assert.deepEqual(third.state.sessionPolicy.grants.map((grant) => grant.id), ["write-outside"]);
+      assert.equal(third.applied.length, 1);
+      assert.ok(third.applied[0]!.includes(outside));
+      assert.equal(writable(third.state), true);
+    });
+    mock.restoreAll();
+  });
+
   it("check prints the report and applies nothing, headless too", async (t) => {
     const log = t.mock.method(console, "log", () => {});
     await withTempAgentDirAsync(async (agentDir) => {
