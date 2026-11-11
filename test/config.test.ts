@@ -229,7 +229,7 @@ describe("config provenance", () => {
   it("seeds every default list entry with the default layer", () => {
     const config = testConfig();
     assert.deepEqual(config.provenance.lists["filesystem.denyRead"]["~/.ssh"], { layer: "default" });
-    assert.deepEqual(config.provenance.lists["environment.allow"]["PATH"], { layer: "default" });
+    assert.deepEqual(config.provenance.lists["environment.unset"]["*_TOKEN"], { layer: "default" });
     assert.deepEqual(config.provenance.lists["commands.allow"]["grep *"], { layer: "default" });
   });
 

@@ -190,6 +190,48 @@ export function getSeatbeltRuntimeConfig(config: ResolvedRailConfig, cwd = proce
   } as SandboxRuntimeConfig;
 }
 
+/**
+ * The environment a sandboxed command is spawned with: the scrubbed `env`,
+ * plus exactly what the sandbox runtime itself changed.
+ *
+ * wrapWithSandboxArgv returns an `env` meant to be spawned as-is, and it is
+ * built from the HOST process.env, not from anything the caller passed in. On
+ * macOS and Linux (sandbox-runtime 0.0.61) it is process.env unchanged — the
+ * proxy plumbing (HTTP(S)_PROXY, ALL_PROXY, NO_PROXY and their lowercase
+ * forms, GIT_SSH_COMMAND, TMPDIR, SANDBOX_RUNTIME, the CA trust vars under TLS
+ * termination) is baked into the wrapped command as `env -u … VAR=…
+ * sandbox-exec …` assignments. On Windows it is process.env with the
+ * credential unsets applied and the proxy variables merged in. Merging that
+ * object over the scrubbed one therefore put back every variable the scrub
+ * had removed: `environment.allow` and wildcard unsets never reached bash.
+ *
+ * So the runtime's env is read as a diff against process.env rather than as
+ * a whole: a key it sets to a value process.env does not have (added or
+ * changed) is the runtime's own and is applied; a key of process.env it
+ * dropped is dropped here too; a key it passes through unchanged is the
+ * host's, and whether that reaches the command is the scrub's call alone.
+ * Computed generically instead of from a list of proxy names, so a runtime
+ * version that adds a variable keeps working without a change here. The one
+ * thing this cannot see is a runtime variable that happens to equal the host
+ * value of a variable the scrub removed; on macOS none travels this way.
+ */
+export function mergeSandboxRuntimeEnv(
+  scrubbed: Record<string, string>,
+  runtimeEnv: NodeJS.ProcessEnv | Record<string, string | undefined> | undefined,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const merged: Record<string, string> = { ...scrubbed };
+  if (!runtimeEnv) return merged;
+  for (const [key, value] of Object.entries(runtimeEnv)) {
+    if (typeof value !== "string") continue;
+    if (hostEnv[key] !== value) merged[key] = value;
+  }
+  for (const key of Object.keys(hostEnv)) {
+    if (typeof runtimeEnv[key] !== "string") delete merged[key];
+  }
+  return merged;
+}
+
 /** What initialize fixes for the backend's lifetime: switches and overrides, not lists. */
 function fixedSettings(config: ResolvedRailConfig): string {
   return JSON.stringify({ filesystem: config.filesystem.enabled, network: config.network.enabled, seatbelt: config.seatbelt });
@@ -297,15 +339,11 @@ export class SeatbeltBackend implements RailBackend {
   async wrapBash(command: string, cwd: string, env: Record<string, string>): Promise<WrappedCommand> {
     if (!this.initialized || !this.manager) throw new Error("Seatbelt backend is not initialized");
     const wrapped = await this.manager.wrapWithSandboxArgv(command, "bash");
-    const merged: Record<string, string> = { ...env };
-    for (const [key, value] of Object.entries(wrapped.env ?? {})) {
-      if (typeof value === "string") merged[key] = value;
-    }
     return {
       command: wrapped.argv[0] ?? "bash",
       args: wrapped.argv.slice(1),
       cwd,
-      env: merged,
+      env: mergeSandboxRuntimeEnv(env, wrapped.env),
     };
   }
 

@@ -59,7 +59,7 @@ const SUBCOMMANDS: Array<{ value: string; description: string }> = [
   { value: "off", description: "Disable for the next agent turn, then re-enable" },
   { value: "off session", description: "Disable until the session ends (no rail!)" },
   { value: "readonly", description: "Toggle read-only mode: write/edit blocked, bash restricted" },
-  { value: "model", description: "Choose the namer model (auto|current|off|provider/model); `model judge …` picks the judge" },
+  { value: "model", description: "Reviewer models for this session: picker (namer/judge/configurator tabs, Ctrl+S saves), or model [judge|configurator] <spec>" },
   { value: "smoke", description: "Run sandbox and namer smoke tests" },
   { value: "critique", description: "Critique the capability classes and content screen with a model" },
 ];
@@ -285,7 +285,7 @@ export function createRailCommand(deps: RailCommandDeps) {
     }
     items.push(
       { value: "readonly", label: `Read-only mode: ${state.readOnly ? "on" : "off"}`, searchText: "readonly read only ro toggle mode", description: "Block write/edit and restrict bash to read-only commands" },
-      { value: "model", label: "Reviewer models…", searchText: "model namer judge classifier auto choose select", description: "Pick the namer and judge models (Tab switches; namer supports auto/off)" },
+      { value: "model", label: "Reviewer models…", searchText: "model namer judge configurator classifier auto choose select", description: "Pick the namer, judge, and configurator models for this session (Tab switches; Ctrl+S saves)" },
       { value: "statusline", label: "Statusline visibility…", searchText: "statusline status line visibility always never auto hide show", description: "Show the rail statusline always, never, or only when notable" },
       { value: "smoke", label: "Run smoke tests", searchText: "smoke test verify sandbox namer classifier", description: "Verify sandboxed execution and capability naming end to end" },
       { value: "critique", label: "Critique capabilities", searchText: "critique capabilities classes screen rules review improve", description: "Have Pi's current model review the class definitions, table, and screen" },
@@ -311,7 +311,7 @@ export function createRailCommand(deps: RailCommandDeps) {
       case "readonly":
         return toggleReadOnly(ctx);
       case "model":
-        return runModelCommand("", ctx, state);
+        return runModelCommand("", ctx, state, () => updateRailStatus(ctx, state));
       case "statusline":
         return chooseStatusLine(ctx);
       case "smoke":
@@ -372,7 +372,7 @@ export function createRailCommand(deps: RailCommandDeps) {
       if (!rest) return disableTurn(ctx);
     }
     if ((sub === "readonly" || sub === "ro") && !rest) return toggleReadOnly(ctx);
-    if (sub === "model") return runModelCommand(rest, ctx, state);
+    if (sub === "model") return runModelCommand(rest, ctx, state, () => updateRailStatus(ctx, state));
     if (sub === "smoke" && !rest) return deps.runRailSmoke(ctx);
     if (sub === "critique") return deps.runCritique(rest, ctx);
 
@@ -383,26 +383,28 @@ export function createRailCommand(deps: RailCommandDeps) {
     const prefix = argumentPrefix.replace(/^\s+/, "");
     const setMatch = prefix.match(/^set\s+(.*)$/i);
     if (setMatch) return dispositions.setCompletions(setMatch[1]!);
-    // The judge subform comes first: it is a different keyword set, and only
-    // `model judge ` (with the space) opens it, so `model ju` still completes
+    // The seat subforms come first: each is its own keyword set, and only
+    // `model judge ` (with the space) opens one, so `model ju` still completes
     // to `model judge` through the namer branch below.
-    const judgeMatch = prefix.match(/^model\s+judge\s+(.*)$/i);
-    if (judgeMatch) {
-      const partial = judgeMatch[1]!.toLowerCase();
-      // No "auto" and no "off": the judge cannot be disabled, and auto is the
-      // namer's cheap-model list.
-      const fixed = ["current", "status"];
+    const seatMatch = prefix.match(/^model\s+(judge|configurator)\s+(.*)$/i);
+    if (seatMatch) {
+      const seat = seatMatch[1]!.toLowerCase();
+      const partial = seatMatch[2]!.toLowerCase();
+      // The judge takes no "auto" and no "off" (it cannot be disabled, and
+      // auto is the namer's cheap-model list); the configurator has its own
+      // auto list and nothing to turn off.
+      const fixed = seat === "judge" ? ["current", "status"] : ["auto", "current", "status"];
       const items = [...fixed, ...state.availableModelSpecs]
         .filter((spec) => spec.toLowerCase().includes(partial))
         .slice(0, 20)
-        .map((spec) => ({ value: `model judge ${spec}`, label: spec, description: fixed.includes(spec) ? undefined : "configured model" }));
+        .map((spec) => ({ value: `model ${seat} ${spec}`, label: spec, description: fixed.includes(spec) ? undefined : "configured model" }));
       return items.length > 0 ? items : null;
     }
     const modelMatch = prefix.match(/^(model|critique)\s+(.*)$/i);
     if (modelMatch) {
       const sub = modelMatch[1]!.toLowerCase();
       const partial = modelMatch[2]!.toLowerCase();
-      const fixed = sub === "model" ? ["auto", "current", "off", "status", "judge"] : [];
+      const fixed = sub === "model" ? ["auto", "current", "off", "status", "save", "judge", "configurator"] : [];
       const specs = [...fixed, ...state.availableModelSpecs];
       const items = specs
         .filter((spec) => spec.toLowerCase().includes(partial))

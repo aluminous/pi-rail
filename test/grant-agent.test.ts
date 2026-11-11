@@ -422,7 +422,7 @@ describe("classifier.grantModel", () => {
     const { resolveGrantModel } = await import("../src/classifier.ts");
     const { compileConfigLayer } = await import("../src/policy-store.ts");
     assert.equal(testConfig().classifier.grantModel, "auto");
-    assert.deepEqual(AUTO_GRANT_MODEL_PREFERENCES.map((m) => m.id), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5"]);
+    assert.deepEqual(AUTO_GRANT_MODEL_PREFERENCES.map((m) => m.id), ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-sonnet-5"]);
     assert.equal(compileConfigLayer({ classifier: { grantModel: "anthropic/claude-sonnet-5" } }, "global", "rail.json").settings.classifier?.grantModel, "anthropic/claude-sonnet-5");
     const available = [{ provider: "anthropic", id: "claude-haiku-4-5" }];
     assert.equal(resolveAutoGrantModel(available), undefined);

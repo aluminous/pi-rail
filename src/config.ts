@@ -330,20 +330,35 @@ const DEFAULTS_SANS_PROVENANCE: Omit<ResolvedRailConfig, "provenance"> = {
     denyWrite: [".pi", ".env", ".env.*", "*.pem", "*.key", "~/.ssh", "~/.aws", "~/.azure", "~/.gnupg", "~/.kube", "~/.docker", "~/.netrc"],
   },
   environment: {
-    allow: [
-      "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "CI", "TERM", "SHELL", "LANG", "LC_*",
-      // CA-certificate configuration, so a private CA reaches curl/python/node/aws/git/npm/cargo/deno
-      // tooling inside the sandbox (JAVA_TOOL_OPTIONS is how java picks up a custom trust store).
-      "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
-      "AWS_CA_BUNDLE", "PIP_CERT", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH", "NPM_CONFIG_CAFILE",
-      "CARGO_HTTP_CAINFO", "DENO_CERT", "JAVA_TOOL_OPTIONS",
-    ],
+    // Empty: blacklist mode. Every variable not matched by `unset` reaches
+    // sandboxed commands. A whitelist breaks toolchains in ways nobody can
+    // enumerate up front (JAVA_HOME, GOPATH, NVM_DIR, SSH_AUTH_SOCK, CA
+    // bundles, …); the secrets worth stripping follow naming conventions the
+    // unset patterns below catch. A non-empty allow switches to whitelist mode.
+    allow: [],
     unset: [
-      // Explicit AWS credential vars rather than a broad AWS_* glob, so AWS_CA_BUNDLE in the
-      // allow list is not scrubbed (unset is applied before allow). Tradeoff: future unknown
-      // AWS_* secrets are no longer auto-unset; the *_TOKEN/*_SECRET/*_KEY globs are the backstop.
+      // Explicit AWS credential vars rather than a broad AWS_* glob, which would
+      // also strip AWS_CA_BUNDLE, AWS_PROFILE, AWS_REGION and the rest of the
+      // non-secret AWS configuration; the generic globs below are the backstop
+      // for unknown AWS_* secrets.
       "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
-      "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "*_TOKEN", "*_SECRET", "*_KEY",
+      "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+      // Naming conventions for secrets. Matching is case-sensitive and `*`
+      // stops at nothing but "/", so `*_KEY` takes MY_API_KEY but not
+      // LESSKEY or SSH_AUTH_SOCK.
+      "*_TOKEN", "*_SECRET", "*_KEY", "*_API_KEY", "*_PASSWORD", "*_PASSWD",
+      // Secrets with no suffix to match: libpq's and mysql's password vars, and
+      // npm's lowercase auth config.
+      "PGPASSWORD", "MYSQL_PWD", "npm_config__auth*", "NPM_CONFIG__AUTH*",
+      // The subagent approval mailbox's `<dir>#<token>`. pi-subagents children
+      // inherit it from the extension process's own environment, never through
+      // bash; a sandboxed command holding it could forge an approval
+      // (src/approval-mailbox.ts).
+      "PI_RAIL_APPROVAL_MAILBOX",
+      // rg reads extra flags from this file, and `--pre <cmd>` runs a program
+      // per searched file: a variable pointing it anywhere writable would get
+      // past the built-in rg flags allowlist (src/command-allowlist.ts).
+      "RIPGREP_CONFIG_PATH",
     ],
   },
   network: {

@@ -17,6 +17,7 @@ import { DEFAULT_COMMAND_ALLOW_FLAGS, describeFlags, outrankedRules, type Comman
 import { commandRulesOf, effectiveDispositionLabel, provenanceLabel, withSessionLayer, type Provenance } from "./policy-store.ts";
 import { getPersistentConfigPath } from "./persistent-settings.ts";
 import { resolveConfigPath } from "./policy.ts";
+import { persistedSeatSpec, REVIEWER_SEATS, seatSpec, seatUnsaved, type ReviewerSeat } from "./reviewer-seats.ts";
 import {
   modelUsageRows,
   recentClassifications,
@@ -444,13 +445,19 @@ function layerRows(config: ResolvedRailConfig, effective: EffectivePolicy | unde
       config.network.enabled ? "enabled" : "disabled",
       `${(effective?.network.allowedDomains ?? config.network.allowedDomains).length} allowed · ${config.network.deniedDomains.length} denied`,
     ],
-    ["environment", config.environment.unset.length > 0 || config.environment.allow.length > 0 ? "scrubbing" : "untouched", `${config.environment.allow.length} allowed · ${config.environment.unset.length} unset`],
+    ["environment", config.environment.unset.length > 0 || config.environment.allow.length > 0 ? "scrubbing" : "untouched", `${config.environment.allow.length === 0 ? "blacklist" : `whitelist (${config.environment.allow.length} allowed)`} · ${config.environment.unset.length} unset`],
     [
       "commands",
       config.commands.allow.length > 0 ? "allowlist" : config.commands.classify.length > 0 ? "classify" : "none",
       `${config.commands.allow.length} rule(s) exempt from review${config.commands.classify.length > 0 ? ` · ${config.commands.classify.length} classify rule(s)` : ""}`,
     ],
   ];
+}
+
+/** "openai/gpt-5.4 (this session, unsaved; saved: current)" or just the spec. */
+function seatSettingLabel(config: ResolvedRailConfig, state: RuntimeState, seat: ReviewerSeat): string {
+  const spec = seatSpec(config, state.classifier, seat);
+  return seatUnsaved(config, state.classifier, seat) ? `${spec} (this session, unsaved; saved: ${persistedSeatSpec(config, seat)})` : spec;
 }
 
 function engineTab(view: StatusView): string[] {
@@ -464,8 +471,8 @@ function engineTab(view: StatusView): string[] {
   ];
   const reviewerRows: string[][] = [
     ["namer", `${classifierEnabled(config, state.classifier) ? "enabled" : "disabled"} · ${view.classifierLabel}`],
-    ["namer model setting", state.classifier.modelOverride ? `${state.classifier.modelOverride} (this session)` : config.classifier.model],
-    ["judge model setting", state.classifier.judgeModelOverride ? `${state.classifier.judgeModelOverride} (this session)` : config.classifier.judgeModel],
+    // The effective (session) value, marked while it differs from the saved one.
+    ...REVIEWER_SEATS.map((seat) => [`${seat} model setting`, seatSettingLabel(config, state, seat)]),
     ["on failure", config.classifier.failClosed ? "fail closed (stop the turn)" : "fail open (warn and continue)"],
     ["timeout", `${config.classifier.timeoutMs}ms per attempt`],
     ["telemetry", config.classifier.telemetry],
@@ -607,6 +614,7 @@ function policyTab(view: StatusView): string[] {
     ...listSection(view, "Denied domains", "network.deniedDomains", config.network.deniedDomains, false),
     "",
     heading(theme, "Environment scrubbing"),
+    line(`Mode: ${config.environment.allow.length === 0 ? "blacklist (every variable except unset)" : "whitelist (only allow, minus unset)"}`),
     ...listSection(view, "Allow", "environment.allow", config.environment.allow, false),
     ...listSection(view, "Unset", "environment.unset", config.environment.unset, false),
     "",

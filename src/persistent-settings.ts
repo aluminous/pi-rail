@@ -80,7 +80,7 @@ function updateConfigFile(filePath: string, update: (current: RailConfig) => Rai
   withConfigLock(filePath, () => writeConfigUnlocked(filePath, update(readConfigUnlocked(filePath))));
 }
 
-export function updatePersistentClassifierSettings(update: { enabled?: boolean; model?: string; judgeModel?: string }): void {
+export function updatePersistentClassifierSettings(update: { enabled?: boolean; model?: string; judgeModel?: string; grantModel?: string }): void {
   updateConfigFile(configPath(), (current) => ({ ...current, classifier: { ...(current.classifier ?? {}), ...update } }));
 }
 

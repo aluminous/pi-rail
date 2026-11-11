@@ -3,9 +3,7 @@
 Status: implemented on the `grants` branch (phases 0–6, 2026-11-12). Where
 the code went further than this text — the explicit flags decision, per-rule
 near-miss examples, probes, the built-in allowlist audit — the README and
-`eval/GRANT_RESULTS.md` are the current description. Known and not fixed
-here: the Seatbelt backend merges the full process environment back over the
-scrubbed one, so `environment.allow` and wildcard unsets do not reach bash.
+`eval/GRANT_RESULTS.md` are the current description.
 
 ## Problem
 

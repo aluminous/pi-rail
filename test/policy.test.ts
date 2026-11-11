@@ -180,24 +180,39 @@ describe("scrubEnvironment", () => {
     RANDOM_VAR: "not-allowed",
   };
 
-  it("removes unset patterns and applies the allow list", () => {
+  it("passes everything not unset with the defaults (blacklist mode)", () => {
     const scrubbed = scrubEnvironment(env, testConfig());
     assert.equal(scrubbed.PATH, "/usr/bin");
-    assert.equal(scrubbed.HOME, "/Users/tester");
-    assert.equal(scrubbed.LC_ALL, "en_US.UTF-8");
+    assert.equal(scrubbed.RANDOM_VAR, "not-allowed");
     assert.equal(scrubbed.AWS_SECRET_ACCESS_KEY, undefined);
     assert.equal(scrubbed.GITHUB_TOKEN, undefined);
     assert.equal(scrubbed.MY_APP_TOKEN, undefined);
-    assert.equal(scrubbed.RANDOM_VAR, undefined);
   });
 
-  it("passes everything not unset when the allow list is empty", () => {
+  it("removes unset patterns and then whitelists with a non-empty allow list", () => {
     const config = testConfig((c) => {
-      c.environment.allow = [];
+      c.environment.allow = ["PATH", "HOME", "LC_*", "*_TOKEN"];
     });
     const scrubbed = scrubEnvironment(env, config);
-    assert.equal(scrubbed.RANDOM_VAR, "not-allowed");
-    assert.equal(scrubbed.GITHUB_TOKEN, undefined);
+    assert.equal(scrubbed.PATH, "/usr/bin");
+    assert.equal(scrubbed.HOME, "/Users/tester");
+    assert.equal(scrubbed.LC_ALL, "en_US.UTF-8");
+    assert.equal(scrubbed.RANDOM_VAR, undefined);
+    assert.equal(scrubbed.MY_APP_TOKEN, undefined, "unset wins over allow");
+  });
+
+  it("strips the approval mailbox, rg's config path, and password-style secrets by default", () => {
+    const scrubbed = scrubEnvironment({
+      PI_RAIL_APPROVAL_MAILBOX: "/agent/rail-approvals/x#token",
+      RIPGREP_CONFIG_PATH: "/tmp/rgrc",
+      DB_PASSWORD: "p",
+      PGPASSWORD: "p",
+      npm_config__authToken: "t",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      LESSKEY: "/etc/lesskey",
+      JAVA_HOME: "/opt/jdk",
+    }, testConfig());
+    assert.deepEqual(Object.keys(scrubbed).sort(), ["JAVA_HOME", "LESSKEY", "SSH_AUTH_SOCK"]);
   });
 
   it("keeps AWS_CA_BUNDLE while dropping AWS credential variables with the defaults", () => {
@@ -214,7 +229,7 @@ describe("scrubEnvironment", () => {
     assert.equal(scrubbed.AWS_SESSION_TOKEN, undefined);
   });
 
-  it("passes CA-certificate variables through the default allow list", () => {
+  it("passes CA-certificate variables with the defaults", () => {
     const caEnv = { JAVA_TOOL_OPTIONS: "-Djavax.net.ssl.trustStore=/etc/ssl/ca.jks", SSL_CERT_FILE: "/etc/ssl/ca.pem" };
     const scrubbed = scrubEnvironment(caEnv, testConfig());
     assert.equal(scrubbed.JAVA_TOOL_OPTIONS, "-Djavax.net.ssl.trustStore=/etc/ssl/ca.jks");

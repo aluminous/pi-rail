@@ -132,7 +132,7 @@ describe("rail argument completions", () => {
   it("completes model arguments with fixed specs first, full-args values", () => {
     const items = makeCommand(["openai/gpt-5-mini", "anthropic/claude-haiku-4-5"]).getArgumentCompletions("model ");
     assert.ok(items);
-    assert.deepEqual(items.slice(0, 5).map((i) => i.value), ["model auto", "model current", "model off", "model status", "model judge"]);
+    assert.deepEqual(items.slice(0, 7).map((i) => i.value), ["model auto", "model current", "model off", "model status", "model save", "model judge", "model configurator"]);
     assert.ok(items.some((i) => i.value === "model openai/gpt-5-mini"));
   });
 
@@ -145,6 +145,12 @@ describe("rail argument completions", () => {
     assert.deepEqual(items.slice(0, 2).map((i) => i.value), ["model judge current", "model judge status"]);
     assert.ok(!items.some((i) => i.label === "auto" || i.label === "off"), "the judge cannot be off, and auto is the namer's list");
     assert.ok(items.some((i) => i.value === "model judge anthropic/claude-haiku-4-5"));
+  });
+
+  it("completes the configurator subform with its own auto but no off", () => {
+    const command = makeCommand(["openai/gpt-5-mini"]);
+    const items = command.getArgumentCompletions("model configurator ");
+    assert.deepEqual(items?.map((i) => i.value), ["model configurator auto", "model configurator current", "model configurator status", "model configurator openai/gpt-5-mini"]);
   });
 
   it("filters the judge subform by partial text", () => {

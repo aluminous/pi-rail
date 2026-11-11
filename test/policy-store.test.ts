@@ -476,12 +476,14 @@ describe("opDirection", () => {
     assert.equal(opDirection({ op: "remove-from-list", list: "filesystem.allowRead", values: ["~/src"] }, whitelist), "widening");
   });
 
-  it("treats emptying environment.allow as widening (every variable passes) and its first entry as tightening", () => {
-    const allow = DEFAULT_CONFIG.environment.allow;
-    assert.equal(opDirection({ op: "remove-from-list", list: "environment.allow", values: [...allow] }, DEFAULT_CONFIG), "widening");
-    assert.equal(opDirection({ op: "remove-from-list", list: "environment.allow", values: ["TERM"] }, DEFAULT_CONFIG), "tightening");
-    const open = foldPolicy(DEFAULT_CONFIG, [layer("global", G, { environment: { allow: { remove: [...allow] } } })]);
-    assert.deepEqual(open.environment.allow, []);
-    assert.equal(opDirection({ op: "add-to-list", list: "environment.allow", values: ["PATH"] }, open), "tightening");
+  it("treats environment.allow's first entry as tightening (whitelist mode) and emptying it as widening", () => {
+    // The default is blacklist mode: an empty allow list passes every variable not unset.
+    assert.deepEqual(DEFAULT_CONFIG.environment.allow, []);
+    assert.equal(opDirection({ op: "add-to-list", list: "environment.allow", values: ["PATH"] }, DEFAULT_CONFIG), "tightening");
+    const whitelist = foldPolicy(DEFAULT_CONFIG, [layer("global", G, { environment: { allow: ["PATH", "TERM"] } })]);
+    assert.deepEqual(whitelist.environment.allow, ["PATH", "TERM"]);
+    assert.equal(opDirection({ op: "add-to-list", list: "environment.allow", values: ["JAVA_HOME"] }, whitelist), "widening");
+    assert.equal(opDirection({ op: "remove-from-list", list: "environment.allow", values: ["TERM"] }, whitelist), "tightening");
+    assert.equal(opDirection({ op: "remove-from-list", list: "environment.allow", values: ["PATH", "TERM"] }, whitelist), "widening");
   });
 });

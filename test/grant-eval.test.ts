@@ -534,10 +534,12 @@ describe("session grants on filesystem, network, and environment lists", () => {
   });
 
   it("keeps network and environment widenings sensitive at the session layer", async () => {
+    // Whitelist mode, so emptying the allow list hands the command every variable.
+    const base = testConfig((c) => (c.environment.allow = ["PATH", "HOME"]));
     const report = await evaluateGrant(grant("net-env", [
       { op: "add-to-list", list: "network.allowedDomains", values: ["paste.example"] },
-      { op: "remove-from-list", list: "environment.allow", values: [...testConfig().environment.allow] },
-    ], [{ tool: "bash", input: { command: "rm -rf /" }, expect: ["deny", "ask", "judge"] }]), evalContext({ session: createSessionLayer() }));
+      { op: "remove-from-list", list: "environment.allow", values: ["PATH", "HOME"] },
+    ], [{ tool: "bash", input: { command: "rm -rf /" }, expect: ["deny", "ask", "judge"] }]), evalContext({ base, session: createSessionLayer() }));
     assert.deepEqual(report.gates.structural.failures, []);
     assert.deepEqual(report.sensitive.map((item) => `${item.opIndex}:${item.kind}`), ["0:network-widening", "1:environment-widening"]);
   });
@@ -581,7 +583,7 @@ describe("sensitive ops", () => {
     assert.deepEqual(kinds([
       { op: "add-to-list", list: "filesystem.allowWrite", values: ["~/elsewhere"] },
       { op: "add-to-list", list: "network.allowedDomains", values: ["paste.example"] },
-      { op: "add-to-list", list: "environment.allow", values: ["GITHUB_TOKEN"] },
+      { op: "remove-from-list", list: "environment.unset", values: ["*_TOKEN"] },
       { op: "add-to-list", list: "filesystem.denyRead", values: ["~/secrets"] },
     ]), ["0:filesystem-widening", "1:network-widening", "2:environment-widening"]);
   });

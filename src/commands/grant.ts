@@ -19,7 +19,7 @@ import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { EVAL_CASES } from "../../eval/cases.ts";
 import { withDialogLock, type GeneraliseSeed } from "../approvals.ts";
-import { classifierEnabled, modelSpec, resolveGrantModel, type CompleteFn } from "../classifier.ts";
+import { classifierEnabled, grantModelSpec, modelSpec, resolveGrantModel, type ClassifierState, type CompleteFn } from "../classifier.ts";
 import { DEFAULT_GRANT_AGENT_LIMITS, runGrantAgent, seedSubject, type GrantAgentLimits, type GrantAgentParams, type GrantAgentResult } from "../grant-agent.ts";
 import { streamingComplete } from "../streaming-complete.ts";
 import { globalRailConfigPath, loadConfig, loadPolicyLayers, projectRailConfigPath, type ResolvedRailConfig } from "../config.ts";
@@ -72,7 +72,7 @@ export interface GrantCommandDeps {
   /** The configurator's completion function; default pi-ai streaming with an idle timeout. */
   complete?: CompleteFn;
   /** Resolves the configurator's model; default classifier.grantModel via resolveGrantModel. */
-  resolveModel?: (ctx: ExtensionContext, config: ResolvedRailConfig) => Model<Api> | undefined;
+  resolveModel?: (ctx: ExtensionContext, config: ResolvedRailConfig, classifier?: ClassifierState) => Model<Api> | undefined;
   /** Configurator limits (turns, tokens, wall clock). */
   agentLimits?: Partial<GrantAgentLimits>;
 }
@@ -487,9 +487,9 @@ export function createGrantCommands(deps: GrantCommandDeps) {
       return;
     }
     const base = effective(ctx);
-    const model = (deps.resolveModel ?? resolveGrantModel)(ctx, base);
+    const model = (deps.resolveModel ?? resolveGrantModel)(ctx, base, state.classifier);
     if (!model) {
-      notify(ctx, `No configurator model: classifier.grantModel is "${base.classifier.grantModel}" and nothing resolves (select a pi model, or set classifier.grantModel to provider/id).`, "error");
+      notify(ctx, `No configurator model: classifier.grantModel is "${grantModelSpec(base, state.classifier)}" and nothing resolves (select a pi model, or pick one with /rail model configurator <provider/id>).`, "error");
       return;
     }
     const spec = modelSpec(model);

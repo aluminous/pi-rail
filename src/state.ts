@@ -158,8 +158,8 @@ export interface RailStats {
   turnBlocked: number;
 }
 
-/** "status"/"policy"/"grants" are the toggleable live views; "grant" is the grant confirmation; "report" is one-shot output (smoke, critique). */
-export type RailViewKind = "status" | "policy" | "grants" | "grant" | "report";
+/** "status"/"policy"/"grants"/"model" are the toggleable live views; "grant" is the grant confirmation; "report" is one-shot output (smoke, critique). */
+export type RailViewKind = "status" | "policy" | "grants" | "model" | "grant" | "report";
 
 /**
  * An open live rail view — a TUI overlay popup or an RPC widget.

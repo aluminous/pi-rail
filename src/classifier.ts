@@ -45,15 +45,27 @@ export {
   type ReviewProjection,
 } from "./classifier-protocol.ts";
 
+/**
+ * The `*Override` fields are the reviewer-model picker's session values
+ * (src/reviewer-seats.ts): set by `/rail model`, winning over the config for
+ * this session only, written to the global config by `/rail model save` or
+ * Ctrl+S on the page. They are settings rather than policy, so they live here
+ * and not in the session policy layer — a new session or reload starts clean
+ * (resetSessionState), and branch replay leaves them alone.
+ */
 export interface ClassifierState {
+  /** Namer on/off for this session ("off" on the namer tab). */
   enabledOverride?: boolean;
+  /** Namer model spec for this session. */
   modelOverride?: string;
   /**
-   * Session override for the judge model, set by `/rail model` (judge tab) and
-   * `/rail model judge …`. Wins over config.classifier.judgeModel. There is no
-   * "off" here on purpose: the judge cannot be disabled, only re-pointed.
+   * Session override for the judge model. Wins over
+   * config.classifier.judgeModel. There is no "off" here on purpose: the
+   * judge cannot be disabled, only re-pointed.
    */
   judgeModelOverride?: string;
+  /** Session override for the grant configurator's model (classifier.grantModel). */
+  grantModelOverride?: string;
   lastError?: string;
   /**
    * Session-scoped, user-authored guidance collected from allow/deny-with-
@@ -157,8 +169,13 @@ export function resolveJudgeModel(ctx: ExtensionContext, config: ResolvedRailCon
  * namer's: writing policy is a different job from labelling one action, and a
  * model earns that list only through eval/grant-run.ts.
  */
-export function resolveGrantModel(ctx: ExtensionContext, config: ResolvedRailConfig): Model<Api> | undefined {
-  return resolveModelSpec(ctx, config.classifier.grantModel, resolveAutoGrantModel);
+export function resolveGrantModel(ctx: ExtensionContext, config: ResolvedRailConfig, state?: ClassifierState): Model<Api> | undefined {
+  return resolveModelSpec(ctx, grantModelSpec(config, state), resolveAutoGrantModel);
+}
+
+/** The configurator's spec: session override first, then config (same rule as judgeModelSpec). */
+export function grantModelSpec(config: ResolvedRailConfig, state?: ClassifierState): string {
+  return state?.grantModelOverride ?? config.classifier.grantModel;
 }
 
 function resolveModelSpec(

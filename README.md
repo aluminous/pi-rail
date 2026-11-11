@@ -77,10 +77,12 @@ Commands — everything lives under `/rail`, with argument autocomplete:
 - `/rail off session`: disable until the session ends.
 - `/rail readonly` (or `ro`, or ctrl+shift+t): toggle session read-only mode — `write`/`edit` are blocked, `bash` must be reviewed (and is blocked outright if the classifier is off), and a session disposition preset denies the writing capability classes — along with any custom class that `extends` one of them or extends nothing (see [`extends`](#custom-capability-classes)). The toggle is also announced into the agent's context, so the model knows the ground rules changed.
 - ctrl+shift+r: toggle the rail off for the upcoming agent turn (it re-enables itself when the turn ends, like `/rail off`); pressing it again while armed — or while the rail is off for the session — re-enables immediately.
-- `/rail model`: choose the reviewer models interactively. The dialog has two tabs — Tab switches between `namer` and `judge` — and the header shows what each one currently resolves to.
-- `/rail model auto|current|off|provider/model-id`: set the namer model directly and save it globally. `auto` (the default) picks the best available known-good model, preferring subscription providers.
-- `/rail model judge current|provider/model-id`: set the judge model directly and save it globally. Bare `/rail model judge` (or `judge status`) prints the configured and resolved judge model. Neither `off` nor `auto` is accepted: the judge cannot be disabled, and `auto` is the namer's cheap-model list.
-- `/rail model status`: print reviewer status, both resolved models, and available models.
+- `/rail model`: the reviewer-model picker, laid out like pi's own model chooser (type to filter, `id [provider]` rows, ✓ on the active choice) with one tab per reviewer seat — **namer**, **judge**, **configurator** — switched with Tab / Shift+Tab. Each tab lists `auto` (with what it resolves to; not on the judge), `current` (the session model), `off` (namer only), then every model with configured auth. Enter sets the highlighted entry **for this session only** and keeps the picker open; a tab whose session value differs from the saved one is marked `*`. **Ctrl+S** writes every marked seat to the global config (`classifier.model`/`enabled`, `classifier.judgeModel`, `classifier.grantModel`), says what changed, and clears the marks. Esc closes, leaving the session values in force until pi restarts or a new session starts. Over RPC the picker degrades to select dialogs: seat, then model, with a "Save persistently" item in the seat list.
+- `/rail model auto|current|off|provider/model-id`: set the namer for this session. `auto` (the default) picks the best available known-good model, preferring subscription providers; `off` turns review off for the session, and picking any model turns it back on.
+- `/rail model judge current|provider/model-id`: set the judge for this session. Bare `/rail model judge` (or `judge status`) prints its setting and what it resolves to. Neither `off` nor `auto` is accepted: the judge cannot be disabled, and `auto` is the namer's cheap-model list.
+- `/rail model configurator auto|current|provider/model-id`: set the [configurator](#the-configurator) for this session; its `auto` is its own eval-derived list.
+- `/rail model save`: write this session's reviewer models to the global config — the text form of Ctrl+S.
+- `/rail model status`: print every seat's setting (unsaved session values marked), what it resolves to, and the available models.
 - `/rail smoke`: run the command-containment and namer smoke tests.
 - `/rail critique [provider/model-id]`: critique the capability class definitions, the disposition table, and the content screen with Pi's current model or a specific one.
 
@@ -102,7 +104,9 @@ Rail: seatbelt, 26 domains, auto (openai-codex/gpt-5.4-mini) R2(+1) C4 D1 ↑12k
 `R` = deterministic decisions (no model consulted), `C` = model reviews (namer
 and/or judge), `D` = denials, `(+n)` = added since your last message, `↑`/`↓` =
 reviewer input/output tokens this session. The counters turn yellow when there are denials, blocks, or
-errors.
+errors. The model shown is the namer's effective (session) setting; a trailing
+`*` on it means some reviewer seat has a session value `/rail model save` has
+not written yet.
 
 The top-level `statusLine` config field controls when the statusline is shown
 (also settable from the `/rail` panel, which saves it globally):
@@ -122,7 +126,7 @@ Policy is folded from layers, each one applied over everything before it:
 4. The session layer: named session grants, then this session's `/rail policy`
    and `/rail set` edits.
 
-`/rail model` persists reviewer-model choices by updating the global extension config at `~/.pi/agent/extensions/rail.json`. It does not write extension-specific fields into Pi's main `settings.json`. A trusted project config can still override the global settings, including individual `dispositions` rows.
+`/rail model save` (Ctrl+S in the picker) persists reviewer-model choices by updating the global extension config at `~/.pi/agent/extensions/rail.json`; until then a `/rail model` choice holds for the session only. It does not write extension-specific fields into Pi's main `settings.json`. A trusted project config can still override the global settings, including individual `dispositions` rows.
 
 Only `rail.json` is read. A `guard.json` left over from before the pi-guard →
 pi-rail rename is ignored without comment; rename it (and convert any
@@ -954,13 +958,13 @@ current model. Set `"model"` to `"current"` or an explicit `provider/model-id`
 to opt out of auto selection. `"judgeModel"` uses the same grammar and defaults
 to `"current"`: the judge runs rarely and on the consequential tail, so it
 should be the strong model you are already talking to, not the cheap namer.
-`/rail model` (judge tab) and `/rail model judge …` write this key, and set a
-session override that wins over it until Pi restarts. `"grantModel"` picks the
+`/rail model` (judge tab) and `/rail model judge …` set a session value that
+wins over it until pi restarts; `/rail model save` writes it. `"grantModel"` picks the
 [configurator](#the-configurator)'s model, same grammar, default `"auto"`;
 its auto list is its own (`AUTO_GRANT_MODEL_PREFERENCES`, filled only from
-`eval/GRANT_RESULTS.md` — currently Anthropic's `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-sonnet-5`, in that order), and when no
-listed model has auth `"auto"` means the session's current model. It is config-only: `/rail model` has no configurator
-seat.
+`eval/GRANT_RESULTS.md` — currently Anthropic's `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-sonnet-5`, in that order — Haiku first: no safety violations and the cheapest), and when no
+listed model has auth `"auto"` means the session's current model. The picker's configurator tab and
+`/rail model configurator …` set it for the session, like the other two seats.
 
 ## Filesystem policy
 
@@ -1017,13 +1021,81 @@ deny-all entry silently vetoes the allowlist itself. `deniedDomains` is for
 carving explicit exceptions out of an allowed wildcard — for example allowing
 `*.github.com` while denying `gist.github.com`.
 
+## Environment scrubbing
+
+Sandboxed commands (agent `bash`, and your `!` / `!!` commands) are spawned
+with a scrubbed copy of pi's environment. Two lists decide what is left:
+
+- `environment.unset` — patterns removed first, always. `*` matches any run of
+  characters except `/`, and matching is case-sensitive.
+- `environment.allow` — empty by default, which is **blacklist mode**: every
+  variable not unset passes. A non-empty list is **whitelist mode**: only
+  names matching one of its patterns pass (unset still wins over allow).
+
+Blacklist is the default because a whitelist breaks toolchains in ways no
+default list can anticipate — `JAVA_HOME`, `GOPATH`, `NVM_DIR`,
+`SSH_AUTH_SOCK`, `PYENV_ROOT`, private-CA bundles (`SSL_CERT_FILE`,
+`NODE_EXTRA_CA_CERTS`, …) and whatever else your shell exports — while the
+secrets worth stripping mostly follow naming conventions. The default unset
+list:
+
+- AWS credentials by name: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_WEB_IDENTITY_TOKEN_FILE`
+  (named rather than `AWS_*`, which would also strip `AWS_PROFILE`,
+  `AWS_REGION`, `AWS_CA_BUNDLE`).
+- Common tokens and provider keys by name: `GITHUB_TOKEN`, `GH_TOKEN`,
+  `NPM_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+- Naming conventions: `*_TOKEN`, `*_SECRET`, `*_KEY`, `*_API_KEY`,
+  `*_PASSWORD`, `*_PASSWD`.
+- Secrets with no suffix to match: `PGPASSWORD`, `MYSQL_PWD`,
+  `npm_config__auth*`, `NPM_CONFIG__AUTH*`.
+- `PI_RAIL_APPROVAL_MAILBOX` — the [approval mailbox](#forwarded-asks-the-approval-mailbox)
+  channel token. Subagent children get it from the pi process's own
+  environment, never through bash; a sandboxed command holding it could forge
+  an approval.
+- `RIPGREP_CONFIG_PATH` — rg reads extra flags from that file, and a
+  `--pre <program>` there would get past the built-in rg flags allowlist.
+
+The suffix globs occasionally take a harmless variable (starship's
+`STARSHIP_SESSION_KEY`, for instance). Drop an entry with
+`{"remove": [...]}` if one bites; add your own secrets' names with a plain
+array:
+
+```json
+{ "environment": { "unset": ["MY_SERVICE_CREDENTIAL"] } }
+```
+
+**Whitelist mode with append-only lists.** Lists [only append](#lists-only-append),
+and the default allow list is empty, so a config that writes
+`"environment": { "allow": ["FOO"] }` does not add FOO to anything: it switches
+to whitelist mode with FOO as the *only* variable passed. `PATH`, `HOME`,
+`TERM`, `LANG`/`LC_*`, `TMPDIR` and every toolchain variable your commands need
+then have to be listed too, for example:
+
+```json
+{ "environment": { "allow": ["PATH", "HOME", "USER", "SHELL", "TERM", "TMPDIR", "LANG", "LC_*", "SSH_AUTH_SOCK", "JAVA_HOME", "GOPATH", "NVM_DIR"] } }
+```
+
+In the grant gates the first allow entry counts as a tightening and emptying
+the list again as a widening.
+
+What the scrub cannot see: the sandbox runtime adds its own variables after
+the scrub — the network proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, `NO_PROXY` and their lowercase forms, `GIT_SSH_COMMAND`) when the
+network layer is on, `TMPDIR` pointing into its writable temp dir, and
+`SANDBOX_RUNTIME=1` — and those are not subject to either list. Scrubbing is
+by name, so a secret stored under an innocuous name (a `DATABASE_URL` with a
+password in it) passes in blacklist mode. And it covers sandboxed commands
+only: Pi itself, its extensions, and processes they spawn outside the rail
+keep the full environment.
+
 ## What is protected
 
 - Agent `bash` tool calls are routed through Pi Rail.
 - User `!` and `!!` bash commands are routed through Pi Rail.
 - When filesystem restrictions are enabled, built-in `read`, `write`, and `edit` tool calls are checked by deterministic path policy because Seatbelt only contains subprocesses.
 - When filesystem restrictions are enabled, reads are allowed by default except for configured sensitive paths, and writes are limited to configured roots.
-- Environment variables are scrubbed before sandboxed commands are spawned: `environment.unset` patterns are removed first, then `environment.allow` (when non-empty) whitelists the rest. The default allow list passes CA-certificate variables (`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `AWS_CA_BUNDLE`, `JAVA_TOOL_OPTIONS`, and friends) so a private CA reaches sandboxed tooling; to make that work, the default unset list names explicit AWS credential variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, …) instead of a broad `AWS_*` glob, with the generic `*_TOKEN`/`*_SECRET`/`*_KEY` globs as the backstop for unknown secrets.
+- Environment variables are scrubbed before sandboxed commands are spawned: `environment.unset` patterns are removed first; by default everything else passes (blacklist mode), and a non-empty `environment.allow` switches to whitelist mode. See [Environment scrubbing](#environment-scrubbing).
 - Every intercepted `bash`, `read`, `write`, and `edit` call is named with capability classes after deterministic policy checks and before execution; the disposition table then decides.
 - Trusted reads never reach a model: a `read` whose canonical path is inside the session working directory or matches an explicit `allowRead` entry — and does not match `denyRead` — is labelled deterministically (0 tokens, 0 latency; counted as "Exempt (no model consulted)" in the status report, together with allowlisted commands and screen-clean writes). The allow/deny lists are consulted for this routing even when `filesystem.enabled` is `false`, which only disables *blocking*. Reads under the user skills directory (`~/.pi/agent/skills`) and of pi's own docs are exempt the same way: invoking a skill *is* a read of its SKILL.md, so naming it would tax every skill invocation — only the read is exempt, and the actions a skill's instructions produce are still reviewed individually.
 - While a reviewer call is in flight, pi's streaming spinner reads `Classifying...` (namer) or `Judging...` (judge), so a rail wait is distinguishable from the agent model thinking.
@@ -1282,8 +1354,8 @@ Three seam modules own every run-mode branch; feature code never inspects
   over RPC. Callers gate on `ctx.hasUI` first because headless approval
   absence is a policy decision (block with an explanatory reason), not a
   presentation choice.
-- `src/tui/select-list.ts` — pickers (control panel, model selector,
-  statusline chooser): searchable list in the TUI, plain `select` dialog
+- `src/tui/select-list.ts` — pickers (control panel, the RPC side of the
+  model picker, statusline chooser): searchable list in the TUI, plain `select` dialog
   elsewhere; resolves `undefined` where no dialog capability exists, which
   callers already treat as cancel.
 
@@ -1300,6 +1372,14 @@ loop in `src/commands/dispositions.ts` — render it. The class vocabulary
 itself lives one level down in `src/capabilities.ts`: `capabilityRegistry()`
 folds built-ins, config classes, and session edits into the ordered list that
 both the table and the namer payload read.
+
+The reviewer-model picker is the same shape again: `src/reviewer-seats.ts`
+holds the three seats (effective vs saved value, set, save) with no UI,
+`src/model-selector.ts` builds each seat's rows, and `src/tui/model-page.ts`
+and the RPC select loop in `src/commands/model.ts` render them. The session
+values are `RuntimeState.classifier` fields, not session-policy ops: a model
+is not policy, so it is not in the session policy snapshot and a new session
+starts from the config.
 
 Transient signals (`notify`, `setStatus`) work in TUI and RPC and no-op
 headless. New UI belongs in one of these seams — extend them rather than

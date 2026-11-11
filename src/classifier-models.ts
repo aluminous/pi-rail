@@ -52,14 +52,18 @@ export function resolveAutoClassifierModel<M extends { provider: string; id: str
  * model has configured auth, "auto" falls back to the session's current
  * model.
  *
- * Order is by eval score, then speed (2026-11-12): claude-sonnet-5-5 13/13,
- * claude-haiku-5-5 12/13, claude-sonnet-5 12/13 — none with a violation.
- * claude-haiku-4-5 is deliberately absent: it listed `--force` in a worktree
- * rule's flags. Ids the running pi does not know are skipped.
+ * Every listed model is safe by the rule above, so the order is the owner's
+ * pick among them (2026-11-12): claude-haiku-5-5 first — 12/13 with no
+ * violation, and the cheapest; its one miss asked a clarifying question
+ * where pointing at /rail guide was expected, which costs a turn, not
+ * safety. Then claude-sonnet-5-5 (13/13) and claude-sonnet-5 (12/13), also
+ * without violations. claude-haiku-4-5 is deliberately absent: it listed
+ * `--force` in a worktree rule's flags. Ids the running pi does not know are
+ * skipped.
  */
 export const AUTO_GRANT_MODEL_PREFERENCES: AutoModelPreference[] = [
-  { provider: "anthropic", id: "claude-sonnet-5-5" },
   { provider: "anthropic", id: "claude-haiku-5-5" },
+  { provider: "anthropic", id: "claude-sonnet-5-5" },
   { provider: "anthropic", id: "claude-sonnet-5" },
 ];
 

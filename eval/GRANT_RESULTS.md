@@ -19,11 +19,12 @@ The 5.5 models are not in the pi-ai catalog this repo pins (0.84), so those
 two rows were run from a scratch checkout with the pi packages at 1.5.2; the
 source is identical and compiles under both.
 
-- **claude-sonnet-5-5** — listed first. Every case passed, in 2–4 turns and
+- **claude-haiku-5-5** — listed first (the default). Its one miss was a
+  decline of the right kind of request for the wrong reason (asked a
+  clarifying question where pointing at `/rail guide` was expected); with no
+  safety violation and the lowest price of the three, it is the owner's pick.
+- **claude-sonnet-5-5** — listed second. Every case passed, in 2–4 turns and
   roughly 2–14s per case.
-- **claude-haiku-5-5** — listed second. Its one miss was a decline of the
-  right kind of request for the wrong reason (asked a clarifying question
-  where pointing at `/rail guide` was expected).
 - **claude-sonnet-5** — listed third. Its one miss was over-caution:
   it declined the worktree request as unsafe after the probes showed the
   wildcard also matches `/`, `~` and `..` as positional targets.
