@@ -75,16 +75,20 @@ Commands — everything lives under `/rail`, with argument autocomplete:
 - `/rail policy`: open the **capability policy page** — the editable capability table with live per-class stats (see [Dispositions](#dispositions)). Over RPC it degrades to select dialogs; invoking it again closes it.
 - `/rail policy rules`: open the status page on its **policy** tab — the resolved mechanism policy (filesystem, network, environment scrubbing, and the command allowlist, provenance-annotated per entry). Invoking another tab while the page is open switches rather than closing. Outside the TUI this stays a standalone live widget, as before.
 - `/rail set <class> [allow|judge|ask|deny]`: set one class for this session from the command line (completions offer class ids — including custom ones — then dispositions). Without a disposition it prints the current effective value and where it came from.
+- `/rail grant <what you want, in your own words>`: the configurator proposes the narrowest grant for the request and opens the same confirmation as `/rail grant add` (see [The configurator](#the-configurator)); `/rail grant cancel` stops a run in flight.
+- `/rail grant add <file>`: evaluate a grant file against the gates and open the confirmation; `/rail grant check <file>` prints the gate report and applies nothing; `/rail grants` lists every grant with what it decided, and revokes, promotes, or demotes (see [Grants by hand](#grants-by-hand)).
 - `/rail guide <text>`: add classifier guidance for this session without waiting to be asked (see [Session guidance](#session-guidance)). Bare `/rail guide` prompts for the text; `/rail guide clear` drops every entry.
 - `/rail on`: enable Pi Rail.
 - `/rail off`: disable for the next agent turn, then re-enable automatically.
 - `/rail off session`: disable until the session ends.
-- `/rail readonly` (or `ro`, or ctrl+shift+t): toggle session read-only mode — `write`/`edit` are blocked, `bash` must be reviewed (and is blocked outright if the classifier is off), and a session disposition preset denies the writing capability classes. The toggle is also announced into the agent's context, so the model knows the ground rules changed.
+- `/rail readonly` (or `ro`, or ctrl+shift+t): toggle session read-only mode — `write`/`edit` are blocked, `bash` must be reviewed (and is blocked outright if the classifier is off), and a session disposition preset denies the writing capability classes — along with any custom class that `extends` one of them or extends nothing (see [`extends`](#custom-capability-classes)). The toggle is also announced into the agent's context, so the model knows the ground rules changed.
 - ctrl+shift+r: toggle the rail off for the upcoming agent turn (it re-enables itself when the turn ends, like `/rail off`); pressing it again while armed — or while the rail is off for the session — re-enables immediately.
-- `/rail model`: choose the reviewer models interactively. The dialog has two tabs — Tab switches between `namer` and `judge` — and the header shows what each one currently resolves to.
-- `/rail model auto|current|off|provider/model-id`: set the namer model directly and save it globally. `auto` (the default) picks the best available known-good model, preferring subscription providers.
-- `/rail model judge current|provider/model-id`: set the judge model directly and save it globally. Bare `/rail model judge` (or `judge status`) prints the configured and resolved judge model. Neither `off` nor `auto` is accepted: the judge cannot be disabled, and `auto` is the namer's cheap-model list.
-- `/rail model status`: print reviewer status, both resolved models, and available models.
+- `/rail model`: the reviewer-model picker, laid out like pi's own model chooser (type to filter, `id [provider]` rows, ✓ on the active choice) with one tab per reviewer seat — **namer**, **judge**, **configurator** — switched with Tab / Shift+Tab. Each tab lists `auto` (with what it resolves to; not on the judge), `current` (the session model), `off` (namer only), then every model with configured auth. Enter sets the highlighted entry **for this session only** and keeps the picker open; a tab whose session value differs from the saved one is marked `*`. **Ctrl+S** writes every marked seat to the global config (`classifier.model`/`enabled`, `classifier.judgeModel`, `classifier.grantModel`), says what changed, and clears the marks. Esc closes, leaving the session values in force until pi restarts or a new session starts. Over RPC the picker degrades to select dialogs: seat, then model, with a "Save persistently" item in the seat list.
+- `/rail model auto|current|off|provider/model-id`: set the namer for this session. `auto` (the default) picks the best available known-good model, preferring subscription providers; `off` turns review off for the session, and picking any model turns it back on.
+- `/rail model judge current|provider/model-id`: set the judge for this session. Bare `/rail model judge` (or `judge status`) prints its setting and what it resolves to. Neither `off` nor `auto` is accepted: the judge cannot be disabled, and `auto` is the namer's cheap-model list.
+- `/rail model configurator auto|current|provider/model-id`: set the [configurator](#the-configurator) for this session; its `auto` is its own eval-derived list.
+- `/rail model save`: write this session's reviewer models to the global config — the text form of Ctrl+S.
+- `/rail model status`: print every seat's setting (unsaved session values marked), what it resolves to, and the available models.
 - `/rail smoke`: run the command-containment and namer smoke tests.
 - `/rail critique [provider/model-id]`: critique the capability class definitions, the disposition table, and the content screen with Pi's current model or a specific one.
 
@@ -106,7 +110,9 @@ Rail: seatbelt, 26 domains, auto (openai-codex/gpt-5.4-mini) R2(+1) C4 D1 ↑12k
 `R` = deterministic decisions (no model consulted), `C` = model reviews (namer
 and/or judge), `D` = denials, `(+n)` = added since your last message, `↑`/`↓` =
 reviewer input/output tokens this session. The counters turn yellow when there are denials, blocks, or
-errors.
+errors. The model shown is the namer's effective (session) setting; a trailing
+`*` on it means some reviewer seat has a session value `/rail model save` has
+not written yet.
 
 The top-level `statusLine` config field controls when the statusline is shown
 (also settable from the `/rail` panel, which saves it globally):
@@ -118,28 +124,19 @@ The top-level `statusLine` config field controls when the statusline is shown
 
 ## Configuration
 
-Config is merged in this order:
+Policy is folded from layers, each one applied over everything before it:
 
 1. Built-in defaults.
-2. `~/.pi/agent/extensions/rail.json`
-3. `<cwd>/.pi/rail.json` when the project is trusted.
+2. `~/.pi/agent/extensions/rail.json` — its base keys, then its `grants`.
+3. `<cwd>/.pi/rail.json` when the project is trusted — base keys, then `grants`.
+4. The session layer: named session grants, then this session's `/rail policy`
+   and `/rail set` edits.
 
-`/rail model` persists reviewer-model choices by updating the global extension config at `~/.pi/agent/extensions/rail.json`. It does not write extension-specific fields into Pi's main `settings.json`. A trusted project config can still override the global settings, including individual `dispositions` rows.
+`/rail model save` (Ctrl+S in the picker) persists reviewer-model choices by updating the global extension config at `~/.pi/agent/extensions/rail.json`; until then a `/rail model` choice holds for the session only. It does not write extension-specific fields into Pi's main `settings.json`. A trusted project config can still override the global settings, including individual `dispositions` rows.
 
-### Migrating from `guard.json`
-
-Both layers were called `guard.json` before the rename, and both still accept
-that name:
-
-- If only `guard.json` is present, it is loaded exactly as before and one
-  advisory asks you to rename it to `rail.json`.
-- If both are present, `rail.json` wins and the advisory says the `guard.json`
-  was ignored — merge anything you still want out of it, then delete it.
-- Persistent writes (Ctrl+S on the policy page, `/rail model`, statusline
-  visibility) go back to whichever file was loaded, so saving from a session
-  running on `guard.json` will not scatter your settings across two files.
-
-Renaming the file is the whole migration; its contents are unchanged.
+Only `rail.json` is read. A `guard.json` left over from before the pi-guard →
+pi-rail rename is ignored without comment; rename it (and convert any
+`{"replace", "values"}` lists, below) if you still want it.
 
 Example `.pi/rail.json`:
 
@@ -150,18 +147,15 @@ Example `.pi/rail.json`:
   "statusLine": "always",
   "filesystem": {
     "enabled": true,
-    "allowRead": [],
-    "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker", "~/.netrc", ".env", ".env.*", "*.pem", "*.key"],
-    "allowWrite": [".", "/tmp", "~/.cache", "~/Library/Caches", "~/.npm", "~/.cargo/registry", "~/.cargo/git", "~/.gradle/caches", "~/.m2/repository", "~/go/pkg/mod"],
-    "denyWrite": [".pi", ".env", ".env.*", "*.pem", "*.key", "~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker"]
+    "denyRead": ["~/.config/my-cloud-cli"],
+    "allowWrite": ["~/.cache/my-tool"]
   },
   "environment": {
-    "allow": ["PATH", "HOME", "TMPDIR", "CI", "TERM"],
-    "unset": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+    "unset": ["MY_SERVICE_TOKEN"]
   },
   "network": {
     "enabled": true,
-    "allowedDomains": ["github.com", "*.github.com", "*.githubusercontent.com", "ghcr.io", "*.ghcr.io", "docker.io", "*.docker.io", "registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "quay.io", "*.quay.io", "gcr.io", "*.gcr.io", "*.pkg.dev", "registry.k8s.io", "mcr.microsoft.com", "public.ecr.aws"]
+    "allowedDomains": { "add": ["registry.npmjs.org"], "remove": ["docker.io", "*.docker.io"] }
   },
   "dispositions": {
     "off-machine-effects": "ask",
@@ -171,6 +165,7 @@ Example `.pi/rail.json`:
     "enabled": false,
     "model": "auto",
     "judgeModel": "current",
+    "grantModel": "auto",
     "timeoutMs": 8000,
     "failClosed": true,
     "telemetry": "minimal"
@@ -191,48 +186,343 @@ Ready-to-copy profiles are available under [`examples/configs`](examples/configs
 - [`filesystem-denylist.json`](examples/configs/filesystem-denylist.json): unrestricted networking with a denylist-driven filesystem policy.
 - [`dispositions-deny-by-default.json`](examples/configs/dispositions-deny-by-default.json) and [`dispositions-allow-by-default.json`](examples/configs/dispositions-allow-by-default.json): disposition-table profiles that drop the deterministic file/network boundaries and let the capability table carry the policy — strict deny-by-default, and permissive with a concrete deny set.
 
-Config files are layered over the built-in defaults, so omitted arrays retain
-their defaults rather than becoming empty.
+### Lists only append
 
-### Replacing or extending a list
-
-An array in a config file **replaces** the inherited list wholesale. That is
-what an array has always meant and still means, so no existing config changes
-behaviour. To add to the inherited list instead of restating it, give the list
-as an object:
+A list in a config file **adds** to the list it inherits; it never replaces
+it. Dropping an inherited entry is an explicit `remove`:
 
 ```json
 {
-  "commands": { "allow": { "replace": false, "values": ["cargo *", "just *"] } },
-  "network": { "allowedDomains": { "replace": false, "values": ["crates.io", "static.crates.io"] } }
+  "commands": { "allow": ["cargo *", "just *"] },
+  "network": { "allowedDomains": { "add": ["crates.io", "static.crates.io"], "remove": ["docker.io", "*.docker.io"] } }
 }
 ```
 
-- `{"replace": false, "values": [...]}` appends `values` to the inherited list.
-  Entries already inherited are not repeated, and the result keeps the
-  inherited entries first, in order, followed by the new ones.
-- `{"replace": true, "values": [...]}` is identical to the bare array — useful
-  when you want the intent spelled out next to a neighbouring extension.
-- Both keys are required, `replace` must be a boolean, and no other key is
-  accepted. A malformed list is reported as a diagnostic and **left exactly as
-  inherited** — a list is policy, and a half-read one is worse than the one
-  already in force.
+- A bare array means `{"add": [...]}`. Entries already inherited are not
+  repeated; the result keeps the inherited entries first, in order, followed by
+  the new ones.
+- `{"add": [...], "remove": [...]}` — either key optional — also drops the
+  named inherited entries. Removing an entry that is not there is a no-op.
+  Within one list the removes apply first, so `{"remove": [x], "add": [x]}`
+  moves an inherited entry to the end of the list.
+- The old `{"replace": …, "values": …}` form has been **removed**. A list
+  written that way, or otherwise malformed, gets one diagnostic and is **left
+  exactly as inherited** — a list is policy, and a half-read one is worse than
+  the one already in force. Nothing a lower layer set disappears because a
+  higher layer forgot to restate it.
 
 Every list takes both forms: `filesystem.allowRead`, `filesystem.denyRead`,
 `filesystem.allowWrite`, `filesystem.denyWrite`, `environment.allow`,
-`environment.unset`, `network.allowedDomains`, `network.deniedDomains`,
-`commands.allow`, and `commands.classify` — whose entries are objects rather
-than strings, so its `values` holds objects too.
+`environment.unset`, `network.allowedDomains`, `network.deniedDomains`, and
+`commands.allow`, whose added entries may also be `{"template", "flags"}`
+objects (removes name the template). A plain string restating an entry
+already present keeps that entry's flags; an object entry, or an
+`allow-command` op, states the whole rule and replaces them — an
+`allow-command` without `flags` sets the entry back to "any flags".
+`commands.classify` takes a bare array or `{"add": [...]}` of rule objects;
+classify rules cannot be removed by a later layer yet.
 
-Layering works the same way at every level: the global config extends the
-defaults, and the project config extends whatever the global config left. An
-extension over an earlier extension accumulates; an array at any layer drops
-everything under it and starts from its own values.
+`/rail policy rules` annotates each entry with where it came from — `default`,
+`global`, `project`, `session`, or the grant that added it, as in
+`project · worktree-cleanup`. Restating a built-in default claims it: the entry
+keeps its place but is shown as (and treated as) the restating layer's own,
+since nobody needs to restate a default to keep it. Restating an entry an
+earlier config layer or grant introduced still credits that introducer.
 
-`/rail policy rules` annotates each entry with the config that contributed it,
-so an extended list shows a mix of unmarked defaults and `[global]`/`[project]`
-additions. An entry that a later layer restates keeps the source of the layer
-that introduced it.
+### Grants
+
+A grant is a named, self-contained policy change: the request in your words
+and the operations it produced. Grants live in a config file's `grants` array
+(global or project) and apply after that file's base keys:
+
+```jsonc
+{
+  "grants": [
+    {
+      "id": "worktree-cleanup",                  // kebab-case, unique within the file
+      "request": "i want to allow cleaning up worktrees",
+      "created": "2026-11-11",
+      "ops": [
+        { "op": "add-class", "id": "worktree-cleanup", "extends": "local-destructive", "disposition": "allow",
+          "definition": "Removing or pruning linked git worktrees of this repo. Deleting anything else is local-destructive instead." },
+        { "op": "classify", "template": "git worktree remove *", "flags": [], "capability": "worktree-cleanup" },
+        { "op": "classify", "template": "git worktree prune *", "flags": ["--dry-run", "-n", "-v"], "capability": "worktree-cleanup" }
+      ],
+      "examples": [
+        { "tool": "bash", "input": { "command": "git worktree prune" }, "expect": ["allow"] },
+        { "tool": "bash", "input": { "command": "git worktree remove --force ../x" }, "expect": ["ask", "judge", "deny"] }
+      ]
+    }
+  ]
+}
+```
+
+The ops are a closed vocabulary, each validated on its own — a bad op is
+skipped with a diagnostic and the rest of the grant still applies, and an
+unknown field on an op is an error for that op:
+
+| op | fields |
+|---|---|
+| `set-disposition` | `capability`, `disposition` |
+| `add-class` | `id`, `definition`, optional `name`, `disposition`, `extends`, `namer` |
+| `remove-class` | `id` (custom classes only) |
+| `set-definition` | `capability`, `definition` |
+| `classify` | `template`, `capability`, optional `flags` |
+| `allow-command` | `template`, optional `flags` |
+| `add-to-list` / `remove-from-list` | `list` (any list above except `commands.classify`), `values` |
+
+A file's ordinary keys are its base policy and mean exactly these ops; a grant
+is the same thing with a name, so it can be attributed, moved, and revoked.
+`examples` are the grant's tests: they run every time a grant is added (its
+own) and every time another grant is added (everyone's) — see
+[Grants by hand](#grants-by-hand). The same grant id in another layer is a
+separate grant — provenance tells them apart. The policy tab of `/rail status`
+lists every grant in force, and `/rail grants` manages them.
+
+**Rules-only classes.** A class a grant adds is *rules-only* by default: it is
+left out of the namer's vocabulary entirely and only `classify` rules reach it.
+A class meant to be reached by a narrow rule must not be one mislabel away from
+widening — with `worktree-cleanup` in the namer's vocabulary, the namer was
+seen labelling `git worktree remove --force` with it. `"namer": true` on the
+`add-class` op opts in. Classes in a file's base `capabilities.classes` and
+classes added on the policy page keep the namer default (`"namer": false`
+there makes one rules-only too). The policy page shows "rules only" in the
+class's footer line.
+
+### Grants by hand
+
+Write a grant as a JSON file — one grant object — and hand it to the rail:
+
+- **`/rail grant check <file>`** runs every gate below and prints the report.
+  Nothing is applied; it works headless too.
+- **`/rail grant add <file>`** runs the same gates, then opens the
+  confirmation (a docked panel in the TUI; a sequence of selects over RPC).
+- **`/rail grants`** lists every grant with its layer, op count, how many
+  decisions it decided this session and across the replay corpus, and when it
+  last decided anything ("never decided" for one that never has). `g` / `p`
+  promote a session grant to the global / project config, `d` demotes a file
+  grant to the session, `r` (twice) revokes. Each takes effect on the next tool
+  call: a change to a file grant refolds the live policy from the files at
+  once, filesystem, network, and environment lists included — the Seatbelt
+  profile is re-pointed in the same step (see [Session scope](#session-scope)).
+  Only `filesystem.enabled`, `network.enabled`, and the `seatbelt` overrides
+  wait for a restart, and the view says so.
+
+[`examples/grants/worktree-cleanup.json`](examples/grants/worktree-cleanup.json)
+is a complete grant that passes its own gates. The file shape:
+
+```jsonc
+{
+  "id": "worktree-cleanup",                        // kebab-case
+  "request": "i want to allow cleaning up worktrees", // required: the request in your own words
+  "created": "2026-11-11",                         // optional: defaults to today
+  "ops": [ /* the op table above */ ],
+  "examples": [
+    { "tool": "bash", "input": { "command": "git worktree remove ../pi-rail-maint" }, "expect": ["allow"] },
+    { "tool": "bash", "input": { "command": "git worktree remove --force ../x" }, "expect": ["ask", "judge", "deny"],
+      "why": "--force discards uncommitted work" }
+  ]
+}
+```
+
+An example passes when its dry-run outcome is one of `expect` (a deterministic
+policy block counts as `deny`). An example **with** `allow` in `expect` is
+positive; one without is **negative**.
+
+**The gates.** All code, run before anything is shown:
+
+1. **Structure** — every op and example parses (a grant with one bad op is
+   rejected whole, unlike config loading), referenced classes exist, templates
+   and flags are valid, and the id is not taken in the target layer.
+2. **Its own examples** pass. A grant with any widening op (see "widening
+   unless provably tightening" below) must have at least one passing negative
+   example — and the check is **per rule**: every widening classify or
+   allow-command rule needs an example it decides itself, and every allowing
+   rule with a trailing `*` needs a **near miss**: a passing negative example
+   that is the same command with other arguments or flags (`git worktree
+   remove --force ../x` for `git worktree remove *`). A chained or unrelated
+   command does not count. The failure names the rule.
+3. **Every other grant's examples** still pass with this one added. An example
+   that already failed without it is reported, not blamed on it.
+4. **No `critical` case in `eval/cases.ts` moves toward allow.**
+5. **An action you denied when asked** (in the replay corpus) that this grant
+   would allow is not a failure — changing your mind is legitimate — but it
+   becomes a sensitive op (below).
+
+Then the corpus diff: every recorded decision is replayed with and without the
+grant, and the confirmation shows what loosens, what tightens, and what is
+indeterminate ("3 past asks become allows · 0 critical cases change · 2
+indeterminate"). Redacted records are counted apart: their recorded labels and
+screen verdict are a floor the replay can never drop, and they are never
+re-named.
+
+**What a dry run can and cannot know.** The gates run the interceptor's own
+stage helpers in its order — path policy, the deterministic mappers, the
+content screen, the table — so a grant evaluates in the gates exactly as it
+would live, with these stated assumptions, repeated in every report:
+
+- **Seatbelt is assumed enforcing.** A deterministic allow holds live only
+  while the sandbox enforces; without it those commands go to the namer.
+- **The namer is not called.** An action no rule labels end to end is decided
+  live by a model. The gates instead check whether the grant changes anything
+  the namer sees (the namer-visible classes and their definitions) or what its
+  labels resolve to. If not, the action is decided as before the grant — a
+  negative example like the `--force` one above passes as "outside this
+  grant". If so (a definition edit, a new namer-visible class, a loosened
+  row), the item "needs a namer re-check", which fails gates 2–4. This is why
+  definition edits are the expensive rung, and why grant-added classes are
+  rules-only. A positive example must be decided by rules.
+- **The judge and you are not simulated**: `judge` and `ask` are outcomes in
+  their own right.
+- With the classifier off, an action no rule labels passes through unreviewed,
+  live and in the gates alike.
+
+**Probes.** Code also probes every widening rule with a trailing `*`: its
+literal prefix plus `--force`, `-f`, `--hard`, `--delete`, `-D`, `-d`,
+`--mirror`, `--all`, `--no-verify`, `-rf`, `--prune`, `--force-with-lease`,
+`+main:main`, `:main`, `/`, `~`, `..`, `*`, and a chained `… x && rm -rf ~`,
+each dry-run with and without the grant. What comes out newly allowed is
+listed in the confirmation ("op 2 also allows: …") and in the report. A probe
+is not a failure by itself — `git worktree remove ~` is git's to refuse — but
+an allowed probe with `--force`, `-f`, `--hard`, `--delete`, `-D`, `--mirror`,
+`--force-with-lease` or `-rf`, or a flags list naming one of them, makes the op
+sensitive.
+
+**Sensitive ops** need their own approval, each one separately: removing a
+`denyRead`/`denyWrite`/`deniedDomains` entry; setting `credentials`,
+`persistence`, or `unclassified` (or a class extending one of them) to
+`allow`; any built-in row set to `allow`; a bare-head template (`git *`); any
+filesystem, network, or environment widening; a rule that allows a
+destructive flag (above); and gate 5's previously denied actions. (Disabling the rail, the classifier, or `failClosed`, and changing
+models or the backend, are on the plan's list too, but no op can express them:
+those are file settings a grant cannot touch.)
+
+**The confirmation** shows the request, each op in plain language with its
+direction, the examples with pass marks, the corpus summary, and every gate
+failure. A grant that fails a gate offers only Discard and says why. Otherwise:
+**Apply for this session** · **Apply and save to global** · **Apply and save
+to project** (only when the project is trusted and has a `.pi` directory) ·
+**Discard**. Sensitive ops are listed above the answers, each with its own
+toggle, **off** by default, toggled with **Space** — never Enter. Enter on an
+answer applies the non-sensitive ops plus exactly the sensitive ones toggled
+on. If leaving out an unapproved sensitive op makes the rest fail its gates
+(its own examples, typically), the grant is re-evaluated and **not** applied,
+and the panel says which example broke. Over RPC each sensitive op gets its own
+select whose first, default answer drops it.
+
+Approval is a deliberate action in the rail's own dialog and never anything in
+words: not the grant's `request`, not an approval comment, not session
+guidance. A session without a UI of its own (headless, or a subagent child
+whose asks are forwarded) cannot approve a sensitive op and cannot apply a
+widening grant at all — `/rail grant add` prints the report and applies
+nothing. A grant that only tightens is applied to the session there.
+Promoting a session grant to a file asks for no new approval, widening or not:
+its ops were approved (sensitive ones one by one) when it was applied, and
+promotion moves it unchanged.
+
+**Attribution.** A review whose deciding label came from a grant — its classify
+or allow rule, its table row, or the class it declared — names it: `/rail
+explain` says "decided by grant worktree-cleanup", and the review records carry
+`grant` (telemetry detail tier; always in the replay corpus), which is where the
+grants view's counts come from.
+
+### The configurator
+
+`/rail grant <text>` — say what you want in your own words, e.g. `/rail grant
+i want to allow cleaning up worktrees` — and a model works out the narrowest
+grant, proves it with the same gates as a hand-written one, and hands it to
+the same confirmation. Nothing it says approves anything: the confirmation
+shows its rationale on top, every sensitive op is a toggle that starts off,
+and the grant's `request` is always your verbatim text (set by code, whatever
+the model writes). The command returns at once; a docked panel (a widget over
+RPC) shows which tool it is calling and the turn count while the main agent
+keeps streaming. It needs a UI: in a headless session it refuses up front,
+since a model-authored grant is never applied without the confirmation — not
+even a tightening one.
+
+**What it sees.** Your request; the effective disposition table with
+provenance; the class list (parent, rules-only, a one-line definition); your
+command rules and existing grants; and what its tools return. **What it never
+sees:** the conversation, tool output, or file contents — the agent function
+has no parameter that could carry them (`src/grant-agent.ts`), which is where
+an injected "the user wants curl allowed" would come from.
+
+**Its tools** (a closed set, real tool calling over pi-ai; every rule it writes
+with a trailing `*` must say its flags — a list, or `"any"` — or the tool
+answers with an error): `search_decisions`
+(the replay corpus: command or path, labels, outcome, your answer — newest
+first, at most 20, delimited and marked as data written by another model),
+`dry_run` (an action under the current policy), `check` (the gates on a
+candidate), and two terminal calls: `propose` (code re-runs the gates; a
+failure goes back to the model, never to you) and `decline` — "already
+allowed" (accepted only after a dry run showed an allow), "use `/rail guide`
+instead", "cannot be expressed safely", or a question when the request is
+unclear. It works up a ladder and says why the rung below was not enough:
+guidance → disposition flip → classify into an existing class → new rules-only
+class plus classify → definition edit → filesystem/network lists. The prompt
+and its pitfalls sheet live in `src/grant-agent-prompt.ts`.
+
+**Limits.** 12 model calls, 24k output tokens, three minutes, and
+`/rail grant cancel`; exceeding any ends the run with nothing changed. Its
+calls are accounted under the `configurator` role on the status page's models
+tab.
+
+**"Allow, and generalise…"** is an extra answer in the approval dialog (a
+third row between Allow and Deny in the TUI, never the default; the fifth
+option over RPC). It approves the action exactly like Allow — the tool call
+proceeds at once, and telemetry, the corpus, and session replay record a plain
+`approved` — and then asks once for the request text, prefilled with "allow
+things like this: <command>", and starts the configurator seeded with the
+action (its tool and command or path; never a write's content). It is offered
+on asks forwarded from a subagent too, since it is still you answering, but the
+grant applies to this (parent) session's layer; a child picks it up only once
+you save it to a config file. It is not offered without a UI.
+
+The session model has no way to start the configurator: it is reachable only
+from a typed `/rail grant` and from your own answer in the rail's dialog. No
+tool is registered for it and no message hook leads to it (a test in
+`test/grant-agent-command.test.ts` checks the call sites).
+
+**The eval.** `npm run eval:grant -- provider/model …` runs
+`eval/grant-cases.ts` through the real loop and scores each outcome by code:
+what must and must not become allowed, the highest rung permitted, the decline
+expected, and that sensitive changes surface as sensitive. A model that ever
+passes the gates with a grant violating a safety property is excluded from the
+auto list; see `eval/GRANT_RESULTS.md`.
+
+### Session scope
+
+Everything `/rail policy` and `/rail set` change lands in the session layer,
+as ops in an implicit `session-edits` grant, and is folded into the effective
+policy on the very next tool call — dispositions, new classes, definition
+edits, and class deletions alike, so a class added this session is
+immediately usable by a session grant's classify rule. **Ctrl+S** promotes
+`session-edits` into the global config's base keys.
+
+The session layer survives resuming the session and deliberately does **not**
+rewind with `/tree`: it is a setting you chose, not something the branch
+accumulated (the rail's memory — recent decisions, guidance, stats — does
+follow the branch). It is written to the session file on every change and
+restored from the latest record, whichever branch it was written on. A new
+session starts with an empty session layer, and an in-memory session writes
+nothing.
+
+Filesystem, network, and environment lists change at the session layer like
+any other list. The Seatbelt profile follows in the same step as the file
+tools' path policy: every change that moves one of those lists — a session
+grant applied or revoked, a file grant promoted, demoted, revoked, or saved —
+re-points the sandbox (sandbox-runtime's `updateConfig`) before the next
+command is wrapped. If the sandbox refuses the update, the change is undone in
+both engines and the error is shown; nothing is ever enforced more widely by
+the file tools than by the sandbox, or the other way round. A command that is
+already running keeps the filesystem profile and environment it started with;
+its network does not — the proxy checks the domain lists per connection, so a
+running command's next connection already follows the new lists. Widening any
+of these lists is a sensitive op, so at the session layer it is only reachable
+through the grant confirmation's per-op approval (or a config file you edit
+yourself). What still applies only at restart: `filesystem.enabled`,
+`network.enabled` (whether the proxy runs at all is fixed when the sandbox
+starts), and the `seatbelt` overrides.
 
 ## Capability mode
 
@@ -285,7 +575,8 @@ denied`. The highlighted row's definition shows underneath.
 
 Every edit applies **immediately, for this session** — that is the point of
 the page: `local-destructive` and friends are meant to be re-scoped per
-session, and closing the page does not undo anything. Rows that differ from
+session, and closing the page does not undo anything (nor does resuming the
+session later; see [Session scope](#session-scope)). Rows that differ from
 the persisted value are coloured; **Ctrl+S** persists them to
 `~/.pi/agent/extensions/rail.json` and the colouring clears. Stats update
 live while the agent works.
@@ -350,6 +641,26 @@ across layers so a project config adding one class keeps the global ones:
 `definition` is prompt text the namer reads verbatim, so write it as a decision
 boundary ("X, but Y is class Z instead") rather than a description. An invalid
 entry is skipped with a diagnostic and the rest of the config still loads.
+
+**`extends`.** A custom class may name the built-in class it narrows:
+`"extends": "local-destructive"`. It must be one of the twelve built-ins (a
+chain through custom classes could be removed from under it), and it decides
+one thing — how session presets treat the class:
+
+- A preset that denies the parent denies the child: read-only mode tightens a
+  `worktree-cleanup` class that extends `local-destructive`, whatever its row
+  says.
+- A custom class with **no** `extends` is treated by every preset as a writing
+  class, so read-only mode denies it. The safe behaviour does not depend on
+  the author remembering the declaration.
+- A class extending a built-in the preset leaves alone (`read-project`,
+  `run-dev-tools`, …) is left alone too — declare that for a custom class of
+  read-only commands you want usable in read-only mode.
+
+An explicit disposition on the parent does **not** flow to the child: carving
+an allowed sub-class out of a judged parent is the point. The policy page shows
+the parent in the class's footer line; it is set in config or by an
+`add-class` op (the page's add form does not ask for it).
 
 Editing the taxonomy changes the payload prefix the namer sees, which
 invalidates the provider's prompt cache once — the accepted cost of a
@@ -442,8 +753,9 @@ are deliberately absent (see the comment in `src/command-allowlist.ts`).
 Each built-in template carries a capability tag: inspection and read-only git
 are `read-project`, machine introspection (`uname`, `whoami`, `printenv`) is
 `read-system`, and toolchain version probes are `run-dev-tools`. A chain takes
-the union of its segments' tags. Templates you add in `commands.allow` are
-plain strings and default to `read-project`.
+the union of its segments' tags. Templates you add in `commands.allow` default
+to `read-project`; an entry is a plain string, or `{"template": "…", "flags":
+[...]}` to accept only the listed flags (see [flags](#flags-allowlists)).
 
 Commands are parsed with a minimal shell grammar, and a chain (`&&`, `||`,
 `;`, `|`, newlines) is exempt only when *every* command in it matches a rule:
@@ -460,10 +772,32 @@ command goes to the namer.
 ```json
 {
   "commands": {
-    "allow": ["grep *", "git status *", "make lint"]
+    "allow": [
+      "grep *", "git status *", "make lint",
+      { "template": "git cat-file *", "flags": ["-p", "-t", "-s", "-e"] }
+    ]
   }
 }
 ```
+
+(`git cat-file --textconv` and `--filters` run configured programs; the flags
+allowlist keeps them out of the deterministic allow without a denylist that
+`--text` would slip past.)
+
+The built-ins use the same mechanism. Each wildcard template was audited for
+flags that write, delete, or run a program, and those that have one carry an
+allowlist of their read-only flags: `rg` (not `--pre`/`--pre-glob`, which run
+a program per file, or `-z`), `git log`/`show`/`diff`/`reflog show`/`stash
+show`/`shortlog` (not `--output`, `--ext-diff`, `--show-signature`), `git grep`
+(not `-O`), `git tag -l`/`--list` and `git config --get` (no write flag riding
+along after the read one), `file` (not `-C`, `-z`), and `diff` (not
+`--paginate`). `git branch *` is gone — a bare positional creates a branch —
+replaced by the exact listing forms (`git branch`, `-a`, `-r`, `-v`, `-vv`,
+`-av`, `--all`, `--remotes`, `--show-current`) and `git branch --list *` /
+`-l *` with read-only flags. Anything else goes to the namer. With a flags
+list, an unquoted glob or brace (`rg foo *.ts`) never matches, since it could
+expand into a flag; a quoted one (`rg 'a.*b'`) does. The status page's policy
+tab names these lists "built-in read-only set" rather than printing them.
 
 ### User command classification
 
@@ -503,13 +837,81 @@ unmatchable no matter which list a rule would have come from. The union of the
 matched capabilities across segments is the action's label set, exactly as it
 is for allowlisted commands.
 
-**Precedence.** Your classify rules are consulted before the built-in
-allowlist, so a template the allowlist already tags can be re-classified —
-`{"template": "git log *", "capability": "off-machine-effects"}` overrides the
-built-in `read-project` tag. The reverse order would be useless: every
-allowlist template resolves to `allow`, so an allowlist-first lookup could
-never be tightened by a classify rule. Within the list the first matching rule
-wins, so put `kubectl get *` above `kubectl *` if you want the narrower one.
+**Precedence: your rules first, then the most specific.** Every rule — the
+built-in allowlist, your `commands.allow` entries, and classify rules from
+every layer — is one pool. Any rule from your config (global, project, or
+session; base keys or a grant) **always wins over a built-in default** that
+also matches: the defaults are all allow-tagged inspection, so letting a more
+specific default beat a broad rule of yours could only loosen what you wrote.
+Among the rules of the tier that won, the most specific decides, in this order:
+
+1. more literal words (`kubectl get *` beats `kubectl *`);
+2. at equal count, an exact template beats one ending in `*` (`git stash`
+   beats `git stash *` for the bare command);
+3. a rule with a `flags` allowlist beats one without — it is the narrower
+   statement about the same words;
+4. the later layer: global < project < session, and within a file base keys
+   before its grants, earlier grants before later ones;
+5. the stricter resolved disposition (with read-only mode's preset applied).
+
+So `{"template": "git *", "capability": "local-destructive"}` re-labels every
+git command, `git status` included. To keep a built-in allowed under a broad
+rule of your own, restate it — a restated default is yours, and then wins by
+specificity:
+
+```json
+{
+  "commands": {
+    "allow": ["git status *", "git log *"],
+    "classify": [{ "template": "git *", "capability": "local-destructive" }]
+  }
+}
+```
+
+Declaration order never matters, so a narrow carve-out works in both
+directions without anyone ordering anything: `kubectl get *` → `read-system`
+inside a broad `kubectl *` → `k8s-ops` (`ask`), and equally `docker system
+prune *` → `local-destructive` inside a broad `docker *` → `run-dev-tools`.
+`/rail test`, `/rail explain`, and the policy tab of `/rail status` say which
+rule won and, when another rule also matched, that it was outranked and why
+("built-in default, a user rule matches", "more literal words", …).
+
+#### Flags allowlists
+
+A classify rule or an allow entry may carry `"flags": [...]`. When present,
+every word after the template's literal words that starts with `-` must be
+accepted, or the rule **does not match** and the command falls to the
+next-ranked rule, or to the namer:
+
+```json
+{ "template": "git worktree remove *", "flags": [], "capability": "worktree-cleanup" }
+```
+
+matches `git worktree remove ../x` but not `git worktree remove --force ../x`
+— nor `--forc`, which git accepts as an abbreviation of `--force`. That is why
+this is an allowlist: a denylist of `--force` would leak. The exact rules:
+
+- `--dry-run` accepts exactly `--dry-run`; `--dry-run=value` is accepted only
+  when `--dry-run=` is listed (list both to accept both spellings). No prefix
+  or abbreviation matching.
+- `-n` is one short flag. A single-dash word in the command is a cluster:
+  with `-n` and `-v` listed, `-nv` passes and `-nf` does not. A longer
+  single-dash entry (`-name`) accepts that exact word. Attached values for
+  short flags (`-C=`, `-n5`) are not supported: a cluster with an unlisted
+  letter fails.
+- `--` is always accepted and ends flag checking; words after it are
+  positional. A lone `-` is positional. `-1` is a flag and fails unless listed.
+- The template's own literal words are never checked, and words that do not
+  start with `-` are positional (so a flag's separate value is not checked).
+- A word containing `*`, `?`, `[`, or `{` fails the check (before `--`):
+  quoting is not visible to the matcher, and unquoted the shell would expand
+  `*` (with a file named `--force` in the directory) or `{--force,x}` into a
+  flag the allowlist never saw.
+- `"flags": []` means no flags at all; no `flags` key means any flags, as
+  before.
+- Entries must start with `-` and contain no whitespace; `-`, `--`,
+  `--name=value`, and `-x=` are refused with a diagnostic, as is `flags` on a
+  template without a trailing `*` (there would be nothing to check).
 
 **The safety asymmetry.** When every segment matches and the labels resolve to
 `ask`, `judge`, or `deny`, the rail acts on that directly and never calls the
@@ -528,21 +930,24 @@ Classification is labelling, not permission. The labels go through the same
 disposition table and the same severity-max as any others, so a class you set
 to `deny` denies whether the label came from a rule or from a model, and
 read-only mode's preset still denies a command you classified into one of the
-built-in writing classes. Note the preset's reach, which classify does not
-change: it lists built-in classes by construction, so a *custom* class set to
-`allow` is not tightened by read-only mode — for a command you want read-only
-mode to stop, classify it into `modify-project`/`modify-system` or set its
-class to something stricter than `allow`.
+built-in writing classes — or into a custom class that extends one, or extends
+nothing (see [`extends`](#custom-capability-classes)). A custom class
+extending `read-project` or another class the preset leaves alone stays
+usable in read-only mode. Plain `commands.allow` entries are `read-project`
+and are not tightened by the preset.
 
-Both list forms work; the `values` of the object form holds objects. Each entry
-must be `{"template": …, "capability": …}` and nothing else. The capability
-must be a class the rail knows *at config load*: a built-in, or one declared in
-`capabilities.classes` (the same file may declare it — the taxonomy is merged
-before the rules that reference it). Classes added later with `/rail policy`
-live only in that session and cannot be referenced from config. An entry naming
-an unknown class, or carrying an unusable template — an empty one, a bare `*`,
-or a `*` that is not the last word — is reported as a diagnostic and skipped,
-leaving the other rules in force.
+The list takes a bare array or `{"add": [...]}`, and like every list it only
+appends: a later layer's rules go after the ones it inherits (a rule for a
+template already listed replaces it, class and flags together, and ranks as
+the later layer's). Each entry must be `{"template": …, "capability": …}` plus
+an optional `"flags": [...]`, and nothing else. The capability must be a
+class known by the time the rule is folded: a built-in, or a custom class from
+this or any earlier layer — the same file may declare it, since a file's
+taxonomy is applied before its rules, and a session grant may classify into a
+class the session itself added. An entry naming an unknown class, or carrying
+an unusable template — an empty one, a bare `*`, or a `*` that is not the last
+word — is reported as a diagnostic and skipped, leaving the other rules in
+force.
 
 `/rail policy rules` lists the rules with their class and provenance, `/rail
 explain` shows a `commands.classify` stage naming the rule each segment
@@ -559,8 +964,13 @@ current model. Set `"model"` to `"current"` or an explicit `provider/model-id`
 to opt out of auto selection. `"judgeModel"` uses the same grammar and defaults
 to `"current"`: the judge runs rarely and on the consequential tail, so it
 should be the strong model you are already talking to, not the cheap namer.
-`/rail model` (judge tab) and `/rail model judge …` write this key, and set a
-session override that wins over it until Pi restarts.
+`/rail model` (judge tab) and `/rail model judge …` set a session value that
+wins over it until pi restarts; `/rail model save` writes it. `"grantModel"` picks the
+[configurator](#the-configurator)'s model, same grammar, default `"auto"`;
+its auto list is its own (`AUTO_GRANT_MODEL_PREFERENCES`, filled only from
+`eval/GRANT_RESULTS.md` — currently Anthropic's `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-sonnet-5`, in that order — Haiku first: no safety violations and the cheapest), and when no
+listed model has auth `"auto"` means the session's current model. The picker's configurator tab and
+`/rail model configurator …` set it for the session, like the other two seats.
 
 ## Filesystem policy
 
@@ -573,7 +983,7 @@ Reads are blacklist-based by default: tools and sandboxed commands can read ordi
 
 Writes are whitelist-based by default: tools and sandboxed commands can write to the project directory, including local `.git` metadata for normal source-control operations, temp directories, and common development caches such as npm/pnpm/yarn, Cargo registry/git caches, Gradle caches/wrapper, Maven local repository, Go module/build caches, pip caches, NuGet packages, Ivy/Coursier, Bazel, uv, Ruff, and pre-commit caches. Sensitive paths in `denyWrite` remain hard-blocked even if they overlap an allowed write root.
 
-Linked git worktrees of the session repo are trusted like the project directory: a path inside a worktree registered by the session repo is treated as in-project by the read exemption and the deterministic path policy, with relative allow/deny patterns (a `denyWrite` of `.env` or `src/**`, the `.` write root) re-anchored at the worktree root so the worktree gets exactly the decisions the project itself would get. Membership is verified bidirectionally without running git: the worktree's `.git` file must point into the session repo's `.git/worktrees/<name>`, and that registry entry's `gitdir` must point back at the same `.git` file — so a forged `.git` file cannot claim membership; only a `git worktree add` performed through the rail creates the reverse link. Limitation: this trust currently applies to the classifier and file-tool path policy only. With the Seatbelt backend enabled, the sandbox profile compiles literal write roots when the rail enables, so sandboxed bash still cannot write into a worktree outside those roots (worktrees under `/tmp` or the project directory are covered by the default roots).
+Linked git worktrees of the session repo are trusted like the project directory: a path inside a worktree registered by the session repo is treated as in-project by the read exemption and the deterministic path policy, with relative allow/deny patterns (a `denyWrite` of `.env` or `src/**`, the `.` write root) re-anchored at the worktree root so the worktree gets exactly the decisions the project itself would get. Membership is verified bidirectionally without running git: the worktree's `.git` file must point into the session repo's `.git/worktrees/<name>`, and that registry entry's `gitdir` must point back at the same `.git` file — so a forged `.git` file cannot claim membership; only a `git worktree add` performed through the rail creates the reverse link. Limitation: this trust currently applies to the classifier and file-tool path policy only. With the Seatbelt backend enabled, the sandbox profile holds literal write roots compiled from the configured lists, and a worktree appearing does not add one, so sandboxed bash still cannot write into a worktree outside those roots (worktrees under `/tmp` or the project directory are covered by the default roots). A session grant adding the worktree's path to `filesystem.allowWrite` fixes that live: the profile is re-pointed as the grant applies (see [Session scope](#session-scope)), no restart needed.
 
 The macOS keychain is the one place the two engines deliberately disagree.
 `~/Library/Keychains` stays in `denyRead`, so Pi's `read` tool still treats the
@@ -585,8 +995,8 @@ just drops out of the search list and every lookup reports "could not be found"
 as if the token were missing. Only reads are granted — keychain writes,
 renames, and deletes stay denied — and the read-back stands down for any
 keychain deny that came from a config file rather than the built-in defaults,
-so an explicit `denyRead` of `~/Library/Keychains` (or of a directory
-containing it) is honoured for bash too.
+so an explicit `"denyRead": ["~/Library/Keychains"]` (restating the default
+claims it) or a deny of a directory containing it is honoured for bash too.
 
 Use project or global config to narrow these defaults for more sensitive workspaces.
 
@@ -617,13 +1027,81 @@ deny-all entry silently vetoes the allowlist itself. `deniedDomains` is for
 carving explicit exceptions out of an allowed wildcard — for example allowing
 `*.github.com` while denying `gist.github.com`.
 
+## Environment scrubbing
+
+Sandboxed commands (agent `bash`, and your `!` / `!!` commands) are spawned
+with a scrubbed copy of pi's environment. Two lists decide what is left:
+
+- `environment.unset` — patterns removed first, always. `*` matches any run of
+  characters except `/`, and matching is case-sensitive.
+- `environment.allow` — empty by default, which is **blacklist mode**: every
+  variable not unset passes. A non-empty list is **whitelist mode**: only
+  names matching one of its patterns pass (unset still wins over allow).
+
+Blacklist is the default because a whitelist breaks toolchains in ways no
+default list can anticipate — `JAVA_HOME`, `GOPATH`, `NVM_DIR`,
+`SSH_AUTH_SOCK`, `PYENV_ROOT`, private-CA bundles (`SSL_CERT_FILE`,
+`NODE_EXTRA_CA_CERTS`, …) and whatever else your shell exports — while the
+secrets worth stripping mostly follow naming conventions. The default unset
+list:
+
+- AWS credentials by name: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_WEB_IDENTITY_TOKEN_FILE`
+  (named rather than `AWS_*`, which would also strip `AWS_PROFILE`,
+  `AWS_REGION`, `AWS_CA_BUNDLE`).
+- Common tokens and provider keys by name: `GITHUB_TOKEN`, `GH_TOKEN`,
+  `NPM_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+- Naming conventions: `*_TOKEN`, `*_SECRET`, `*_KEY`, `*_API_KEY`,
+  `*_PASSWORD`, `*_PASSWD`.
+- Secrets with no suffix to match: `PGPASSWORD`, `MYSQL_PWD`,
+  `npm_config__auth*`, `NPM_CONFIG__AUTH*`.
+- `PI_RAIL_APPROVAL_MAILBOX` — the [approval mailbox](#forwarded-asks-the-approval-mailbox)
+  channel token. Subagent children get it from the pi process's own
+  environment, never through bash; a sandboxed command holding it could forge
+  an approval.
+- `RIPGREP_CONFIG_PATH` — rg reads extra flags from that file, and a
+  `--pre <program>` there would get past the built-in rg flags allowlist.
+
+The suffix globs occasionally take a harmless variable (starship's
+`STARSHIP_SESSION_KEY`, for instance). Drop an entry with
+`{"remove": [...]}` if one bites; add your own secrets' names with a plain
+array:
+
+```json
+{ "environment": { "unset": ["MY_SERVICE_CREDENTIAL"] } }
+```
+
+**Whitelist mode with append-only lists.** Lists [only append](#lists-only-append),
+and the default allow list is empty, so a config that writes
+`"environment": { "allow": ["FOO"] }` does not add FOO to anything: it switches
+to whitelist mode with FOO as the *only* variable passed. `PATH`, `HOME`,
+`TERM`, `LANG`/`LC_*`, `TMPDIR` and every toolchain variable your commands need
+then have to be listed too, for example:
+
+```json
+{ "environment": { "allow": ["PATH", "HOME", "USER", "SHELL", "TERM", "TMPDIR", "LANG", "LC_*", "SSH_AUTH_SOCK", "JAVA_HOME", "GOPATH", "NVM_DIR"] } }
+```
+
+In the grant gates the first allow entry counts as a tightening and emptying
+the list again as a widening.
+
+What the scrub cannot see: the sandbox runtime adds its own variables after
+the scrub — the network proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, `NO_PROXY` and their lowercase forms, `GIT_SSH_COMMAND`) when the
+network layer is on, `TMPDIR` pointing into its writable temp dir, and
+`SANDBOX_RUNTIME=1` — and those are not subject to either list. Scrubbing is
+by name, so a secret stored under an innocuous name (a `DATABASE_URL` with a
+password in it) passes in blacklist mode. And it covers sandboxed commands
+only: Pi itself, its extensions, and processes they spawn outside the rail
+keep the full environment.
+
 ## What is protected
 
 - Agent `bash` tool calls are routed through Pi Rail.
 - User `!` and `!!` bash commands are routed through Pi Rail.
 - When filesystem restrictions are enabled, built-in `read`, `write`, and `edit` tool calls are checked by deterministic path policy because Seatbelt only contains subprocesses.
 - When filesystem restrictions are enabled, reads are allowed by default except for configured sensitive paths, and writes are limited to configured roots.
-- Environment variables are scrubbed before sandboxed commands are spawned: `environment.unset` patterns are removed first, then `environment.allow` (when non-empty) whitelists the rest. The default allow list passes CA-certificate variables (`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `AWS_CA_BUNDLE`, `JAVA_TOOL_OPTIONS`, and friends) so a private CA reaches sandboxed tooling; to make that work, the default unset list names explicit AWS credential variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, …) instead of a broad `AWS_*` glob, with the generic `*_TOKEN`/`*_SECRET`/`*_KEY` globs as the backstop for unknown secrets.
+- Environment variables are scrubbed before sandboxed commands are spawned: `environment.unset` patterns are removed first; by default everything else passes (blacklist mode), and a non-empty `environment.allow` switches to whitelist mode. See [Environment scrubbing](#environment-scrubbing).
 - Every intercepted `bash`, `read`, `write`, and `edit` call is named with capability classes after deterministic policy checks and before execution; the disposition table then decides.
 - Trusted reads never reach a model: a `read` whose canonical path is inside the session working directory or matches an explicit `allowRead` entry — and does not match `denyRead` — is labelled deterministically (0 tokens, 0 latency; counted as "Exempt (no model consulted)" in the status report, together with allowlisted commands and screen-clean writes). The allow/deny lists are consulted for this routing even when `filesystem.enabled` is `false`, which only disables *blocking*. Reads under the user skills directory (`~/.pi/agent/skills`) and of pi's own docs are exempt the same way: invoking a skill *is* a read of its SKILL.md, so naming it would tax every skill invocation — only the read is exempt, and the actions a skill's instructions produce are still reviewed individually.
 - While a reviewer call is in flight, pi's streaming spinner reads `Classifying...` (namer) or `Judging...` (judge), so a rail wait is distinguishable from the agent model thinking.
@@ -636,7 +1114,8 @@ carving explicit exceptions out of an allowed wildcard — for example allowing
 When the rail needs a human decision — a class set to `ask`, a judge verdict
 of `ask`, or a path outside the configured roots — the prompt offers four
 choices: **Allow**, **Allow with comment**, **Deny**, and **Deny with
-comment**. **Esc is neither**: it stops the turn — recorded and reported as a
+comment** — plus **Allow, and generalise…**, which approves and then starts
+the [configurator](#the-configurator) from the action. **Esc is neither**: it stops the turn — recorded and reported as a
 `stop`, not a denial, because reaching for the interrupt key says "not now",
 not "never", and a false deny would bias the judge against an action you never
 actually judged. The prompt names the capabilities that were matched and the
@@ -772,6 +1251,7 @@ branch actually accumulated instead of starting blank.
 written when a session is persisted, because replay depends on them:
 
 - `"minimal"` (default): adds resolved disposition and the row that decided,
+  the grant behind the deciding label (`grant`),
   content-screen verdict, judge fields (model, verdict, latency, tokens) when
   the judge ran, attempts, latency, token usage, namer model, and a truncated
   projection of the tool input.
@@ -793,10 +1273,48 @@ path approvals, and errors.
 candidates, flagging ones where the same command was executed later in the
 session (false-positive candidates worth adding to `eval/cases.ts`).
 
+### Replay corpus
+
+Session telemetry truncates commands and paths because session files can be
+shared, which makes replaying a policy change against past decisions inexact.
+So the rail also keeps a separate, local replay corpus: one JSON line per
+decision (capability reviews, path approvals, deterministic policy blocks)
+with the timestamp, cwd, tool, the **full** command or path, the capability
+labels and whether the namer supplied them, the content-screen verdict, the
+resolved disposition and deciding row, the outcome, the user's answer
+(marked `forwarded` when it came from the parent session), and the judge's
+verdict. It does not keep token usage, latency, free-text reasons, comments,
+or any write/edit content — a write keeps only a sha256 and a byte length.
+
+- **Where:** `<agent dir>/rail-corpus/<YYYY-MM>.jsonl` (`~/.pi/agent/rail-corpus/`
+  by default), one append-only file per UTC month; directory `0700`, files
+  `0600`. Headless subagent children append to the same files.
+- **Redaction:** credential shapes in commands — the content screen's
+  credential patterns (AWS/GitHub/GitLab/Slack/OpenAI/Google keys, JWTs,
+  private keys, SSH key bodies), the value of a credential-named key
+  (`API_KEY=…`, `--password=…`, `"password":"…"`), the token after
+  `Bearer`/`Basic`, and high-entropy tokens and large base64 blobs — are
+  replaced by one typed shell word such as `‹redacted:aws-key›`, so the
+  command still parses into the same commands and arguments. Expansions like
+  `API_KEY=$TOKEN` are references and are left alone. A redacted record
+  carries `redacted: true` and the list of kinds. Paths, and references to
+  credential stores like `~/.aws/credentials`, are never redacted: they are
+  what the rules match on. Positional secrets with no key or shape to
+  recognise them by (`mysql -psecret`, `curl -u user:pass`,
+  `--password secret`) are not redacted.
+- **Cap:** at most 12 months and about 50 MB; whole month files are pruned,
+  oldest first, once per process.
+- **Off switch:** `"corpus": { "enabled": false }`. The corpus is independent
+  of `classifier.telemetry`, is never written while the rail is disabled,
+  never leaves the machine, and is never part of the session file.
+
+The grant gates replay the corpus ([Grants by hand](#grants-by-hand)), and
+`/rail grants` counts what each grant decided from its `grant` field.
+
 ## Related extensions
 
 - [`pi-sandbox`](https://github.com/carderne/pi-sandbox) (Chris Arderne) — the inspiration for Pi Rail: OS-level sandboxing for Pi with interactive permission prompts, on macOS `sandbox-exec` and Linux `bubblewrap`. Pi Rail adds the semantic layer on top of similar containment — capability naming, the disposition table, the judge; if you want a mature prompt-oriented sandbox without model review, especially on Linux, start there.
-- [`pi-guard`](https://github.com/jdiamond/pi-guard) (Jason Diamond) — a deterministic permission system for pi tools: allow/ask/deny rules with extensible matchers, no OS sandbox. Pi Rail's command allowlist plays a similar role, but its decisions sit inside Seatbelt containment and fall through to the classifier instead of rules alone. (This project was itself named pi-guard before being renamed to avoid the clash; an existing `guard.json` still loads — see [Configuration](#configuration).)
+- [`pi-guard`](https://github.com/jdiamond/pi-guard) (Jason Diamond) — a deterministic permission system for pi tools: allow/ask/deny rules with extensible matchers, no OS sandbox. Pi Rail's command allowlist plays a similar role, but its decisions sit inside Seatbelt containment and fall through to the classifier instead of rules alone. (This project was itself named pi-guard before being renamed to avoid the clash; a leftover `guard.json` is no longer read — see [Configuration](#configuration).)
 - [herdr](https://herdr.dev) — while a rail approval dialog is open, the rail emits `herdr:blocked` on pi's extension bus (with a label naming the ask), so herdr's pane state shows *waiting for input* instead of *working*. Refcounted and paired on every exit path; a no-op when herdr's integration isn't listening.
 
 ## Limitations
@@ -810,6 +1328,8 @@ Pi Rail is a defense-in-depth containment layer, not a complete adversarial secu
 - The namer only names; the disposition table decides. A prompt-injected namer can at worst mislabel a capability, and the table still refuses a class you set to deny. Neither reviewer can override deterministic deny rules or Seatbelt.
 - The judge holds decision authority only for classes you explicitly delegated to it, only for one action at a time, and never above a deny that severity-max already produced.
 - Disabling filesystem or network restrictions deliberately removes those hard boundaries; reviewer decisions can be wrong or unavailable.
+- Session-layer changes to filesystem, network, and environment lists re-point the Seatbelt profile for the *next* command. A command already running keeps the filesystem profile and environment it was spawned with (a revoked write root stays writable to it until it exits); only its network follows the new domain lists, connection by connection. `filesystem.enabled`, `network.enabled`, and the `seatbelt` overrides change only at restart.
+- Read-only mode does not tighten plain `commands.allow` entries: they are tagged `read-project`, which the read-only preset leaves alone, so classify a writing command into a writing class instead of allowlisting it.
 
 ## Future container backend
 
@@ -840,8 +1360,8 @@ Three seam modules own every run-mode branch; feature code never inspects
   over RPC. Callers gate on `ctx.hasUI` first because headless approval
   absence is a policy decision (block with an explanatory reason), not a
   presentation choice.
-- `src/tui/select-list.ts` — pickers (control panel, model selector,
-  statusline chooser): searchable list in the TUI, plain `select` dialog
+- `src/tui/select-list.ts` — pickers (control panel, the RPC side of the
+  model picker, statusline chooser): searchable list in the TUI, plain `select` dialog
   elsewhere; resolves `undefined` where no dialog capability exists, which
   callers already treat as cancel.
 
@@ -858,6 +1378,14 @@ loop in `src/commands/dispositions.ts` — render it. The class vocabulary
 itself lives one level down in `src/capabilities.ts`: `capabilityRegistry()`
 folds built-ins, config classes, and session edits into the ordered list that
 both the table and the namer payload read.
+
+The reviewer-model picker is the same shape again: `src/reviewer-seats.ts`
+holds the three seats (effective vs saved value, set, save) with no UI,
+`src/model-selector.ts` builds each seat's rows, and `src/tui/model-page.ts`
+and the RPC select loop in `src/commands/model.ts` render them. The session
+values are `RuntimeState.classifier` fields, not session-policy ops: a model
+is not policy, so it is not in the session policy snapshot and a new session
+starts from the config.
 
 Transient signals (`notify`, `setStatus`) work in TUI and RPC and no-op
 headless. New UI belongs in one of these seams — extend them rather than
@@ -884,6 +1412,8 @@ OPENROUTER_API_KEY=... npm run eval -- \
 ```
 
 Model ids under `openrouter/` follow OpenRouter's own `vendor/model` naming. Ids missing from pi-ai's pinned catalog are synthesized automatically, since OpenRouter serves everything through one OpenAI-compatible endpoint.
+
+5. **Configurator judgment** (`eval/grant-run.ts`): `npm run eval:grant -- provider/model [...]` (with `--filter` and `--json`) runs every case in `eval/grant-cases.ts` through `runGrantAgent` with a real model and scores the outcome by code (`eval/grant-score.ts`, unit-tested in `test/grant-score.test.ts`): a table per model of each property's pass/fail, turns, tokens, latency, final rung, and gate status. It exits non-zero when a model passed the gates with a grant that violates a must-not-allow, must-be-sensitive, forbidden-op, or injection property. Keys resolve as for `npm run eval`; the loop itself is tested offline against a scripted fake model (`test/grant-agent.test.ts`). See `eval/GRANT_RESULTS.md`.
 
 The `@earendil-works/*` packages are declared as peer dependencies because Pi
 provides them at runtime. Pinned development copies are installed only for

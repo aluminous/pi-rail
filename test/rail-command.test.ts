@@ -5,6 +5,7 @@ import { BUILTIN_CAPABILITY_IDS, type CapabilityId, type Disposition } from "../
 import { createRailCommand } from "../src/commands/rail.ts";
 import { addClass, setRowDisposition } from "../src/dispositions.ts";
 import { addSessionGuidance } from "../src/classifier.ts";
+import { sessionDispositionEdit, sessionDispositionEdits } from "../src/session-policy.ts";
 import { createRuntimeState, type RuntimeState } from "../src/state.ts";
 import { DispositionPage } from "../src/tui/disposition-page.ts";
 import { StatusPage } from "../src/tui/status-page.ts";
@@ -106,16 +107,21 @@ function tuiCtx() {
 
 const settled = () => new Promise((resolve) => setImmediate(resolve));
 
+/** This session's table-row edits: the set-disposition ops in the session-edits grant. */
 function overrides(state: RuntimeState) {
-  return state.capabilities.overrides;
+  return sessionDispositionEdits(state);
 }
 
 describe("rail argument completions", () => {
   it("lists all subcommands for an empty prefix", () => {
     const items = makeCommand().getArgumentCompletions("");
     assert.ok(items);
-    assert.deepEqual(items.map((i) => i.value), ["status", "policy", "policy rules", "set", "guide", "guide clear", "explain", "test", "test read", "test write", "why", "on", "off", "off session", "readonly", "model", "smoke", "critique"]);
+    assert.deepEqual(items.map((i) => i.value), ["status", "policy", "policy rules", "set", "grant", "grant cancel", "grant add", "grant check", "grants", "guide", "guide clear", "explain", "test", "test read", "test write", "why", "on", "off", "off session", "readonly", "model", "smoke", "critique"]);
     assert.ok(items.every((i) => i.description));
+  });
+
+  it("completes the grant subcommands", () => {
+    assert.deepEqual(makeCommand().getArgumentCompletions("gra")?.map((i) => i.value), ["grant", "grant cancel", "grant add", "grant check", "grants"]);
   });
 
   it("narrows subcommands by prefix", () => {
@@ -126,7 +132,7 @@ describe("rail argument completions", () => {
   it("completes model arguments with fixed specs first, full-args values", () => {
     const items = makeCommand(["openai/gpt-5-mini", "anthropic/claude-haiku-4-5"]).getArgumentCompletions("model ");
     assert.ok(items);
-    assert.deepEqual(items.slice(0, 5).map((i) => i.value), ["model auto", "model current", "model off", "model status", "model judge"]);
+    assert.deepEqual(items.slice(0, 7).map((i) => i.value), ["model auto", "model current", "model off", "model status", "model save", "model judge", "model configurator"]);
     assert.ok(items.some((i) => i.value === "model openai/gpt-5-mini"));
   });
 
@@ -139,6 +145,12 @@ describe("rail argument completions", () => {
     assert.deepEqual(items.slice(0, 2).map((i) => i.value), ["model judge current", "model judge status"]);
     assert.ok(!items.some((i) => i.label === "auto" || i.label === "off"), "the judge cannot be off, and auto is the namer's list");
     assert.ok(items.some((i) => i.value === "model judge anthropic/claude-haiku-4-5"));
+  });
+
+  it("completes the configurator subform with its own auto but no off", () => {
+    const command = makeCommand(["openai/gpt-5-mini"]);
+    const items = command.getArgumentCompletions("model configurator ");
+    assert.deepEqual(items?.map((i) => i.value), ["model configurator auto", "model configurator current", "model configurator status", "model configurator openai/gpt-5-mini"]);
   });
 
   it("filters the judge subform by partial text", () => {
@@ -434,7 +446,7 @@ describe("/rail set with a custom class", () => {
 
     await command.handler("set touches-customer-data deny", ctx);
     assert.match(notes.at(-1)!, /touches-customer-data → deny for this session/);
-    assert.equal(state.capabilities.overrides["touches-customer-data"], "deny");
+    assert.equal(sessionDispositionEdit(state, "touches-customer-data"), "deny");
 
     await command.handler("set touches-customer-data", ctx);
     assert.match(notes.at(-1)!, /touches-customer-data: deny — this session/);

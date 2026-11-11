@@ -224,18 +224,37 @@ describe("read-only disposition preset", () => {
     }
   });
 
-  // The preset lists built-in ids by construction, so it cannot reach a custom
-  // class — the same is already true of a custom label the namer returns, and
-  // of any template put in commands.allow. Pinned so the gap stays visible.
-  it("does not reach a custom class set to allow, exactly as commands.allow does not", async () => {
+  // The preset reaches a custom class through its declared parent, and a
+  // class that declares none is a writing class to it: the safe behaviour
+  // must not depend on the author remembering `extends`.
+  it("denies a parentless custom class set to allow, and one extending a denied class", async () => {
+    for (const extendsId of [undefined, "local-destructive"] as const) {
+      const custom = readOnlyState(testConfig((c) => {
+        c.classifier.enabled = false;
+        c.capabilities.classes = [{ id: "my-tool", name: "My tool", definition: "A local helper.", default: "allow", ...(extendsId ? { extends: extendsId } : {}) }];
+        c.commands.classify = [{ template: "mytool write *", capability: "my-tool" }];
+      }));
+      custom.backend = { name: "seatbelt" } as RailBackend;
+      const result = await interceptToolCall({ toolName: "bash", input: { command: "mytool write x" } }, fakeCtx(cwd), custom);
+      assert.equal(result?.block, true, `extends ${extendsId}`);
+      assert.match(result.reason, /read-only preset/);
+    }
+  });
+
+  it("leaves a custom class extending a read class alone", async () => {
     const custom = readOnlyState(testConfig((c) => {
       c.classifier.enabled = false;
-      c.capabilities.classes = [{ id: "my-tool", name: "My tool", definition: "A local helper.", default: "allow" }];
-      c.commands.classify = [{ template: "mytool write *", capability: "my-tool" }];
+      c.capabilities.classes = [{ id: "my-reader", name: "My reader", definition: "A local query.", default: "allow", extends: "read-project" }];
+      c.commands.classify = [{ template: "mytool show *", capability: "my-reader" }];
     }));
     custom.backend = { name: "seatbelt" } as RailBackend;
-    assert.equal(await interceptToolCall({ toolName: "bash", input: { command: "mytool write x" } }, fakeCtx(cwd), custom), undefined);
+    assert.equal(await interceptToolCall({ toolName: "bash", input: { command: "mytool show x" } }, fakeCtx(cwd), custom), undefined);
+  });
 
+  // A plain commands.allow template is tagged read-project by convention and
+  // the preset leaves read-project alone, so it is not tightened. Pinned so
+  // that remaining gap stays visible.
+  it("does not reach a template put in commands.allow", async () => {
     const allowlisted = readOnlyState(testConfig((c) => {
       c.classifier.enabled = false;
       c.commands.allow = [...c.commands.allow, "mytool write *"];

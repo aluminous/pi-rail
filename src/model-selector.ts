@@ -1,83 +1,74 @@
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
-import { pickFromList, type CustomUiHost, type SelectItem, type SelectTab } from "./tui/select-list.ts";
+import type { ReviewerSeat, SeatValue } from "./reviewer-seats.ts";
+import type { SelectItem } from "./tui/select-list.ts";
 
-/** Which reviewer stage a pick applies to; the dialog's two tabs. */
-export type ClassifierModelTarget = "namer" | "judge";
-
-export type ClassifierModelValue = "off" | "auto" | "current" | "model";
-
-export interface ClassifierModelChoice {
-  target: ClassifierModelTarget;
-  value: ClassifierModelValue;
-  model?: Model<Api>;
+/**
+ * What one seat's list is built from: the catalog, the session model, what
+ * that seat's own "auto" would pick, and the seat's effective spec (the row
+ * that gets the ✓).
+ */
+export interface SeatListParams {
+  models: Model<Api>[];
+  currentModel?: Model<Api>;
+  /** What "auto" resolves to for THIS seat (the namer and configurator lists differ). */
+  autoModel?: Model<Api>;
+  spec: SeatValue;
 }
 
-/** One stage's configured spec and what it resolves to right now. */
-export interface ClassifierModelTargetState {
-  /** "auto" | "current" | "provider/id" — the spec the ✓ is matched against. */
-  spec: string;
-  resolved?: Model<Api>;
-}
-
-function modelLabel(model: Model<Api>): string {
+export function modelLabel(model: { provider: string; id: string }): string {
   return `${model.provider}/${model.id}`;
 }
 
-function summaryLine(target: ClassifierModelTarget, state: ClassifierModelTargetState): string {
-  return `${target}: ${state.spec}${state.resolved ? ` → ${modelLabel(state.resolved)}` : " → (unavailable)"}`;
-}
-
-/** The explicit provider/model rows, shared by both tabs but checked per target. */
-function modelItems(target: ClassifierModelTarget, models: Model<Api>[], spec: string): SelectItem<ClassifierModelChoice>[] {
+/** The explicit provider/model rows, shared by every seat but checked per seat. */
+function modelItems(models: Model<Api>[], spec: SeatValue): SelectItem<SeatValue>[] {
   return models.map((model) => ({
-    value: { target, value: "model", model },
-    label: modelLabel(model),
+    value: modelLabel(model),
+    label: model.id,
     searchText: `${model.provider} ${model.id} ${model.name ?? ""}`,
     suffix: `[${model.provider}]`,
-    description: model.name,
+    description: model.name ? `Model name: ${model.name}` : undefined,
     current: spec === modelLabel(model),
   }));
 }
 
-function namerItems(params: {
-  models: Model<Api>[];
-  currentModel?: Model<Api>;
-  autoModel?: Model<Api>;
-  spec: string;
-}): SelectItem<ClassifierModelChoice>[] {
-  const items: SelectItem<ClassifierModelChoice>[] = [
+function currentItem(params: SeatListParams, description: string): SelectItem<SeatValue>[] {
+  if (!params.currentModel) return [];
+  return [{
+    value: "current",
+    label: `current (${modelLabel(params.currentModel)})`,
+    searchText: `current ${params.currentModel.provider} ${params.currentModel.id} ${params.currentModel.name ?? ""}`,
+    description,
+    current: params.spec === "current",
+  }];
+}
+
+function autoItem(params: SeatListParams, description: string): SelectItem<SeatValue> {
+  return {
+    value: "auto",
+    label: params.autoModel ? `auto (${modelLabel(params.autoModel)})` : "auto",
+    searchText: "auto default known good",
+    description: `${description} (${params.autoModel ? `currently ${modelLabel(params.autoModel)}` : "none available: falls back to the current model"})`,
+    current: params.spec === "auto",
+  };
+}
+
+function namerItems(params: SeatListParams): SelectItem<SeatValue>[] {
+  return [
+    autoItem(params, "Best available known-good namer model, subscriptions first"),
+    ...currentItem(params, "Always use Pi's current active model"),
     {
-      value: { target: "namer", value: "auto" },
-      label: "auto",
-      searchText: "auto default known good subscription",
-      description: params.autoModel
-        ? `Best available known-good model, subscriptions first (currently ${modelLabel(params.autoModel)})`
-        : "Best available known-good model, subscriptions first (none available yet)",
-      current: params.spec === "auto",
-    },
-    {
-      value: { target: "namer", value: "off" },
+      value: "off",
       label: "off",
       searchText: "off disable classifier",
-      description: "Disable classifier review",
+      description: "Disable classifier review (allowlisted and deterministic decisions still apply)",
+      current: params.spec === "off",
     },
+    ...modelItems(params.models, params.spec),
   ];
-
-  if (params.currentModel) {
-    items.push({
-      value: { target: "namer", value: "current", model: params.currentModel },
-      label: `current (${modelLabel(params.currentModel)})`,
-      searchText: `current ${params.currentModel.provider} ${params.currentModel.id} ${params.currentModel.name ?? ""}`,
-      description: "Always use Pi's current active model",
-      current: params.spec === "current",
-    });
-  }
-
-  return [...items, ...modelItems("namer", params.models, params.spec)];
 }
 
 /**
- * The judge tab deliberately offers neither "off" nor "auto":
+ * The judge list deliberately offers neither "off" nor "auto":
  *
  * - "off" would make a `judge` disposition undecidable, and that failure is
  *   meant to stay loud rather than become a setting.
@@ -85,51 +76,32 @@ function namerItems(params: {
  *   high-volume namer models. Silently pointing the escalation review at a
  *   mini model is the opposite of what the judge is for.
  */
-function judgeItems(params: { models: Model<Api>[]; currentModel?: Model<Api>; spec: string }): SelectItem<ClassifierModelChoice>[] {
-  const items: SelectItem<ClassifierModelChoice>[] = [];
-  if (params.currentModel) {
-    items.push({
-      value: { target: "judge", value: "current", model: params.currentModel },
-      label: `current (${modelLabel(params.currentModel)})`,
-      searchText: `current ${params.currentModel.provider} ${params.currentModel.id} ${params.currentModel.name ?? ""}`,
-      description: "Always use Pi's current active model — the session's own strong model",
-      current: params.spec === "current",
-    });
-  }
-  return [...items, ...modelItems("judge", params.models, params.spec)];
-}
-
-/**
- * The two-tab reviewer model picker. Tab cycles namer ⇄ judge; the header
- * carries both stages' configured spec and what it resolves to, so the
- * consequence of a pick is visible from either tab.
- */
-export async function selectClassifierModel(params: {
-  ctx: CustomUiHost;
-  models: Model<Api>[];
-  currentModel?: Model<Api>;
-  autoModel?: Model<Api>;
-  namer: ClassifierModelTargetState;
-  judge: ClassifierModelTargetState;
-}): Promise<ClassifierModelChoice | undefined> {
-  const tabs: SelectTab<ClassifierModelChoice>[] = [
-    {
-      id: "namer",
-      label: "namer",
-      items: namerItems({ models: params.models, currentModel: params.currentModel, autoModel: params.autoModel, spec: params.namer.spec }),
-    },
-    {
-      id: "judge",
-      label: "judge",
-      headerLines: ["The judge cannot be turned off — pick which model reviews escalations."],
-      items: judgeItems({ models: params.models, currentModel: params.currentModel, spec: params.judge.spec }),
-    },
+function judgeItems(params: SeatListParams): SelectItem<SeatValue>[] {
+  return [
+    ...currentItem(params, "Always use Pi's current active model — the session's own strong model"),
+    ...modelItems(params.models, params.spec),
   ];
-
-  const picked = await pickFromList<ClassifierModelChoice>(params.ctx, {
-    title: "Rail classifier model",
-    headerLines: [summaryLine("namer", params.namer), summaryLine("judge", params.judge)],
-    tabs,
-  });
-  return picked?.value;
 }
+
+/** The configurator's "auto" is its own eval-derived list (AUTO_GRANT_MODEL_PREFERENCES), not the namer's. */
+function configuratorItems(params: SeatListParams): SelectItem<SeatValue>[] {
+  return [
+    autoItem(params, "Best available model from the configurator's eval-derived list"),
+    ...currentItem(params, "Always use Pi's current active model"),
+    ...modelItems(params.models, params.spec),
+  ];
+}
+
+/** One seat's rows, in the order the page and the RPC flow show them. */
+export function seatItems(seat: ReviewerSeat, params: SeatListParams): SelectItem<SeatValue>[] {
+  if (seat === "namer") return namerItems(params);
+  if (seat === "judge") return judgeItems(params);
+  return configuratorItems(params);
+}
+
+/** One-line note per seat, shown under the tab line. */
+export const SEAT_NOTES: Record<ReviewerSeat, string> = {
+  namer: "Names every reviewed action against the capability classes; cheap and fast is the point.",
+  judge: "Decides the classes you delegated to it. It cannot be turned off — only re-pointed.",
+  configurator: "Proposes grants from /rail grant requests; runs only when asked.",
+};

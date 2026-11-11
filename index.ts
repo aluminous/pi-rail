@@ -11,6 +11,8 @@ import { createRailSmoke } from "./src/commands/smoke.ts";
 import { loadConfig, type ResolvedRailConfig } from "./src/config.ts";
 import { interceptToolCall } from "./src/interceptor.ts";
 import { compileFilesystemPolicy, summarizeDegradedPatterns } from "./src/policy.ts";
+import { createCorpusWriter, defaultCorpusDir } from "./src/replay-corpus.ts";
+import { markPolicyApplied, restoreSessionPolicy, sessionPolicyDiagnostics } from "./src/session-policy.ts";
 import { applyDerivedRailState } from "./src/session-replay.ts";
 import { createRuntimeState, resetSessionState, resetTurnStats } from "./src/state.ts";
 import { registerRailMessageRenderer, updateRailStatus } from "./src/status.ts";
@@ -40,15 +42,21 @@ export default function (pi: ExtensionAPI) {
   // Decision telemetry lands in pi's own session log as custom entries
   // (user-approved feature: rail decision records via pi.appendEntry).
   state.appendEntry = (customType, data) => pi.appendEntry(customType, data);
+  // The replay corpus: full decision inputs, redacted, in a private local
+  // store outside the session file (src/replay-corpus.ts). One writer per
+  // process, so its once-per-process prune runs once; headless subagent
+  // children wire their own and append to the same month files.
+  state.corpus = createCorpusWriter({ dir: defaultCorpusDir() });
   // Pane managers (herdr) learn via the shared bus when an approval dialog is
   // blocking on the user; harmless when nothing listens.
   wireBlockedSignal(state, pi.events);
 
   function sandboxedOps() {
     if (!state.backend || !state.config) return undefined;
+    const fallback = state.config;
     return createSandboxedBashOps({
       backend: state.backend,
-      config: state.config,
+      config: () => state.config ?? fallback,
       enabled: () => state.enabled,
       initialized: () => state.initialized,
       lastError: () => state.lastError,
@@ -67,7 +75,9 @@ export default function (pi: ExtensionAPI) {
   // instead every entry point — each event handler below and the /rail command
   // dispatch — ends with a single updateRailStatus call, usually in a finally.
   async function enableRail(ctx: ExtensionContext): Promise<void> {
-    const config = state.config ?? loadConfig(ctx);
+    // The base, not the effective view: `enabled` is a file setting, and the
+    // assignment below is what tells the session-layer cache it moved.
+    const config = state.baseConfig ?? loadConfig(ctx);
     config.enabled = true;
     state.config = config;
     if (state.enabled && state.initialized) return;
@@ -78,7 +88,15 @@ export default function (pi: ExtensionAPI) {
     state.backend = makeBackend(config);
     const support = await state.backend.supported();
     if (!support.ok) throw new Error(support.reason);
-    await state.backend.initialize(config, ctx);
+    // The effective config, session layer included: a restored session grant
+    // that moves a sandbox list is compiled into the profile from the start,
+    // and every later change re-points it (commitPolicyChange).
+    await state.backend.initialize(state.config!, ctx);
+    // A change committed while initialize was awaited found no initialized
+    // backend to re-point; catch up before bash may run (a no-op otherwise).
+    const effective = state.config!;
+    state.backend.applyPolicy(effective);
+    markPolicyApplied(state.backend, effective);
     state.initialized = true;
   }
 
@@ -142,7 +160,8 @@ export default function (pi: ExtensionAPI) {
   // current branch, so re-derive it wholesale rather than accumulate: a denial
   // the user navigated away from must stop biasing the judge, and navigating
   // back must bring it back. navigateTree cannot run mid-stream, so no
-  // in-flight decision can race this rebuild.
+  // in-flight decision can race this rebuild. The session policy layer is not
+  // touched here: grants do not rewind (src/session-policy.ts).
   pi.on("session_tree", (_event, ctx) => {
     state.lastUiContext = ctx;
     applyDerivedRailState(state, ctx.sessionManager.getBranch());
@@ -171,11 +190,25 @@ export default function (pi: ExtensionAPI) {
       } catch {
         // A fresh session simply has nothing to replay.
       }
+      // The session policy layer is the other half of what a resumed session
+      // brings back, and deliberately the opposite of the replay above: it is
+      // read from the whole session file (the last snapshot on any branch),
+      // because a grant is a setting the user chose, not branch memory. An
+      // in-memory session has no file, so its changes are not written at all.
+      try {
+        state.sessionPolicyPersistent = !!ctx.sessionManager.getSessionFile();
+        state.warnings.push(...restoreSessionPolicy(state, ctx.sessionManager.getEntries()));
+      } catch {
+        // No usable session manager: start with an empty session layer.
+      }
 
       const disabledByFlag = pi.getFlag("no-rail") as boolean;
       const config = loadConfig(ctx);
       state.config = config;
       state.warnings.push(...config.diagnostics);
+      // The restored session layer folds over the config just loaded; what
+      // that fold refused is announced with the rest, once.
+      state.warnings.push(...sessionPolicyDiagnostics(state));
       if (config.enabled && config.backend === "seatbelt" && config.filesystem.enabled) {
         const degraded = summarizeDegradedPatterns(compileFilesystemPolicy(config, ctx.cwd).degraded);
         if (degraded) state.warnings.push(degraded);

@@ -3,6 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   capabilityRegistry,
   capabilityRegistryIds,
+  namerRegistry,
   getEffectiveDisposition,
   type CapabilityId,
   type CapabilityState,
@@ -29,7 +30,7 @@ import {
   type JudgeResult,
   type NamerResult,
 } from "./classifier-protocol.ts";
-import { resolveAutoClassifierModel } from "./classifier-models.ts";
+import { resolveAutoClassifierModel, resolveAutoGrantModel } from "./classifier-models.ts";
 import { screenLexiconSummary } from "./content-screen.ts";
 import { IdleTimeoutError, streamingComplete } from "./streaming-complete.ts";
 import { formatError, textPrefix } from "./util.ts";
@@ -44,15 +45,27 @@ export {
   type ReviewProjection,
 } from "./classifier-protocol.ts";
 
+/**
+ * The `*Override` fields are the reviewer-model picker's session values
+ * (src/reviewer-seats.ts): set by `/rail model`, winning over the config for
+ * this session only, written to the global config by `/rail model save` or
+ * Ctrl+S on the page. They are settings rather than policy, so they live here
+ * and not in the session policy layer — a new session or reload starts clean
+ * (resetSessionState), and branch replay leaves them alone.
+ */
 export interface ClassifierState {
+  /** Namer on/off for this session ("off" on the namer tab). */
   enabledOverride?: boolean;
+  /** Namer model spec for this session. */
   modelOverride?: string;
   /**
-   * Session override for the judge model, set by `/rail model` (judge tab) and
-   * `/rail model judge …`. Wins over config.classifier.judgeModel. There is no
-   * "off" here on purpose: the judge cannot be disabled, only re-pointed.
+   * Session override for the judge model. Wins over
+   * config.classifier.judgeModel. There is no "off" here on purpose: the
+   * judge cannot be disabled, only re-pointed.
    */
   judgeModelOverride?: string;
+  /** Session override for the grant configurator's model (classifier.grantModel). */
+  grantModelOverride?: string;
   lastError?: string;
   /**
    * Session-scoped, user-authored guidance collected from allow/deny-with-
@@ -150,11 +163,30 @@ export function resolveJudgeModel(ctx: ExtensionContext, config: ResolvedRailCon
   return resolveModelSpec(ctx, judgeModelSpec(config, state));
 }
 
-function resolveModelSpec(ctx: ExtensionContext, spec: string): Model<Api> | undefined {
+/**
+ * The grant configurator's model (`classifier.grantModel`, same grammar).
+ * "auto" reads its own known-good list (AUTO_GRANT_MODEL_PREFERENCES), not the
+ * namer's: writing policy is a different job from labelling one action, and a
+ * model earns that list only through eval/grant-run.ts.
+ */
+export function resolveGrantModel(ctx: ExtensionContext, config: ResolvedRailConfig, state?: ClassifierState): Model<Api> | undefined {
+  return resolveModelSpec(ctx, grantModelSpec(config, state), resolveAutoGrantModel);
+}
+
+/** The configurator's spec: session override first, then config (same rule as judgeModelSpec). */
+export function grantModelSpec(config: ResolvedRailConfig, state?: ClassifierState): string {
+  return state?.grantModelOverride ?? config.classifier.grantModel;
+}
+
+function resolveModelSpec(
+  ctx: ExtensionContext,
+  spec: string,
+  auto: (available: Model<Api>[]) => Model<Api> | undefined = resolveAutoClassifierModel,
+): Model<Api> | undefined {
   if (spec === "auto") {
     // Best known-good model among those with configured auth; falls back to
     // the session's current model when none of the preferences is available.
-    return resolveAutoClassifierModel(ctx.modelRegistry.getAvailable()) ?? currentModel(ctx);
+    return auto(ctx.modelRegistry.getAvailable()) ?? currentModel(ctx);
   }
   if (spec === "current") return currentModel(ctx);
   const slash = spec.indexOf("/");
@@ -353,7 +385,7 @@ async function completeText<T>(params: {
  * is the one field a provider may not report at all; carrying it through as an
  * optional keeps "unpriced" distinguishable from "free" in the per-model view.
  */
-function toClassifierUsage(usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } | undefined): ClassifierTokenUsage | undefined {
+export function toClassifierUsage(usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } | undefined): ClassifierTokenUsage | undefined {
   if (!usage) return undefined;
   const cost = usage.cost?.total;
   return {
@@ -387,11 +419,11 @@ export async function runNaming(params: {
   toolName: string;
   input: unknown;
   sessionGuidance?: string[];
-  /** Session taxonomy edits; folded into the registry the namer is shown and validated against. */
-  capabilities?: CapabilityState;
 }): Promise<NamerResult> {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
-  const registry = capabilityRegistry(params.config, params.capabilities);
+  // Rules-only classes are not the namer's vocabulary: absent from its prompt,
+  // and a label naming one is dropped at parse like any unknown id.
+  const registry = namerRegistry(capabilityRegistry(params.config));
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
   const response = await completeText({
     model: params.model,
@@ -419,10 +451,9 @@ export async function runJudging(params: {
   authorizationEvidence?: string;
   sessionGuidance?: string[];
   recentGuardDecisions?: string[];
-  capabilities?: CapabilityState;
 }): Promise<JudgeResult> {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
-  const registry = capabilityRegistry(params.config, params.capabilities);
+  const registry = capabilityRegistry(params.config);
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
   const response = await completeText({
     model: params.model,
@@ -452,7 +483,6 @@ export async function nameToolCall(params: {
   toolName: string;
   input: unknown;
   completeFn?: CompleteFn;
-  capabilities?: CapabilityState;
 }): Promise<NamerResult> {
   const model = resolveClassifierModel(params.ctx, params.config, params.state);
   if (!model) throw new ClassifierModelUnavailableError(`Classifier model not found: ${params.state.modelOverride ?? params.config.classifier.model}`);
@@ -463,7 +493,6 @@ export async function nameToolCall(params: {
     toolName: params.toolName,
     input: params.input,
     sessionGuidance: params.state.sessionGuidance,
-    capabilities: params.capabilities,
   });
 }
 
@@ -477,7 +506,6 @@ export async function judgeToolCall(params: {
   authorizationEvidence?: string;
   recentGuardDecisions?: string[];
   completeFn?: CompleteFn;
-  capabilities?: CapabilityState;
 }): Promise<JudgeResult> {
   const model = resolveJudgeModel(params.ctx, params.config, params.state);
   if (!model) throw new ClassifierModelUnavailableError(`Judge model not found: ${judgeModelSpec(params.config, params.state)}`);
@@ -491,7 +519,6 @@ export async function judgeToolCall(params: {
     authorizationEvidence: params.authorizationEvidence,
     sessionGuidance: params.state.sessionGuidance,
     recentGuardDecisions: params.recentGuardDecisions,
-    capabilities: params.capabilities,
   });
 }
 
@@ -503,7 +530,7 @@ export async function judgeToolCall(params: {
  * tabulates below, plus a policy summary and cwd the critique cannot improve.
  */
 export function buildCapabilityPromptForCritique(config: ResolvedRailConfig, capabilities: CapabilityState | undefined): string {
-  const table = capabilityRegistry(config, capabilities).map((entry) => {
+  const table = capabilityRegistry(config).map((entry) => {
     const effective = getEffectiveDisposition(config, capabilities, entry.id);
     return `- ${entry.id}: ${effective.disposition} (${effective.scope})\n  ${entry.definition}`;
   });

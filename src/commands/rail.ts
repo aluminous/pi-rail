@@ -14,6 +14,7 @@ import { StatusPage } from "../tui/status-page.ts";
 import { pickFromList, type SelectItem } from "../tui/select-list.ts";
 import { formatError } from "../util.ts";
 import { createDispositionCommands } from "./dispositions.ts";
+import { createGrantCommands } from "./grant.ts";
 import { runModelCommand } from "./model.ts";
 import { createRailTest } from "./test.ts";
 import { createRailWhy } from "./why.ts";
@@ -33,6 +34,8 @@ export interface RailCommandDeps {
    * message; toggleReadOnly degrades to a notify-only toast when it is unset.
    */
   postRailNotice?(content: string): void;
+  /** Grant command seams (config loading, file writers, the corpus); tests override them. */
+  grantDeps?: Omit<Parameters<typeof createGrantCommands>[0], "state" | "notify">;
 }
 
 const SUBCOMMANDS: Array<{ value: string; description: string }> = [
@@ -40,6 +43,11 @@ const SUBCOMMANDS: Array<{ value: string; description: string }> = [
   { value: "policy", description: "Open the capability policy page (edit rows and classes for this session; Ctrl+S saves)" },
   { value: "policy rules", description: "Open the status page on the resolved mechanism rules: filesystem, network, environment" },
   { value: "set", description: "Set one class for this session: set <class> [allow|judge|ask|deny]" },
+  { value: "grant", description: "Describe what you want allowed; the configurator proposes a grant for you to confirm: grant <text>" },
+  { value: "grant cancel", description: "Stop the configurator run in flight" },
+  { value: "grant add", description: "Evaluate a grant file against the gates and confirm it: grant add <file>" },
+  { value: "grant check", description: "Evaluate a grant file and print the gate report, applying nothing: grant check <file>" },
+  { value: "grants", description: "List every grant: what each decided, revoke, promote, demote" },
   { value: "guide", description: "Add classifier guidance for this session: guide <text> (or bare to be prompted)" },
   { value: "guide clear", description: "Drop every guidance entry collected this session" },
   { value: "explain", description: "Show the newest decision trace (explain <n> for older ones)" },
@@ -51,7 +59,7 @@ const SUBCOMMANDS: Array<{ value: string; description: string }> = [
   { value: "off", description: "Disable for the next agent turn, then re-enable" },
   { value: "off session", description: "Disable until the session ends (no rail!)" },
   { value: "readonly", description: "Toggle read-only mode: write/edit blocked, bash restricted" },
-  { value: "model", description: "Choose the namer model (auto|current|off|provider/model); `model judge …` picks the judge" },
+  { value: "model", description: "Reviewer models for this session: picker (namer/judge/configurator tabs, Ctrl+S saves), or model [judge|configurator] <spec>" },
   { value: "smoke", description: "Run sandbox and namer smoke tests" },
   { value: "critique", description: "Critique the capability classes and content screen with a model" },
 ];
@@ -71,6 +79,11 @@ export function createRailCommand(deps: RailCommandDeps) {
     persist: deps.persistDisposition,
     notify: show,
   });
+
+  const grants = createGrantCommands({ state, notify: show, ...deps.grantDeps });
+  // "Allow, and generalise…" in the approval dialog starts the configurator
+  // through this hook — the dialog's own answer is its only caller.
+  state.startGeneralise = (ctx, seed) => grants.generalise(ctx, seed);
 
   /**
    * `/rail guide`: volunteer classifier guidance instead of waiting to be
@@ -258,7 +271,7 @@ export function createRailCommand(deps: RailCommandDeps) {
     }
   }
 
-  type PanelAction = "on" | "off-turn" | "off-session" | "readonly" | "model" | "statusline" | "smoke" | "critique" | "status" | "dispositions" | "policy-rules" | "explain";
+  type PanelAction = "on" | "off-turn" | "off-session" | "readonly" | "model" | "statusline" | "smoke" | "critique" | "status" | "dispositions" | "grants" | "policy-rules" | "explain";
 
   async function openPanel(ctx: ExtensionContext): Promise<void> {
     const items: SelectItem<PanelAction>[] = [];
@@ -272,12 +285,13 @@ export function createRailCommand(deps: RailCommandDeps) {
     }
     items.push(
       { value: "readonly", label: `Read-only mode: ${state.readOnly ? "on" : "off"}`, searchText: "readonly read only ro toggle mode", description: "Block write/edit and restrict bash to read-only commands" },
-      { value: "model", label: "Reviewer models…", searchText: "model namer judge classifier auto choose select", description: "Pick the namer and judge models (Tab switches; namer supports auto/off)" },
+      { value: "model", label: "Reviewer models…", searchText: "model namer judge configurator classifier auto choose select", description: "Pick the namer, judge, and configurator models for this session (Tab switches; Ctrl+S saves)" },
       { value: "statusline", label: "Statusline visibility…", searchText: "statusline status line visibility always never auto hide show", description: "Show the rail statusline always, never, or only when notable" },
       { value: "smoke", label: "Run smoke tests", searchText: "smoke test verify sandbox namer classifier", description: "Verify sandboxed execution and capability naming end to end" },
       { value: "critique", label: "Critique capabilities", searchText: "critique capabilities classes screen rules review improve", description: "Have Pi's current model review the class definitions, table, and screen" },
       { value: "status", label: "Status page", searchText: "status report details approvals live popup overlay tabs models namer judge engine", description: "Live status page: decisions, reviewer cost, recent namings and judgements, engine, policy" },
       { value: "dispositions", label: "Dispositions…", searchText: "dispositions policy capabilities classes allow deny ask judge edit table page", description: "Edit the capability disposition table: arrows cycle a row for this session, Ctrl+S saves" },
+      { value: "grants", label: "Grants…", searchText: "grants grant revoke promote demote list request", description: "Every grant: what it decided, revoke, promote to a config file, demote to the session" },
       { value: "policy-rules", label: "Policy rules", searchText: "policy rules filesystem network environment provenance mechanism show", description: "Resolved filesystem/network/environment rules with their config provenance" },
       { value: "explain", label: "Explain last decision", searchText: "explain trace decision why last chain stages", description: "Show the decision chain the rail ran for the most recent tool call" },
     );
@@ -297,7 +311,7 @@ export function createRailCommand(deps: RailCommandDeps) {
       case "readonly":
         return toggleReadOnly(ctx);
       case "model":
-        return runModelCommand("", ctx, state);
+        return runModelCommand("", ctx, state, () => updateRailStatus(ctx, state));
       case "statusline":
         return chooseStatusLine(ctx);
       case "smoke":
@@ -308,6 +322,8 @@ export function createRailCommand(deps: RailCommandDeps) {
         return openStatus(ctx);
       case "dispositions":
         return dispositions.openSettings(ctx);
+      case "grants":
+        return grants.openGrants(ctx);
       case "policy-rules":
         // Same routing as `/rail policy rules`: the status page's policy tab.
         return openStatus(ctx, "policy");
@@ -344,6 +360,8 @@ export function createRailCommand(deps: RailCommandDeps) {
       return;
     }
     if (sub === "set") return dispositions.runSet(rest, ctx);
+    if (sub === "grant") return grants.runGrant(rest, ctx);
+    if (sub === "grants" && !rest) return grants.openGrants(ctx);
     if (sub === "guide") return runGuide(rest, ctx);
     if (sub === "explain") return showExplain(ctx, rest);
     if (sub === "test") return runRailTest(rest, ctx);
@@ -354,37 +372,39 @@ export function createRailCommand(deps: RailCommandDeps) {
       if (!rest) return disableTurn(ctx);
     }
     if ((sub === "readonly" || sub === "ro") && !rest) return toggleReadOnly(ctx);
-    if (sub === "model") return runModelCommand(rest, ctx, state);
+    if (sub === "model") return runModelCommand(rest, ctx, state, () => updateRailStatus(ctx, state));
     if (sub === "smoke" && !rest) return deps.runRailSmoke(ctx);
     if (sub === "critique") return deps.runCritique(rest, ctx);
 
-    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|smoke|critique …]", "warning");
+    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|grant <text>|grant add|check <file>|grants|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|smoke|critique …]", "warning");
   }
 
   function getArgumentCompletions(argumentPrefix: string) {
     const prefix = argumentPrefix.replace(/^\s+/, "");
     const setMatch = prefix.match(/^set\s+(.*)$/i);
     if (setMatch) return dispositions.setCompletions(setMatch[1]!);
-    // The judge subform comes first: it is a different keyword set, and only
-    // `model judge ` (with the space) opens it, so `model ju` still completes
+    // The seat subforms come first: each is its own keyword set, and only
+    // `model judge ` (with the space) opens one, so `model ju` still completes
     // to `model judge` through the namer branch below.
-    const judgeMatch = prefix.match(/^model\s+judge\s+(.*)$/i);
-    if (judgeMatch) {
-      const partial = judgeMatch[1]!.toLowerCase();
-      // No "auto" and no "off": the judge cannot be disabled, and auto is the
-      // namer's cheap-model list.
-      const fixed = ["current", "status"];
+    const seatMatch = prefix.match(/^model\s+(judge|configurator)\s+(.*)$/i);
+    if (seatMatch) {
+      const seat = seatMatch[1]!.toLowerCase();
+      const partial = seatMatch[2]!.toLowerCase();
+      // The judge takes no "auto" and no "off" (it cannot be disabled, and
+      // auto is the namer's cheap-model list); the configurator has its own
+      // auto list and nothing to turn off.
+      const fixed = seat === "judge" ? ["current", "status"] : ["auto", "current", "status"];
       const items = [...fixed, ...state.availableModelSpecs]
         .filter((spec) => spec.toLowerCase().includes(partial))
         .slice(0, 20)
-        .map((spec) => ({ value: `model judge ${spec}`, label: spec, description: fixed.includes(spec) ? undefined : "configured model" }));
+        .map((spec) => ({ value: `model ${seat} ${spec}`, label: spec, description: fixed.includes(spec) ? undefined : "configured model" }));
       return items.length > 0 ? items : null;
     }
     const modelMatch = prefix.match(/^(model|critique)\s+(.*)$/i);
     if (modelMatch) {
       const sub = modelMatch[1]!.toLowerCase();
       const partial = modelMatch[2]!.toLowerCase();
-      const fixed = sub === "model" ? ["auto", "current", "off", "status", "judge"] : [];
+      const fixed = sub === "model" ? ["auto", "current", "off", "status", "save", "judge", "configurator"] : [];
       const specs = [...fixed, ...state.availableModelSpecs];
       const items = specs
         .filter((spec) => spec.toLowerCase().includes(partial))
@@ -398,5 +418,5 @@ export function createRailCommand(deps: RailCommandDeps) {
     return items.length > 0 ? items : null;
   }
 
-  return { handler, getArgumentCompletions, toggleForTurn };
+  return { handler, getArgumentCompletions, toggleForTurn, grants };
 }

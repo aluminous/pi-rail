@@ -18,6 +18,7 @@ import {
   type DispositionPersistence,
 } from "../src/dispositions.ts";
 import type { PersistedCapabilityClass } from "../src/persistent-settings.ts";
+import { sessionAddedClasses, sessionDispositionEdits } from "../src/session-policy.ts";
 import { createRuntimeState, syncCapabilityPreset, type RuntimeState } from "../src/state.ts";
 import { DispositionPage } from "../src/tui/disposition-page.ts";
 import { testConfig } from "./helpers.ts";
@@ -63,6 +64,7 @@ function spyPersistence(rows: Array<[CapabilityId, Disposition | undefined]>) {
     disposition: (id, disposition) => void rows.push([id, disposition]),
     capabilityClass: (id, entry) => void classes.push([id, entry]),
     capabilityDefinition: (id, definition) => void definitions.push([id, definition]),
+    baseOps: (ops) => assert.fail(`unexpected base-op write: ${JSON.stringify(ops)}`),
     classes,
     definitions,
   };
@@ -120,9 +122,9 @@ describe("disposition rows", () => {
     const config = testConfig();
     const state = createRuntimeState();
     setRowDisposition(config, state, "credentials", "deny");
-    assert.deepEqual(state.capabilities.overrides, { credentials: "deny" });
+    assert.deepEqual(sessionDispositionEdits(state), { credentials: "deny" });
     setRowDisposition(config, state, "credentials", "judge");
-    assert.deepEqual(state.capabilities.overrides, {});
+    assert.deepEqual(sessionDispositionEdits(state), {});
     assert.equal(dispositionRow(config, state, "credentials").modified, false);
   });
 
@@ -184,12 +186,12 @@ describe("saveDispositions", () => {
     assert.deepEqual(written, [["modify-project", "ask"], ["credentials", "deny"]]);
     assert.deepEqual(result.saved, ["modify-project", "credentials"]);
     assert.deepEqual(result.shadowed, []);
-    assert.deepEqual(state.capabilities.overrides, {}, "saved rows are no longer session overrides");
+    assert.deepEqual(sessionDispositionEdits(state), {}, "saved rows are no longer session overrides");
     const row = dispositionRow(config, state, "modify-project");
     assert.equal(row.value, "ask", "the effective value does not move on save");
     assert.equal(row.persisted, "ask");
     assert.equal(row.modified, false, "highlights clear once the value is persisted");
-    assert.equal(config.provenance.dispositions["modify-project"], globalRailConfigPath());
+    assert.deepEqual(config.provenance.dispositions["modify-project"], { layer: "global", file: globalRailConfigPath() });
   });
 
   it("reports rows a project config will win back", () => {
@@ -247,16 +249,16 @@ describe("DispositionPage", () => {
     const config = testConfig();
     const { page } = openPage(state, config);
     page.handleInput(RIGHT);
-    assert.deepEqual(state.capabilities.overrides, { "read-project": "judge" });
+    assert.deepEqual(sessionDispositionEdits(state), { "read-project": "judge" });
     page.handleInput("<enter>");
-    assert.deepEqual(state.capabilities.overrides, { "read-project": "ask" });
+    assert.deepEqual(sessionDispositionEdits(state), { "read-project": "ask" });
     page.handleInput(LEFT);
     page.handleInput(LEFT);
-    assert.deepEqual(state.capabilities.overrides, {}, "back on the persisted value the override is dropped");
+    assert.deepEqual(sessionDispositionEdits(state), {}, "back on the persisted value the override is dropped");
 
     page.handleInput("<down>");
     page.handleInput(LEFT);
-    assert.deepEqual(state.capabilities.overrides, { "read-system": "deny" });
+    assert.deepEqual(sessionDispositionEdits(state), { "read-system": "deny" });
   });
 
   it("colours modified rows and keeps that visible while the row is highlighted", () => {
@@ -277,11 +279,11 @@ describe("DispositionPage", () => {
     page.handleInput(RIGHT);
     page.handleInput("<down>");
     page.handleInput(RIGHT);
-    assert.deepEqual(state.capabilities.overrides, { "read-project": "judge", "read-system": "judge" });
+    assert.deepEqual(sessionDispositionEdits(state), { "read-project": "judge", "read-system": "judge" });
 
     page.handleInput(CTRL_S);
     assert.deepEqual(persisted, [["read-project", "judge"], ["read-system", "judge"]]);
-    assert.deepEqual(state.capabilities.overrides, {});
+    assert.deepEqual(sessionDispositionEdits(state), {});
     assert.doesNotMatch(line("read-project"), /<warning>/);
     assert.match(line("read-project"), /read-project\s+judge/, "the saved value stays in effect");
   });
@@ -293,7 +295,7 @@ describe("DispositionPage", () => {
     page.handleInput("<esc>");
     assert.deepEqual(closes, [undefined]);
     assert.deepEqual(persisted, [], "Esc is not a save");
-    assert.deepEqual(state.capabilities.overrides, { "read-project": "judge" });
+    assert.deepEqual(sessionDispositionEdits(state), { "read-project": "judge" });
   });
 
   it("banners the read-only preset and marks the rows it tightens", () => {
@@ -311,7 +313,7 @@ describe("DispositionPage", () => {
     assert.equal(page.selectedId(), "modify-project");
     page.handleInput(RIGHT);
     assert.match(line("modify-project"), /judge → deny\*/);
-    assert.deepEqual(state.capabilities.overrides, { "modify-project": "judge" });
+    assert.deepEqual(sessionDispositionEdits(state), { "modify-project": "judge" });
   });
 });
 
@@ -461,7 +463,7 @@ describe("DispositionPage class editing", () => {
 
     assert.match(text(), /touches-customer-data/);
     assert.match(text(), /<warning> \(new\)<\/warning>/);
-    assert.equal(state.capabilities.customClasses.length, 1);
+    assert.equal(sessionAddedClasses(state).length, 1);
     assert.match(notes.at(-1)!.message, /touches-customer-data added for this session, default ask/);
   });
 
@@ -484,7 +486,7 @@ describe("DispositionPage class editing", () => {
 
     assert.match(text(), /New capability class/, "still in the form");
     assert.match(text(), /<error>.*built-in class/);
-    assert.equal(state.capabilities.customClasses.length, 0);
+    assert.equal(sessionAddedClasses(state).length, 0);
   });
 
   it("edits a definition with e, prefilled with the current text", () => {
@@ -510,7 +512,8 @@ describe("DispositionPage class editing", () => {
     page.handleInput("e");
     // Narrow enough that read-project's paragraph must wrap several times.
     const lines = page.render(60);
-    const rules = lines.filter((line) => line.includes("<borderMuted>─</borderMuted>"));
+    // Older pi-tui colours each rule cell, newer ones the whole run.
+    const rules = lines.filter((line) => /<borderMuted>─+<\/borderMuted>/.test(line));
     assert.equal(rules.length, 2, "the editor draws the chat input's rules above and below");
     // The two rule lines render identically, so find them from opposite ends.
     const top = lines.indexOf(rules[0]!);
@@ -539,7 +542,7 @@ describe("DispositionPage class editing", () => {
     page.handleInput("\n"); // ctrl+j: a newline while editing, chat-style
     type(page, "Second line.");
     page.handleInput("<enter>");
-    assert.equal(state.capabilities.customClasses[0]?.definition, "First line. Second line.");
+    assert.equal(sessionAddedClasses(state)[0]?.definition, "First line. Second line.");
   });
 
   it("continues on a new line instead of committing when Enter follows a backslash", () => {
@@ -551,10 +554,10 @@ describe("DispositionPage class editing", () => {
     type(page, "First.\\");
     page.handleInput("<enter>");
     assert.match(text(), /New capability class/, "the backslash swallowed the commit");
-    assert.equal(state.capabilities.customClasses.length, 0);
+    assert.equal(sessionAddedClasses(state).length, 0);
     type(page, "Second.");
     page.handleInput("<enter>");
-    assert.equal(state.capabilities.customClasses[0]?.definition, "First. Second.");
+    assert.equal(sessionAddedClasses(state)[0]?.definition, "First. Second.");
   });
 
   it("cancels a form with Esc, leaving the session untouched", () => {
@@ -564,7 +567,7 @@ describe("DispositionPage class editing", () => {
     type(page, "abandoned");
     page.handleInput("<esc>");
     assert.match(text(), /↑↓ row/, "back in list mode");
-    assert.equal(state.capabilities.customClasses.length, 0);
+    assert.equal(sessionAddedClasses(state).length, 0);
     assert.equal(hasUnsavedChanges(state), false);
   });
 
@@ -595,7 +598,7 @@ describe("DispositionPage class editing", () => {
     type(page, "Customer records.");
     page.handleInput(CTRL_S);
     assert.deepEqual(persisted, [], "Ctrl+S committed the form, it did not persist");
-    assert.equal(state.capabilities.customClasses.length, 1);
+    assert.equal(sessionAddedClasses(state).length, 1);
 
     setRowDisposition(testConfig(), state, "modify-project", "deny");
     page.handleInput(CTRL_S);
@@ -612,6 +615,6 @@ describe("DispositionPage class editing", () => {
     page.handleInput(TAB);
     type(page, "Definition.");
     page.handleInput("<enter>");
-    assert.deepEqual(state.capabilities.customClasses.map((entry) => entry.id), ["deed"]);
+    assert.deepEqual(sessionAddedClasses(state).map((entry) => entry.id), ["deed"]);
   });
 });

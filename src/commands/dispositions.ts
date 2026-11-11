@@ -4,6 +4,7 @@ import { loadConfig, type ResolvedRailConfig } from "../config.ts";
 import {
   DEFAULT_DISPOSITION_PERSISTENCE,
   addClass,
+  classDetailPrefix,
   cycleDisposition,
   deleteClass,
   describeDispositionSource,
@@ -52,10 +53,14 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
   const { state, notify } = deps;
   const persist: DispositionPersistence = { ...DEFAULT_DISPOSITION_PERSISTENCE, ...deps.persist };
 
-  function config(ctx: ExtensionContext) {
-    const resolved = state.config ?? loadConfig(ctx);
-    state.config = resolved;
-    return resolved;
+  /**
+   * The effective config (session layer included). Read fresh at every use
+   * rather than captured: a session edit or a Ctrl+S changes what state.config
+   * returns, and a stale copy would show rows from before the edit.
+   */
+  function config(ctx: ExtensionContext): ResolvedRailConfig {
+    if (!state.config) state.config = loadConfig(ctx);
+    return state.config!;
   }
 
   function save(ctx: ExtensionContext): void {
@@ -73,8 +78,10 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
   async function openSettings(ctx: ExtensionContext): Promise<void> {
     const resolved = config(ctx);
     // The page outlives this call, so it reads state.config each refresh (a new
-    // session reloads it) and falls back to what we resolved here.
-    const current = () => state.config ?? resolved;
+    // session reloads it; a session edit refolds it) and falls back to the base
+    // resolved here only if the config was cleared.
+    const fallback = state.baseConfig ?? resolved;
+    const current = () => state.config ?? fallback;
     const opened = toggleRailPanel(ctx, state, "policy", (host) => new DispositionPage({
       ...host,
       rows: () => dispositionRows(current(), state),
@@ -91,7 +98,7 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
       console.error("The disposition page requires an interactive session (TUI or RPC).");
       return;
     }
-    await runSelectFlow(ctx, resolved);
+    await runSelectFlow(ctx, current);
   }
 
   /**
@@ -100,15 +107,15 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
    * session scope and the class list comes back so several rows can be edited
    * in a row. "Save persistently" is the Ctrl+S equivalent; cancel exits.
    */
-  async function runSelectFlow(ctx: ExtensionContext, resolved: ResolvedRailConfig): Promise<void> {
+  async function runSelectFlow(ctx: ExtensionContext, current: () => ResolvedRailConfig): Promise<void> {
     for (;;) {
-      const rows = dispositionRows(resolved, state);
+      const rows = dispositionRows(current(), state);
       const banner = presetBanner(state);
       const items: SelectItem<CapabilityId | "save" | "add">[] = rows.map((row) => ({
         value: row.id,
         label: dispositionSummary(row),
         searchText: `${row.id} ${row.value} ${row.name}`,
-        description: row.definition,
+        description: `${classDetailPrefix(row)}${row.definition}`,
       }));
       items.push({
         value: "add",
@@ -133,10 +140,10 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
         continue;
       }
       if (picked.value === "add") {
-        await runAddClass(ctx, resolved);
+        await runAddClass(ctx, current());
         continue;
       }
-      await runClassMenu(ctx, resolved, picked.value);
+      await runClassMenu(ctx, current(), picked.value);
     }
   }
 
@@ -210,7 +217,7 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
       return;
     }
     // Registry, not the built-in set: a custom class is settable the moment it exists.
-    const known = capabilityRegistry(resolved, state.capabilities).map((entry) => entry.id);
+    const known = capabilityRegistry(resolved).map((entry) => entry.id);
     if (!known.includes(id)) {
       notify(ctx, `Unknown capability class: ${id}. Known classes: ${known.join(", ")}`, "warning");
       return;
@@ -226,7 +233,7 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
       return;
     }
     setRowDisposition(resolved, state, id, disposition);
-    const after = dispositionRow(resolved, state, id);
+    const after = dispositionRow(config(ctx), state, id);
     const preset = after.presetTightened ? ` (${after.effective.source} preset still forces ${after.effective.disposition})` : "";
     notify(ctx, `${id} → ${disposition} for this session${preset}. /rail policy then Ctrl+S persists it.`);
   }
@@ -238,7 +245,7 @@ export function createDispositionCommands(deps: DispositionCommandDeps) {
       const partial = (parts[0] ?? "").toLowerCase();
       // Completions come from the registry too, so a class added this session is
       // immediately tab-completable.
-      const items = capabilityRegistry(state.config, state.capabilities)
+      const items = capabilityRegistry(state.config)
         .map((entry) => entry.id)
         .filter((id) => id.includes(partial))
         .map((id) => ({

@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import { ClassifierModelUnavailableError, describeClassifierFailure } from "../src/classifier-protocol.ts";
 import { runJudging, runNaming, type ClassifierIO, type CompleteFn } from "../src/classifier.ts";
+import { applyLayer } from "../src/policy-store.ts";
 import { IdleTimeoutError } from "../src/streaming-complete.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -401,5 +402,44 @@ describe("fail-closed guarantees", () => {
     const { io, calls } = makeIO([new Error("401 Unauthorized")]);
     await assert.rejects(() => name(io), ClassifierModelUnavailableError);
     assert.equal(calls.length, 1);
+  });
+});
+
+describe("rules-only classes and the namer", () => {
+  function withGrantClass() {
+    // A class a grant added: rules-only by default (the fold marks it namer: false).
+    const config = applyLayer(testConfig(), {
+      name: "session",
+      settings: {},
+      base: [],
+      grants: [{ id: "worktree-cleanup", request: "r", created: "c", ops: [
+        { op: "add-class", id: "worktree-cleanup", extends: "local-destructive", definition: "Removing linked git worktrees, unforced.", disposition: "allow" },
+        { op: "add-class", id: "opted-in", definition: "A class the grant lets the namer use.", namer: true },
+      ] }],
+      diagnostics: [],
+    });
+    return config;
+  }
+
+  it("leaves a rules-only class out of the namer's prompt, and keeps an opted-in one", async () => {
+    const { io, calls } = makeIO([NAME_READ]);
+    await runNaming({ io, model, config: withGrantClass(), toolName: "bash", input: { command: "git worktree remove ../x" } });
+    assert.ok(!calls[0]?.systemPrompt?.includes("worktree-cleanup"), "the namer never sees a rules-only class");
+    assert.ok(calls[0]?.systemPrompt?.includes("opted-in"));
+  });
+
+  it("drops a namer label naming a rules-only class, like an unknown id", async () => {
+    const { io } = makeIO(['{"labels":["worktree-cleanup","local-destructive"]}']);
+    const result = await runNaming({ io, model, config: withGrantClass(), toolName: "bash", input: { command: "git worktree remove --force ../x" } });
+    assert.deepEqual(result.labels, ["local-destructive"]);
+    const { io: only } = makeIO(['{"labels":["worktree-cleanup"]}']);
+    const alone = await runNaming({ io: only, model, config: withGrantClass(), toolName: "bash", input: { command: "x" } });
+    assert.deepEqual(alone.labels, ["unclassified"], "nothing left means unclassified");
+  });
+
+  it("still gives the judge the full registry, rules-only classes included", async () => {
+    const { io, calls } = makeIO([JUDGE_DENY]);
+    await runJudging({ io, model, config: withGrantClass(), toolName: "bash", input: { command: "x" }, labels: ["worktree-cleanup"] });
+    assert.ok(calls[0]?.systemPrompt?.includes("worktree-cleanup"));
   });
 });

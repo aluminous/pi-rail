@@ -1,9 +1,10 @@
 // The judge model as a picked setting: how a spec resolves (session override
 // over config over the "current" default), what `/rail model judge …` accepts,
-// and where the choice lands on disk. Every test that writes redirects the
-// agent dir first — none of these may touch the developer's real rail.json.
+// and that it stays a session value until `/rail model save` writes it. Every
+// test that could write redirects the agent dir first — none of these may
+// touch the developer's real rail.json.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { judgeModelSpec, resolveJudgeModel } from "../src/classifier.ts";
@@ -100,34 +101,39 @@ describe("/rail model judge", () => {
   it("reports the resolved judge model when bare, and for `status`", async () => {
     const fixture = fake();
     await runModelCommand("judge", fixture.ctx, fixture.state);
-    assert.match(lastNote(fixture), /Configured judge model: current/);
-    assert.match(lastNote(fixture), /Resolved judge model: anthropic\/claude-opus-4-5/);
+    assert.match(lastNote(fixture), /^judge: current → anthropic\/claude-opus-4-5$/m);
     assert.equal(fixture.state.classifier.judgeModelOverride, undefined, "querying changes nothing");
 
     await runModelCommand("judge status", fixture.ctx, fixture.state);
-    assert.match(lastNote(fixture), /Resolved judge model: anthropic\/claude-opus-4-5/);
+    assert.match(lastNote(fixture), /^judge: current → anthropic\/claude-opus-4-5$/m);
   });
 
-  it("sets an explicit model at session scope and persists it", async () => {
+  it("sets an explicit model at session scope, writing nothing until save", async () => {
     await withTempAgentDirAsync(async () => {
       const fixture = fake();
       await runModelCommand("judge openai/gpt-5.4", fixture.ctx, fixture.state);
 
       assert.equal(fixture.state.classifier.judgeModelOverride, "openai/gpt-5.4");
-      assert.match(lastNote(fixture), /Rail judge model saved: openai\/gpt-5\.4/);
+      assert.match(lastNote(fixture), /Rail judge: openai\/gpt-5\.4 — for this session; \/rail model save persists it\./);
+      assert.equal(existsSync(getPersistentConfigPath()), false, "nothing is written by the set itself");
+      assert.deepEqual(resolveJudgeModel(fixture.ctx, fixture.state.config!, fixture.state.classifier), strongAlternative);
+
+      await runModelCommand("save", fixture.ctx, fixture.state);
       assert.equal(readPersisted().classifier?.judgeModel, "openai/gpt-5.4");
       assert.equal(readPersisted().classifier?.model, undefined, "the namer's key is untouched");
-      assert.deepEqual(resolveJudgeModel(fixture.ctx, fixture.state.config!, fixture.state.classifier), strongAlternative);
+      assert.match(lastNote(fixture), /judge: current → openai\/gpt-5\.4/);
     });
   });
 
-  it("sets `current` and persists the spec, not the resolved model", async () => {
+  it("saves `current` as the spec, not the resolved model", async () => {
     await withTempAgentDirAsync(async () => {
       const fixture = fake();
+      fixture.state.config = testConfig((c) => void (c.classifier.judgeModel = "openai/gpt-5.4"));
       await runModelCommand("judge current", fixture.ctx, fixture.state);
 
       assert.equal(fixture.state.classifier.judgeModelOverride, "current");
-      assert.match(lastNote(fixture), /set to current and saved: anthropic\/claude-opus-4-5/);
+      assert.match(lastNote(fixture), /Rail judge: current → anthropic\/claude-opus-4-5 — for this session/);
+      await runModelCommand("save", fixture.ctx, fixture.state);
       assert.equal(readPersisted().classifier?.judgeModel, "current");
     });
   });
@@ -173,33 +179,42 @@ describe("/rail model keeps meaning the namer", () => {
       await runModelCommand("openai-codex/gpt-5.4-mini", fixture.ctx, fixture.state);
 
       assert.equal(fixture.state.classifier.modelOverride, "openai-codex/gpt-5.4-mini");
+      assert.equal(fixture.state.classifier.enabledOverride, true, "picking a namer model turns review on");
       assert.equal(fixture.state.classifier.judgeModelOverride, undefined);
+      await runModelCommand("save", fixture.ctx, fixture.state);
       assert.equal(readPersisted().classifier?.model, "openai-codex/gpt-5.4-mini");
       assert.equal(readPersisted().classifier?.judgeModel, undefined);
     });
   });
 
-  it("keeps both keys when each target is set in turn", async () => {
+  it("saves every seat set in turn in one save, and the configurator has its own keyword", async () => {
     await withTempAgentDirAsync(async () => {
       const fixture = fake();
       await runModelCommand("auto", fixture.ctx, fixture.state);
       await runModelCommand("judge openai/gpt-5.4", fixture.ctx, fixture.state);
+      await runModelCommand("configurator current", fixture.ctx, fixture.state);
+      assert.equal(fixture.state.classifier.grantModelOverride, "current");
+      await runModelCommand("configurator off", fixture.ctx, fixture.state);
+      assert.match(lastNote(fixture), /nothing to turn off/);
+      assert.equal(existsSync(getPersistentConfigPath()), false);
 
+      await runModelCommand("save", fixture.ctx, fixture.state);
       const persisted = readPersisted().classifier;
       assert.equal(persisted?.model, "auto");
       assert.equal(persisted?.judgeModel, "openai/gpt-5.4");
+      assert.equal(persisted?.grantModel, "current");
       assert.equal(persisted?.enabled, true);
     });
   });
 
-  it("shows both targets in the status report", async () => {
+  it("shows every seat in the status report, marking unsaved session values", async () => {
     const fixture = fake();
     fixture.state.classifier.judgeModelOverride = "openai/gpt-5.4";
     await runModelCommand("status", fixture.ctx, fixture.state);
 
     const report = lastNote(fixture);
-    assert.match(report, /Configured namer model: auto/);
-    assert.match(report, /Configured judge model: openai\/gpt-5\.4/);
-    assert.match(report, /Resolved judge model: openai\/gpt-5\.4/);
+    assert.match(report, /^namer: off$/m, "the default config has review off");
+    assert.match(report, /^judge: openai\/gpt-5\.4 \(this session, unsaved; saved: current\)$/m);
+    assert.match(report, /^configurator: auto → anthropic\/claude-opus-4-5$/m, "no listed configurator model has auth: auto falls back to current");
   });
 });

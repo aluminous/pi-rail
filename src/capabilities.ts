@@ -11,6 +11,7 @@
  * as you would edit a prompt.
  */
 import type { ResolvedRailConfig } from "./config.ts";
+import type { Provenance } from "./policy-store.ts";
 
 export const BUILTIN_CAPABILITY_IDS = [
   "read-project",
@@ -57,6 +58,23 @@ export interface CapabilityClass {
   /** Prompt text: the namer's entire description of this class. */
   definition: string;
   default: Disposition;
+  /**
+   * Custom classes only: the built-in class this one narrows. It decides how
+   * presets treat the class (presetDenies) and nothing else — in particular an
+   * explicit disposition on the parent does NOT flow to the child, because
+   * carving an allowed sub-class out of a judged parent is the point of
+   * declaring one.
+   */
+  extends?: BuiltinCapabilityId;
+  /**
+   * Custom classes only: false makes the class rules-only — it is left out of
+   * the namer's vocabulary and prompt entirely and is reachable only through
+   * `commands.classify` rules. Absent means the namer may use it. A class a
+   * grant adds is rules-only unless the grant opts in (GRANTS_PLAN decision
+   * "Grant-added classes are rules-only by default"): a class meant to be
+   * reached by a narrow rule must not be one mislabel away from widening.
+   */
+  namer?: boolean;
 }
 
 export const BUILTIN_CAPABILITY_CLASSES: CapabilityClass[] = [
@@ -231,33 +249,23 @@ export interface CapabilityStats {
 }
 
 /**
- * Session-scoped capability state. Lives in RuntimeState and is reset per
- * session: overrides are "for this session" by construction, which is how
- * local-destructive and friends are meant to be re-scoped.
+ * Session-scoped capability state: the read-only preset and per-class stats.
+ * Session policy edits are not here — they are ops in the session layer of the
+ * policy store (RuntimeState.sessionPolicy), folded into state.config like
+ * every other layer, so there is one place a disposition can come from.
  */
 export interface CapabilityState {
-  overrides: Partial<Record<CapabilityId, Disposition>>;
   /**
    * Session preset flipping a set of classes to deny; read-only mode sets
    * this. A preset can only tighten — it is severity-maxed against whatever
-   * the config and session overrides resolved to.
+   * the folded policy resolved to.
    */
   preset?: { name: string; deny: BuiltinCapabilityId[] };
   stats: Partial<Record<CapabilityId, CapabilityStats>>;
-  /**
-   * Classes added this session. Like disposition overrides these are live
-   * immediately — the namer sees them on the next call — and stay session-local
-   * until Ctrl+S writes them to the global config.
-   */
-  customClasses: CapabilityClass[];
-  /** Session edits to any class's definition (built-in or custom), keyed by id. */
-  definitionEdits: Record<string, string>;
-  /** Persisted custom classes this session removed; they drop out of the registry until saved or the session ends. */
-  deletedCustom: string[];
 }
 
 export function createCapabilityState(): CapabilityState {
-  return { overrides: {}, stats: {}, customClasses: [], definitionEdits: {}, deletedCustom: [] };
+  return { stats: {} };
 }
 
 export function createCapabilityStats(): CapabilityStats {
@@ -274,7 +282,8 @@ export function createCapabilityStats(): CapabilityStats {
  * Classes read-only mode denies. Writes and edits are already blocked
  * deterministically; this covers bash. Built-in ids by construction: the preset
  * is a fixed guarantee about read-only mode, so it cannot depend on classes a
- * user may rename or delete.
+ * user may rename or delete. Custom classes are reached through their
+ * declared parent (presetDenies).
  */
 export const READ_ONLY_PRESET_DENY: BuiltinCapabilityId[] = [
   "modify-project",
@@ -284,6 +293,24 @@ export const READ_ONLY_PRESET_DENY: BuiltinCapabilityId[] = [
   "persistence",
 ];
 
+/**
+ * Whether a preset denies class `id`. A built-in is denied when the preset
+ * names it. A custom class is denied when it extends a class the preset names
+ * — read-only mode tightens a `worktree-cleanup` that extends
+ * local-destructive — and also when it extends nothing at all: a custom class
+ * with no declared parent is treated as a writing class, so the safe
+ * behaviour never depends on the author remembering the declaration. A custom
+ * class extending a class the preset leaves alone (read-project, say) is left
+ * alone too. An id in no layer is not reached here; it already resolves to
+ * ask.
+ */
+export function presetDenies(preset: { deny: readonly BuiltinCapabilityId[] }, config: ResolvedRailConfig | undefined, id: CapabilityId): boolean {
+  if (isBuiltinCapabilityId(id)) return preset.deny.includes(id);
+  const custom = config?.capabilities.classes.find((entry) => entry.id === id);
+  if (!custom) return false;
+  return custom.extends === undefined || preset.deny.includes(custom.extends);
+}
+
 export function applyReadOnlyPreset(state: CapabilityState): void {
   state.preset = { name: "read-only", deny: READ_ONLY_PRESET_DENY };
 }
@@ -292,21 +319,14 @@ export function clearPreset(state: CapabilityState): void {
   state.preset = undefined;
 }
 
-export function setSessionDisposition(state: CapabilityState, id: CapabilityId, disposition: Disposition): void {
-  state.overrides[id] = disposition;
-}
-
-export function clearSessionDisposition(state: CapabilityState, id: CapabilityId): void {
-  delete state.overrides[id];
-}
-
 // ── The class registry ───────────────────────────────────────────────────────
 
 /**
  * Every class the rail currently knows, in a deterministic order: the twelve
- * built-ins in tuple order, then config-defined custom classes, then classes
- * this session added. Definition edits layer session-over-config-over-built-in;
- * custom classes this session deleted are dropped.
+ * built-ins in tuple order, then custom classes in the order the policy fold
+ * declared them (global, project, then session). Definition edits are already
+ * folded into `config`; pass the effective config (state.config) to see the
+ * session's classes and edits.
  *
  * Order is load-bearing beyond tidiness: this array is what
  * capabilityDefinitionsForPrompt serializes into the reviewers' system prompts,
@@ -317,29 +337,35 @@ export function clearSessionDisposition(state: CapabilityState, id: CapabilityId
  */
 export function capabilityRegistry(
   config: { capabilities?: { classes: CapabilityClass[]; definitions: Record<string, string> } } | undefined,
-  state: CapabilityState | undefined,
 ): CapabilityClass[] {
-  const configDefinitions = config?.capabilities?.definitions ?? {};
-  const sessionDefinitions = state?.definitionEdits ?? {};
-  const withDefinition = (entry: CapabilityClass): CapabilityClass => {
-    const definition = sessionDefinitions[entry.id] ?? configDefinitions[entry.id] ?? entry.definition;
+  const definitions = config?.capabilities?.definitions ?? {};
+  const registry = BUILTIN_CAPABILITY_CLASSES.map((entry) => {
+    const definition = definitions[entry.id] ?? entry.definition;
     return definition === entry.definition ? entry : { ...entry, definition };
-  };
-
-  const deleted = new Set(state?.deletedCustom ?? []);
-  const registry = BUILTIN_CAPABILITY_CLASSES.map(withDefinition);
+  });
   const seen = new Set(registry.map((entry) => entry.id));
   for (const entry of config?.capabilities?.classes ?? []) {
-    if (deleted.has(entry.id) || seen.has(entry.id)) continue;
-    seen.add(entry.id);
-    registry.push(withDefinition(entry));
-  }
-  for (const entry of state?.customClasses ?? []) {
     if (seen.has(entry.id)) continue;
     seen.add(entry.id);
-    registry.push(withDefinition(entry));
+    registry.push(entry);
   }
   return registry;
+}
+
+/**
+ * The classes the namer may use: the registry minus rules-only classes. This
+ * is what the namer's prompt lists and what its labels are validated against,
+ * so a label naming a rules-only class is dropped at parse like an unknown id.
+ * The judge keeps the full registry: it is handed labels a classify rule may
+ * have produced, and needs their definitions to review them.
+ */
+export function namerRegistry(registry: CapabilityClass[]): CapabilityClass[] {
+  return registry.filter((entry) => entry.namer !== false);
+}
+
+/** True for a class only classify rules can reach (see CapabilityClass.namer). */
+export function isRulesOnlyClass(entry: Pick<CapabilityClass, "namer"> | undefined): boolean {
+  return entry?.namer === false;
 }
 
 /** The id set the namer's labels are validated against. */
@@ -352,57 +378,52 @@ export type DispositionScope = "default" | "config" | "session" | "preset";
 export interface EffectiveDisposition {
   id: CapabilityId;
   disposition: Disposition;
+  /** "config" is a config file (global or project); "session" is the session layer of the policy store. */
   scope: DispositionScope;
-  /** For scope "config": the config file path that set it (see configSourceLabel). For "preset": the preset name. */
+  /** The layer and grant that set the row, for scopes "config" and "session" (see provenanceLabel). */
+  provenance?: Provenance;
+  /** For scope "preset": the preset name. */
   source?: string;
 }
 
 /**
- * Effective disposition for one class: session override beats persisted
- * config (global then project, already merged) beats the class default; an
- * active preset then applies severity-max on top, so a session preset can
- * tighten but never loosen what the user configured.
+ * The class default for an id: built-in, else a custom class in the folded
+ * config. `known: false` means the id is in no layer at all — a label naming
+ * a class that was just removed.
  */
-/**
- * The class default for an id, mirroring capabilityRegistry's precedence
- * (built-in, then config class, then session-added class). `known: false` means
- * the id is in no layer at all — a label naming a class that was just deleted.
- */
-function classDefault(
-  config: ResolvedRailConfig | undefined,
-  state: CapabilityState | undefined,
-  id: CapabilityId,
-): { disposition: Disposition; known: boolean } {
+function classDefault(config: ResolvedRailConfig | undefined, id: CapabilityId): { disposition: Disposition; known: boolean } {
   if (isBuiltinCapabilityId(id)) return { disposition: DEFAULT_DISPOSITIONS[id], known: true };
-  if (!state?.deletedCustom.includes(id)) {
-    const fromConfig = config?.capabilities.classes.find((entry) => entry.id === id);
-    if (fromConfig) return { disposition: fromConfig.default, known: true };
-  }
-  const fromSession = state?.customClasses.find((entry) => entry.id === id);
-  if (fromSession) return { disposition: fromSession.default, known: true };
+  const custom = config?.capabilities.classes.find((entry) => entry.id === id);
+  if (custom) return { disposition: custom.default, known: true };
   return { disposition: "ask", known: false };
 }
 
+/**
+ * Effective disposition for one class: whatever the policy fold left in the
+ * table row (session over project over global over the class default — the
+ * fold already ordered them), then an active preset applies severity-max on
+ * top, so a session preset can tighten but never loosen what the user
+ * configured. `state` contributes only the preset; pass undefined for the
+ * table value alone.
+ */
 export function getEffectiveDisposition(
   config: ResolvedRailConfig | undefined,
   state: CapabilityState | undefined,
   id: CapabilityId,
 ): EffectiveDisposition {
-  const base = classDefault(config, state, id);
-  // A label can outlive its class: deleting a custom class mid-session leaves
-  // in-flight labels pointing at nothing. Resolve those to ask rather than
-  // inheriting a stale override — the safe direction is to bring the user in.
+  const base = classDefault(config, id);
+  // A label can outlive its class: removing a custom class mid-session leaves
+  // in-flight labels pointing at nothing. Resolve those to ask — the safe
+  // direction is to bring the user in.
   if (!base.known) return { id, disposition: "ask", scope: "default" };
   let resolved: EffectiveDisposition = { id, disposition: base.disposition, scope: "default" };
-  const source = config?.provenance.dispositions[id];
+  const provenance = config?.provenance.dispositions[id];
   const configured = config?.dispositions[id];
-  if (configured && source && source !== "default") {
-    resolved = { id, disposition: configured, scope: "config", source };
+  if (configured && provenance && provenance.layer !== "default") {
+    resolved = { id, disposition: configured, scope: provenance.layer === "session" ? "session" : "config", provenance };
   }
-  const override = state?.overrides[id];
-  if (override) resolved = { id, disposition: override, scope: "session" };
   const preset = state?.preset;
-  if (preset && isBuiltinCapabilityId(id) && preset.deny.includes(id) && isStricter("deny", resolved.disposition)) {
+  if (preset && presetDenies(preset, config, id) && isStricter("deny", resolved.disposition)) {
     resolved = { id, disposition: "deny", scope: "preset", source: preset.name };
   }
   return resolved;
@@ -453,37 +474,6 @@ export function usedCapabilityStats(state: CapabilityState, registry: Capability
     .filter((id) => !listed.has(id) && state.stats[id])
     .map((id) => ({ id, stats: state.stats[id]! }));
   return [...ordered, ...orphaned];
-}
-
-// ── Session class edits ──────────────────────────────────────────────────────
-
-/** Adds a class at session scope. The namer sees it on the very next call; Ctrl+S makes it persistent. */
-export function addSessionClass(state: CapabilityState, entry: CapabilityClass): void {
-  state.deletedCustom = state.deletedCustom.filter((id) => id !== entry.id);
-  state.customClasses = [...state.customClasses.filter((existing) => existing.id !== entry.id), entry];
-}
-
-/** Edits any class's definition at session scope. Editing back to the original text drops the edit. */
-export function setSessionDefinition(state: CapabilityState, id: CapabilityId, definition: string): void {
-  const session = state.customClasses.find((entry) => entry.id === id);
-  if (session) {
-    session.definition = definition;
-    return;
-  }
-  state.definitionEdits = { ...state.definitionEdits, [id]: definition };
-}
-
-/**
- * Removes a custom class at session scope. A class this session added is simply
- * forgotten; a persisted one is recorded as deleted so Ctrl+S can remove it
- * from the config too.
- */
-export function deleteSessionClass(state: CapabilityState, id: CapabilityId): void {
-  const wasSessionAdded = state.customClasses.some((entry) => entry.id === id);
-  state.customClasses = state.customClasses.filter((entry) => entry.id !== id);
-  const { [id]: _dropped, ...rest } = state.definitionEdits;
-  state.definitionEdits = rest;
-  if (!wasSessionAdded && !state.deletedCustom.includes(id)) state.deletedCustom = [...state.deletedCustom, id];
 }
 
 export function recordCapabilityHits(state: CapabilityState, labels: CapabilityId[]): void {

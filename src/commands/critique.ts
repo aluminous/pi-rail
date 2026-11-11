@@ -21,7 +21,7 @@ Critique the definitions and the screen for:
 The taxonomy is deliberately capped at twelve classes: propose sharper wording before proposing a thirteenth, and say plainly if a proposed class is edge-case disease. Be concise and constructive; comment only where something could be improved.`;
 
 function formatTableForCritique(config: ResolvedRailConfig, state: RuntimeState): string {
-  return capabilityRegistry(config, state.capabilities).map((entry) => {
+  return capabilityRegistry(config).map((entry) => {
     const effective = getEffectiveDisposition(config, state.capabilities, entry.id);
     return `- ${entry.id} (${entry.name}) → ${effective.disposition} [${effective.scope}]\n  ${entry.definition}`;
   }).join("\n");

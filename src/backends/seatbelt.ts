@@ -6,7 +6,7 @@ import type { ResolvedRailConfig } from "../config.ts";
 import { existingRealPath } from "../paths.ts";
 import { compileFilesystemPolicy, findMatchingPattern, resolveConfigPath } from "../policy.ts";
 import { asStringArray, formatError, unique } from "../util.ts";
-import type { EffectivePolicy, RailBackend, WrappedCommand } from "./types.ts";
+import { SandboxStaleError, type EffectivePolicy, type RailBackend, type WrappedCommand } from "./types.ts";
 
 type SandboxManagerApi = typeof import("@anthropic-ai/sandbox-runtime")["SandboxManager"];
 
@@ -82,27 +82,30 @@ const KEYCHAIN_READ_ALLOWLIST = ["~/Library/Keychains", "/Library/Keychains", "/
  * The keychain paths this profile may read back out of the deny list. A
  * denyRead entry that a config file contributed is left standing: the user
  * asked for the keychain to be unreadable, and a built-in read-back would
- * silently undo it. Default-provenance entries — including ones an
- * `{"replace": false}` extension carried through — are pi-rail's own doing and
- * are the ones this lifts.
+ * silently undo it — and restating the default entry in a config file counts:
+ * a restatement claims a default (src/policy-store.ts, applyListAdd), so
+ * `"denyRead": ["~/Library/Keychains"]` keeps the keychain denied for bash.
+ * Entries still at default provenance are pi-rail's own doing and are the
+ * ones this lifts.
  */
 function keychainReadAllowlist(config: ResolvedRailConfig, cwd: string): string[] {
   const sources = config.provenance.lists["filesystem.denyRead"];
-  const configured = config.filesystem.denyRead.filter((pattern) => (sources[pattern] ?? "default") !== "default");
+  const configured = config.filesystem.denyRead.filter((pattern) => (sources[pattern]?.layer ?? "default") !== "default");
   return KEYCHAIN_READ_ALLOWLIST.filter((keychainPath) => findMatchingPattern(cwd, resolveConfigPath(cwd, keychainPath), configured) === undefined);
 }
 
 export function getSeatbeltRuntimeConfig(config: ResolvedRailConfig, cwd = process.cwd()): SandboxRuntimeConfig {
-  // TODO(worktree trust): this profile compiles LITERAL roots once, when the
-  // rail enables. The policy engine now trusts verified linked worktrees of
-  // the session repo (src/worktrees.ts) for file tools and the classifier,
-  // but a worktree outside the compiled write roots is still unwritable for
-  // sandboxed bash — and worktrees are typically created mid-session, after
-  // this compile, so even enumerating <gitdir>/worktrees/* here would not
-  // close the gap. Fixing it means recompiling and re-initializing the
-  // sandbox (or re-running enable) when a worktree appears; until then the
-  // README documents the limitation next to the filesystem docs. Worktrees
-  // under /tmp or the project directory are covered by the default roots.
+  // TODO(worktree trust): this profile compiles LITERAL roots from the
+  // configured lists — at initialize, and again whenever those lists change
+  // (SeatbeltBackend.applyPolicy). The policy engine also trusts verified
+  // linked worktrees of the session repo (src/worktrees.ts) for file tools
+  // and the classifier, but nothing recompiles when a worktree appears, so a
+  // worktree outside the write roots stays unwritable for sandboxed bash
+  // until a write root covering it is added (a session grant does it live).
+  // Closing the gap automatically means calling applyPolicy when a worktree
+  // is registered; the README documents the limitation next to the
+  // filesystem docs. Worktrees under /tmp or the project directory are
+  // covered by the default roots.
   //
   // Config pattern lists arrive pre-resolved through the shared compiler; only
   // the seatbelt-specific system allowlists are resolved here.
@@ -187,10 +190,69 @@ export function getSeatbeltRuntimeConfig(config: ResolvedRailConfig, cwd = proce
   } as SandboxRuntimeConfig;
 }
 
+/**
+ * The environment a sandboxed command is spawned with: the scrubbed `env`,
+ * plus exactly what the sandbox runtime itself changed.
+ *
+ * wrapWithSandboxArgv returns an `env` meant to be spawned as-is, and it is
+ * built from the HOST process.env, not from anything the caller passed in. On
+ * macOS and Linux (sandbox-runtime 0.0.61) it is process.env unchanged — the
+ * proxy plumbing (HTTP(S)_PROXY, ALL_PROXY, NO_PROXY and their lowercase
+ * forms, GIT_SSH_COMMAND, TMPDIR, SANDBOX_RUNTIME, the CA trust vars under TLS
+ * termination) is baked into the wrapped command as `env -u … VAR=…
+ * sandbox-exec …` assignments. On Windows it is process.env with the
+ * credential unsets applied and the proxy variables merged in. Merging that
+ * object over the scrubbed one therefore put back every variable the scrub
+ * had removed: `environment.allow` and wildcard unsets never reached bash.
+ *
+ * So the runtime's env is read as a diff against process.env rather than as
+ * a whole: a key it sets to a value process.env does not have (added or
+ * changed) is the runtime's own and is applied; a key of process.env it
+ * dropped is dropped here too; a key it passes through unchanged is the
+ * host's, and whether that reaches the command is the scrub's call alone.
+ * Computed generically instead of from a list of proxy names, so a runtime
+ * version that adds a variable keeps working without a change here. The one
+ * thing this cannot see is a runtime variable that happens to equal the host
+ * value of a variable the scrub removed; on macOS none travels this way.
+ */
+export function mergeSandboxRuntimeEnv(
+  scrubbed: Record<string, string>,
+  runtimeEnv: NodeJS.ProcessEnv | Record<string, string | undefined> | undefined,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const merged: Record<string, string> = { ...scrubbed };
+  if (!runtimeEnv) return merged;
+  for (const [key, value] of Object.entries(runtimeEnv)) {
+    if (typeof value !== "string") continue;
+    if (hostEnv[key] !== value) merged[key] = value;
+  }
+  for (const key of Object.keys(hostEnv)) {
+    if (typeof runtimeEnv[key] !== "string") delete merged[key];
+  }
+  return merged;
+}
+
+/** What initialize fixes for the backend's lifetime: switches and overrides, not lists. */
+function fixedSettings(config: ResolvedRailConfig): string {
+  return JSON.stringify({ filesystem: config.filesystem.enabled, network: config.network.enabled, seatbelt: config.seatbelt });
+}
+
+/** A runtime config's identity for "did anything change" (functions in seatbelt overrides are fixed, see fixedSettings). */
+function runtimeKey(runtime: SandboxRuntimeConfig): string {
+  return JSON.stringify(runtime);
+}
+
 export class SeatbeltBackend implements RailBackend {
   name = "seatbelt";
   private initialized = false;
   private manager: SandboxManagerApi | undefined;
+  /** The cwd the profile's relative patterns resolve against, fixed at initialize. */
+  private cwd: string | undefined;
+  /** fixedSettings() of the config initialize compiled. */
+  private fixed: string | undefined;
+  /** The runtime config in force, and its key; what a failed applyPolicy restores. */
+  private applied: SandboxRuntimeConfig | undefined;
+  private appliedKey: string | undefined;
 
   async supported(): Promise<{ ok: true } | { ok: false; reason: string }> {
     if (process.platform !== "darwin") {
@@ -212,27 +274,76 @@ export class SeatbeltBackend implements RailBackend {
     return { ok: true };
   }
 
-  async initialize(config: ResolvedRailConfig, _ctx: ExtensionContext): Promise<void> {
+  async initialize(config: ResolvedRailConfig, ctx: ExtensionContext): Promise<void> {
     const support = await this.supported();
     if (!support.ok) throw new Error(support.reason);
     const manager = this.manager ?? (await getSandboxManager());
-    await manager.initialize(getSeatbeltRuntimeConfig(config, _ctx.cwd));
+    const runtime = getSeatbeltRuntimeConfig(config, ctx.cwd);
+    await manager.initialize(runtime);
+    // sandbox-runtime's state is module-wide and initialize() returns early,
+    // keeping its old config, when an earlier initialize was never reset.
+    // Setting the config explicitly makes this profile the one in force
+    // either way.
+    manager.updateConfig(runtime);
     this.manager = manager;
+    this.cwd = ctx.cwd;
+    this.fixed = fixedSettings(config);
+    this.applied = runtime;
+    this.appliedKey = runtimeKey(runtime);
     this.initialized = true;
+  }
+
+  /**
+   * Re-points the live profile (RailBackend.applyPolicy). Verified on macOS
+   * against sandbox-runtime 0.0.61 (GRANTS_PLAN phase 4): wrapWithSandbox
+   * compiles the Seatbelt profile from the module config on every wrap, and
+   * the proxy reads network.allowedDomains / deniedDomains per connection,
+   * so after updateConfig the next wrapped command sees an added or removed
+   * write root, an added denyRead / denyWrite, and the env -u list from
+   * credentials.envVars, and the next connection sees the new domain lists.
+   *
+   * In-flight commands: a command already running keeps the filesystem
+   * profile and environment it was spawned with — Seatbelt profiles are
+   * fixed at exec. Its network is the exception: the proxy consults the
+   * domain lists per connection, so a running command's next connection
+   * already follows the new lists, in both directions.
+   *
+   * filesystem.enabled, network.enabled and the `seatbelt` overrides are not
+   * re-pointed: whether the proxy listeners exist at all is decided at
+   * initialize, so those apply at restart and a config that changes them is
+   * refused here.
+   */
+  applyPolicy(config: ResolvedRailConfig): void {
+    if (!this.initialized || !this.manager || this.cwd === undefined || !this.applied) throw new Error("Seatbelt backend is not initialized");
+    if (fixedSettings(config) !== this.fixed) {
+      throw new Error("filesystem.enabled, network.enabled and the seatbelt overrides are compiled when the rail starts and apply at restart");
+    }
+    // Compiled before anything changes: a throw here leaves the profile alone.
+    const next = getSeatbeltRuntimeConfig(config, this.cwd);
+    const key = runtimeKey(next);
+    if (key === this.appliedKey) return;
+    try {
+      this.manager.updateConfig(next);
+    } catch (error) {
+      try {
+        this.manager.updateConfig(this.applied);
+      } catch (restoreError) {
+        throw new SandboxStaleError(`Seatbelt could not apply the new policy (${formatError(error)}) nor restore the previous one (${formatError(restoreError)})`);
+      }
+      throw error;
+    }
+    this.applied = next;
+    this.appliedKey = key;
   }
 
   async wrapBash(command: string, cwd: string, env: Record<string, string>): Promise<WrappedCommand> {
     if (!this.initialized || !this.manager) throw new Error("Seatbelt backend is not initialized");
     const wrapped = await this.manager.wrapWithSandboxArgv(command, "bash");
-    const merged: Record<string, string> = { ...env };
-    for (const [key, value] of Object.entries(wrapped.env ?? {})) {
-      if (typeof value === "string") merged[key] = value;
-    }
     return {
       command: wrapped.argv[0] ?? "bash",
       args: wrapped.argv.slice(1),
       cwd,
-      env: merged,
+      env: mergeSandboxRuntimeEnv(env, wrapped.env),
     };
   }
 

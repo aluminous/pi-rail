@@ -13,8 +13,11 @@ import type { EffectivePolicy } from "./backends/types.ts";
 import { capabilityRegistry, getEffectiveDisposition, usedCapabilityStats, type CapabilityStats } from "./capabilities.ts";
 import { classifierEnabled, judgeModelSpec } from "./classifier.ts";
 import { configSourceLabel, type ProvenanceListKey, type ResolvedRailConfig } from "./config.ts";
+import { DEFAULT_COMMAND_ALLOW_FLAGS, describeFlags, outrankedRules, type CommandRule } from "./command-allowlist.ts";
+import { commandRulesOf, effectiveDispositionLabel, provenanceLabel, withSessionLayer, type Provenance } from "./policy-store.ts";
 import { getPersistentConfigPath } from "./persistent-settings.ts";
 import { resolveConfigPath } from "./policy.ts";
+import { persistedSeatSpec, REVIEWER_SEATS, seatSpec, seatUnsaved, type ReviewerSeat } from "./reviewer-seats.ts";
 import {
   modelUsageRows,
   recentClassifications,
@@ -198,10 +201,10 @@ const SCREEN_COLUMN: TableColumn = { header: "screen ✗/✓", align: "right" };
  */
 function capabilityRows(view: StatusView, withScreen: boolean): string[][] {
   const { state, config } = view;
-  const used = usedCapabilityStats(state.capabilities, capabilityRegistry(config, state.capabilities));
+  const used = usedCapabilityStats(state.capabilities, capabilityRegistry(config));
   return used.map(({ id, stats }) => {
     const effective = getEffectiveDisposition(config, state.capabilities, id);
-    const disposition = effective.scope === "default" ? effective.disposition : `${effective.disposition} (${effective.scope === "config" ? configSourceLabel(effective.source ?? "config") : effective.scope})`;
+    const disposition = effective.scope === "default" ? effective.disposition : `${effective.disposition} [${effectiveDispositionLabel(effective)}]`;
     const row = [
       id,
       disposition,
@@ -242,7 +245,7 @@ function sessionTab(view: StatusView): string[] {
     .filter(([, count]) => count > 0)
     .sort(([aKind, aCount], [bKind, bCount]) => bCount - aCount || aKind.localeCompare(bKind))
     .map(([kind, count]) => [kind, String(count)]);
-  const withScreen = usedCapabilityStats(state.capabilities, capabilityRegistry(view.config, state.capabilities))
+  const withScreen = usedCapabilityStats(state.capabilities, capabilityRegistry(view.config))
     .some(({ stats }) => stats.screenTripped + stats.screenClean > 0);
 
   const lines = [
@@ -442,13 +445,19 @@ function layerRows(config: ResolvedRailConfig, effective: EffectivePolicy | unde
       config.network.enabled ? "enabled" : "disabled",
       `${(effective?.network.allowedDomains ?? config.network.allowedDomains).length} allowed · ${config.network.deniedDomains.length} denied`,
     ],
-    ["environment", config.environment.unset.length > 0 || config.environment.allow.length > 0 ? "scrubbing" : "untouched", `${config.environment.allow.length} allowed · ${config.environment.unset.length} unset`],
+    ["environment", config.environment.unset.length > 0 || config.environment.allow.length > 0 ? "scrubbing" : "untouched", `${config.environment.allow.length === 0 ? "blacklist" : `whitelist (${config.environment.allow.length} allowed)`} · ${config.environment.unset.length} unset`],
     [
       "commands",
       config.commands.allow.length > 0 ? "allowlist" : config.commands.classify.length > 0 ? "classify" : "none",
       `${config.commands.allow.length} rule(s) exempt from review${config.commands.classify.length > 0 ? ` · ${config.commands.classify.length} classify rule(s)` : ""}`,
     ],
   ];
+}
+
+/** "openai/gpt-5.4 (this session, unsaved; saved: current)" or just the spec. */
+function seatSettingLabel(config: ResolvedRailConfig, state: RuntimeState, seat: ReviewerSeat): string {
+  const spec = seatSpec(config, state.classifier, seat);
+  return seatUnsaved(config, state.classifier, seat) ? `${spec} (this session, unsaved; saved: ${persistedSeatSpec(config, seat)})` : spec;
 }
 
 function engineTab(view: StatusView): string[] {
@@ -462,8 +471,8 @@ function engineTab(view: StatusView): string[] {
   ];
   const reviewerRows: string[][] = [
     ["namer", `${classifierEnabled(config, state.classifier) ? "enabled" : "disabled"} · ${view.classifierLabel}`],
-    ["namer model setting", state.classifier.modelOverride ? `${state.classifier.modelOverride} (this session)` : config.classifier.model],
-    ["judge model setting", state.classifier.judgeModelOverride ? `${state.classifier.judgeModelOverride} (this session)` : config.classifier.judgeModel],
+    // The effective (session) value, marked while it differs from the saved one.
+    ...REVIEWER_SEATS.map((seat) => [`${seat} model setting`, seatSettingLabel(config, state, seat)]),
     ["on failure", config.classifier.failClosed ? "fail closed (stop the turn)" : "fail open (warn and continue)"],
     ["timeout", `${config.classifier.timeoutMs}ms per attempt`],
     ["telemetry", config.classifier.telemetry],
@@ -506,18 +515,18 @@ const ENTRY_COLUMNS: TableColumn[] = [{ header: "entry", min: 12 }, { header: "s
  * config pattern, so each list's lookup also indexes the resolved form.
  */
 function sourceLookup(config: ResolvedRailConfig, listKey: ProvenanceListKey, resolvePaths: boolean, theme: PanelTheme): (entry: string) => string {
-  const lookup = new Map<string, string>();
-  for (const [entry, source] of Object.entries(config.provenance.lists[listKey])) {
-    lookup.set(entry, source);
-    if (resolvePaths) lookup.set(resolveConfigPath(process.cwd(), entry), source);
+  const lookup = new Map<string, Provenance>();
+  for (const [entry, provenance] of Object.entries(config.provenance.lists[listKey])) {
+    lookup.set(entry, provenance);
+    if (resolvePaths) lookup.set(resolveConfigPath(process.cwd(), entry), provenance);
   }
   return (entry: string) => {
     // Built-in defaults render a muted "default" — explicit enough to read
     // without a legend, quiet enough that the handful of entries a config
-    // file set still stand out at full strength.
-    const source = lookup.get(entry);
-    if (!source || source === "default") return theme.fg("muted", "default");
-    return configSourceLabel(source);
+    // file or grant set still stand out at full strength.
+    const provenance = lookup.get(entry);
+    if (!provenance || provenance.layer === "default") return theme.fg("muted", "default");
+    return provenanceLabel(provenance);
   };
 }
 
@@ -534,17 +543,45 @@ function listSection(view: StatusView, title: string, listKey: ProvenanceListKey
 }
 
 /**
- * User template → capability rules, shown only when there are any: an empty
- * "(none)" table on every policy page would be noise for the many configs that
- * never classify anything.
+ * One rule's entry text: the template, its flags allowlist when it has one,
+ * the class for a classify rule, and — when another rule with the same
+ * template always beats it — which one and why, so a rule that can never
+ * decide anything does not read as if it did.
  */
-function classifySection(view: StatusView): string[] {
+function ruleEntry(rule: CommandRule, outranked: ReturnType<typeof outrankedRules>): string {
+  // A built-in's own audited allowlist is long; name it rather than print it.
+  const builtinFlags = rule.source === "allow" ? DEFAULT_COMMAND_ALLOW_FLAGS[rule.template] : undefined;
+  const isBuiltinSet = !!rule.flags && !!builtinFlags && rule.flags.length === builtinFlags.length && rule.flags.every((flag) => builtinFlags.includes(flag));
+  const flags = rule.flags ? ` [flags: ${isBuiltinSet ? `built-in read-only set, ${rule.flags.length}` : describeFlags(rule.flags)}]` : "";
+  const target = rule.source === "classify" ? ` → ${rule.capability}` : "";
+  const loser = outranked.get(rule);
+  const note = loser ? ` (outranked by ${loser.source === "classify" ? "classify rule" : "rule"} → ${loser.capability}: ${loser.reason})` : "";
+  return `${rule.template}${flags}${target}${note}`;
+}
+
+/**
+ * The command rule pool as the matcher sees it. The classify table is shown
+ * only when there are classify rules: an empty "(none)" table on every policy
+ * page would be noise for the many configs that never classify anything.
+ */
+function commandRulesSection(view: StatusView): string[] {
   const { config, theme, width } = view;
-  if (config.commands.classify.length === 0) return [];
-  const source = sourceLookup(config, "commands.classify", false, theme);
+  const set = commandRulesOf(config);
+  const outranked = outrankedRules(set);
+  const allowSource = sourceLookup(config, "commands.allow", false, theme);
+  const classifySource = sourceLookup(config, "commands.classify", false, theme);
+  const allow = set.rules.filter((rule) => rule.source === "allow");
+  const classify = set.rules.filter((rule) => rule.source === "classify");
   return [
-    muted(theme, "Classified by template:"),
-    ...renderTable(theme, ENTRY_COLUMNS, config.commands.classify.map((rule) => [`${rule.template} → ${rule.capability}`, source(rule.template)]), width, { indent: "    " }),
+    muted(theme, "Exempt from review:"),
+    ...renderTable(theme, ENTRY_COLUMNS, allow.map((rule) => [ruleEntry(rule, outranked), allowSource(rule.template)]), width, { indent: "    ", empty: "(none)" }),
+    ...(classify.length > 0
+      ? [
+          muted(theme, "Classified by template:"),
+          ...renderTable(theme, ENTRY_COLUMNS, classify.map((rule) => [ruleEntry(rule, outranked), classifySource(rule.template)]), width, { indent: "    " }),
+        ]
+      : []),
+    ...note(theme, width, "any user rule beats a built-in default (restate a default to keep it under a broad rule of yours); then the most specific rule wins: more literal words, exact over `*`, a flags allowlist, the later layer, the stricter disposition — /rail test <command> shows the winner"),
   ];
 }
 
@@ -553,7 +590,7 @@ function policyTab(view: StatusView): string[] {
   const effective = state.backend?.describeEffectivePolicy(config);
   const degraded = effective?.filesystem.degraded ?? [];
   return [
-    ...note(theme, width, "source: default is built in; global/project name the config file that set the entry"),
+    ...note(theme, width, "source: default is built in; global/project/session name the layer that set the entry, then the grant when one did (project · worktree-cleanup)"),
     "",
     heading(theme, "Filesystem"),
     line(`Restrictions: ${config.filesystem.enabled ? "enabled" : "disabled (lists still route classifier exemptions)"}`),
@@ -577,15 +614,27 @@ function policyTab(view: StatusView): string[] {
     ...listSection(view, "Denied domains", "network.deniedDomains", config.network.deniedDomains, false),
     "",
     heading(theme, "Environment scrubbing"),
+    line(`Mode: ${config.environment.allow.length === 0 ? "blacklist (every variable except unset)" : "whitelist (only allow, minus unset)"}`),
     ...listSection(view, "Allow", "environment.allow", config.environment.allow, false),
     ...listSection(view, "Unset", "environment.unset", config.environment.unset, false),
     "",
     heading(theme, "Command rules"),
-    ...listSection(view, "Exempt from review", "commands.allow", config.commands.allow, false),
-    ...classifySection(view),
+    ...commandRulesSection(view),
     "",
     heading(theme, "Config sources"),
     ...renderTable(theme, [{ header: "source", min: 12 }, { header: "label", min: 6 }], config.sources.map((source) => [source, configSourceLabel(source)]), width),
+    ...(config.grants.length > 0
+      ? [
+          "",
+          heading(theme, "Grants"),
+          ...renderTable(
+            theme,
+            [{ header: "grant", min: 8 }, { header: "layer", min: 6 }, { header: "request", min: 12 }],
+            config.grants.map((grant) => [grant.id, grant.layer, grant.request]),
+            width,
+          ),
+        ]
+      : []),
     "",
     ...note(theme, width, "the decision policy itself is the disposition table — /rail policy opens it"),
   ];
@@ -612,7 +661,16 @@ export const TAB_TITLES: Record<StatusTab, string> = {
 };
 
 export function statusTabLines(view: StatusView, tab: StatusTab): string[] {
-  return RENDERERS[tab](view);
+  return RENDERERS[tab](effectiveView(view));
+}
+
+/**
+ * The view over the effective policy whichever config the caller passed: a
+ * base config gets the session layer folded on, an effective one is returned
+ * as is (withSessionLayer maps it back to its base first).
+ */
+function effectiveView(view: StatusView): StatusView {
+  return { ...view, config: withSessionLayer(view.config, view.state.sessionPolicy) };
 }
 
 /**

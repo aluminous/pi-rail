@@ -8,7 +8,6 @@ import {
   globalRailConfigPath,
   loadConfig,
   mergeConfig,
-  resolveConfigFile,
   type RailConfig,
 } from "../src/config.ts";
 import { getEffectiveDisposition } from "../src/capabilities.ts";
@@ -33,9 +32,9 @@ describe("mergeConfig", () => {
     assert.match(rejected.diagnostics[0]!, /statusLine/);
   });
 
-  it("replaces arrays wholesale rather than concatenating", () => {
+  it("appends a bare array to the inherited list rather than replacing it", () => {
     const merged = mergeConfig(testConfig(), { filesystem: { denyRead: ["/only/this"] } }, "test.json");
-    assert.deepEqual(merged.filesystem.denyRead, ["/only/this"]);
+    assert.deepEqual(merged.filesystem.denyRead, [...DEFAULT_CONFIG.filesystem.denyRead, "/only/this"]);
     assert.deepEqual(merged.filesystem.allowWrite, DEFAULT_CONFIG.filesystem.allowWrite);
   });
 
@@ -72,7 +71,7 @@ describe("mergeConfig", () => {
     const afterGlobal = mergeConfig(testConfig(), { network: { enabled: false } }, "global.json");
     const afterProject = mergeConfig(afterGlobal, { network: { enabled: true, allowedDomains: ["example.com"] } }, "project.json");
     assert.equal(afterProject.network.enabled, true);
-    assert.deepEqual(afterProject.network.allowedDomains, ["example.com"]);
+    assert.deepEqual(afterProject.network.allowedDomains, [...DEFAULT_CONFIG.network.allowedDomains, "example.com"]);
     assert.deepEqual(afterProject.sources, ["defaults", "global.json", "project.json"]);
   });
 
@@ -100,27 +99,25 @@ describe("mergeConfig", () => {
 
 // Every list takes the same two forms, so these exercise the shared chokepoint
 // through one representative list each rather than repeating nine times.
-describe("config list replace/extend", () => {
-  it("treats {replace: true} exactly like the bare array it is spelled out as", () => {
-    const bare = mergeConfig(testConfig(), { filesystem: { denyRead: ["/only/this"] } }, "test.json");
-    const explicit = mergeConfig(testConfig(), { filesystem: { denyRead: { replace: true, values: ["/only/this"] } } }, "test.json");
+describe("lists only append", () => {
+  const G = { layer: "global", file: "global.json" } as const;
+
+  it("treats a bare array exactly like {add: [...]}", () => {
+    const bare = mergeConfig(testConfig(), { filesystem: { denyRead: ["/extra/secret"] } }, "test.json");
+    const explicit = mergeConfig(testConfig(), { filesystem: { denyRead: { add: ["/extra/secret"] } } }, "test.json");
     assert.deepEqual(explicit.filesystem.denyRead, bare.filesystem.denyRead);
     assert.deepEqual(explicit.provenance.lists["filesystem.denyRead"], bare.provenance.lists["filesystem.denyRead"]);
-  });
-
-  it("appends to the inherited list under {replace: false}, inherited entries first", () => {
-    const merged = mergeConfig(testConfig(), { filesystem: { denyRead: { replace: false, values: ["/extra/secret"] } } }, "test.json");
-    assert.deepEqual(merged.filesystem.denyRead, [...DEFAULT_CONFIG.filesystem.denyRead, "/extra/secret"]);
+    assert.deepEqual(bare.filesystem.denyRead, [...DEFAULT_CONFIG.filesystem.denyRead, "/extra/secret"]);
   });
 
   it("extends every list, not just the filesystem ones", () => {
     const merged = mergeConfig(
       testConfig(),
       {
-        filesystem: { allowWrite: { replace: false, values: ["~/scratch"] }, denyWrite: { replace: false, values: ["~/.terraform.d"] } },
-        environment: { allow: { replace: false, values: ["MY_VAR"] }, unset: { replace: false, values: ["MY_SECRET"] } },
-        network: { allowedDomains: { replace: false, values: ["registry.npmjs.org"] } },
-        commands: { allow: { replace: false, values: ["shellcheck *"] } },
+        filesystem: { allowWrite: ["~/scratch"], denyWrite: ["~/.terraform.d"] },
+        environment: { allow: ["MY_VAR"], unset: ["MY_SECRET"] },
+        network: { allowedDomains: ["registry.npmjs.org"] },
+        commands: { allow: ["shellcheck *"] },
       },
       "test.json",
     );
@@ -133,68 +130,79 @@ describe("config list replace/extend", () => {
   });
 
   it("drops duplicates instead of repeating an entry the inherited list already has", () => {
-    const merged = mergeConfig(testConfig(), { filesystem: { denyRead: { replace: false, values: ["~/.ssh", "/extra", "/extra"] } } }, "test.json");
+    const merged = mergeConfig(testConfig(), { filesystem: { denyRead: ["~/.ssh", "/extra", "/extra"] } }, "test.json");
     assert.deepEqual(merged.filesystem.denyRead, [...DEFAULT_CONFIG.filesystem.denyRead, "/extra"]);
   });
 
+  it("drops inherited entries only when a layer removes them by name", () => {
+    const merged = mergeConfig(testConfig(), { filesystem: { denyRead: { remove: ["~/.ssh", "/never-there"] } } }, "global.json");
+    assert.deepEqual(merged.filesystem.denyRead, DEFAULT_CONFIG.filesystem.denyRead.filter((entry) => entry !== "~/.ssh"));
+    assert.equal(merged.provenance.lists["filesystem.denyRead"]["~/.ssh"], undefined, "a removed entry has no provenance left");
+    assert.deepEqual(merged.diagnostics, [], "removing an absent entry is a quiet no-op");
+  });
+
+  it("applies a layer's removes before its adds", () => {
+    const merged = mergeConfig(testConfig(), { filesystem: { denyRead: { remove: ["~/.ssh"], add: ["~/.ssh", "/extra"] } } }, "global.json");
+    assert.deepEqual(merged.filesystem.denyRead.slice(-2), ["~/.ssh", "/extra"]);
+    assert.deepEqual(merged.provenance.lists["filesystem.denyRead"]["~/.ssh"], G);
+  });
+
   it("extends an empty list into just its own values", () => {
-    const merged = mergeConfig(testConfig(), { filesystem: { allowRead: { replace: false, values: ["~/reference"] } } }, "test.json");
+    const merged = mergeConfig(testConfig(), { filesystem: { allowRead: ["~/reference"] } }, "test.json");
     assert.deepEqual(merged.filesystem.allowRead, ["~/reference"]);
   });
 
   describe("provenance", () => {
     it("labels only the added entries, leaving inherited sources intact", () => {
-      const merged = mergeConfig(testConfig(), { filesystem: { denyRead: { replace: false, values: ["/extra/secret"] } } }, "global.json");
+      const merged = mergeConfig(testConfig(), { filesystem: { denyRead: ["/extra/secret"] } }, "global.json");
       const sources = merged.provenance.lists["filesystem.denyRead"];
-      assert.equal(sources["/extra/secret"], "global.json");
-      assert.equal(sources["~/.ssh"], "default", "an inherited entry keeps the source that introduced it");
+      assert.deepEqual(sources["/extra/secret"], G);
+      assert.deepEqual(sources["~/.ssh"], { layer: "default" }, "an untouched default keeps default provenance");
+    });
+
+    it("lets a restatement claim a built-in default in place", () => {
+      const merged = mergeConfig(testConfig(), { filesystem: { denyRead: ["~/.ssh"] } }, "global.json");
+      assert.deepEqual(merged.filesystem.denyRead, DEFAULT_CONFIG.filesystem.denyRead, "position and membership are unchanged");
+      assert.deepEqual(merged.provenance.lists["filesystem.denyRead"]["~/.ssh"], G);
     });
 
     it("credits the layer that introduced an entry, not the one that restates it", () => {
-      const afterGlobal = mergeConfig(testConfig(), { commands: { allow: { replace: false, values: ["cargo *"] } } }, "global.json");
-      const afterProject = mergeConfig(afterGlobal, { commands: { allow: { replace: false, values: ["cargo *", "just *"] } } }, "project.json");
+      const afterGlobal = mergeConfig(testConfig(), { commands: { allow: ["cargo *"] } }, "global.json");
+      const afterProject = mergeConfig(afterGlobal, { commands: { allow: ["cargo *", "just *"] } }, "/repo/.pi/rail.json");
       const sources = afterProject.provenance.lists["commands.allow"];
-      assert.equal(sources["cargo *"], "global.json");
-      assert.equal(sources["just *"], "project.json");
+      assert.deepEqual(sources["cargo *"], G);
+      assert.deepEqual(sources["just *"], { layer: "project", file: "/repo/.pi/rail.json" });
     });
   });
 
   describe("three layers", () => {
-    it("accumulates through extend on extend", () => {
-      const afterGlobal = mergeConfig(testConfig(), { network: { allowedDomains: { replace: false, values: ["global.example"] } } }, "global.json");
-      const afterProject = mergeConfig(afterGlobal, { network: { allowedDomains: { replace: false, values: ["project.example"] } } }, "project.json");
+    it("accumulates through every layer", () => {
+      const afterGlobal = mergeConfig(testConfig(), { network: { allowedDomains: ["global.example"] } }, "global.json");
+      const afterProject = mergeConfig(afterGlobal, { network: { allowedDomains: ["project.example"] } }, "/repo/.pi/rail.json");
       assert.deepEqual(afterProject.network.allowedDomains, [...DEFAULT_CONFIG.network.allowedDomains, "global.example", "project.example"]);
       const sources = afterProject.provenance.lists["network.allowedDomains"];
-      assert.equal(sources["github.com"], "default");
-      assert.equal(sources["global.example"], "global.json");
-      assert.equal(sources["project.example"], "project.json");
+      assert.equal(sources["github.com"]?.layer, "default");
+      assert.equal(sources["global.example"]?.layer, "global");
+      assert.equal(sources["project.example"]?.layer, "project");
     });
 
-    it("discards both earlier layers when the last one replaces", () => {
-      const afterGlobal = mergeConfig(testConfig(), { network: { allowedDomains: { replace: false, values: ["global.example"] } } }, "global.json");
-      const afterProject = mergeConfig(afterGlobal, { network: { allowedDomains: ["project.example"] } }, "project.json");
-      assert.deepEqual(afterProject.network.allowedDomains, ["project.example"]);
-      assert.deepEqual(afterProject.provenance.lists["network.allowedDomains"], { "project.example": "project.json" });
-    });
-
-    it("extends whatever the previous layer replaced with, not the defaults", () => {
+    it("lets a later layer remove what an earlier layer added", () => {
       const afterGlobal = mergeConfig(testConfig(), { network: { allowedDomains: ["global.example"] } }, "global.json");
-      const afterProject = mergeConfig(afterGlobal, { network: { allowedDomains: { replace: false, values: ["project.example"] } } }, "project.json");
-      assert.deepEqual(afterProject.network.allowedDomains, ["global.example", "project.example"]);
-      assert.deepEqual(afterProject.provenance.lists["network.allowedDomains"], {
-        "global.example": "global.json",
-        "project.example": "project.json",
-      });
+      const afterProject = mergeConfig(afterGlobal, { network: { allowedDomains: { remove: ["global.example", "github.com"], add: ["project.example"] } } }, "/repo/.pi/rail.json");
+      assert.ok(!afterProject.network.allowedDomains.includes("global.example"));
+      assert.ok(!afterProject.network.allowedDomains.includes("github.com"));
+      assert.equal(afterProject.network.allowedDomains.at(-1), "project.example");
     });
   });
 
-  describe("malformed forms leave the list exactly as it was", () => {
+  describe("malformed and removed forms leave the list exactly as it was", () => {
     const cases: Array<{ name: string; value: unknown; diagnostic: string }> = [
-      { name: "missing values", value: { replace: false }, diagnostic: `"values" is required` },
-      { name: "non-boolean replace", value: { replace: "false", values: ["/x"] }, diagnostic: `"replace" must be true or false` },
-      { name: "absent replace", value: { values: ["/x"] }, diagnostic: `"replace" must be true or false` },
-      { name: "unknown key", value: { replace: false, values: ["/x"], merge: true }, diagnostic: "unexpected key merge" },
-      { name: "non-string values", value: { replace: false, values: [7] }, diagnostic: "expected an array of strings" },
+      { name: "the removed {replace: true} form", value: { replace: true, values: ["/x"] }, diagnostic: `the {"replace", "values"} form has been removed` },
+      { name: "the removed {replace: false} form", value: { replace: false, values: ["/x"] }, diagnostic: "lists only append" },
+      { name: "values without replace", value: { values: ["/x"] }, diagnostic: `the {"replace", "values"} form has been removed` },
+      { name: "unknown key", value: { add: ["/x"], merge: true }, diagnostic: "unexpected key merge" },
+      { name: "non-string add", value: { add: [7] }, diagnostic: "expected an array of strings" },
+      { name: "non-string values", value: [7], diagnostic: "expected an array of strings" },
       { name: "a bare string", value: "everything", diagnostic: "expected an array of strings" },
     ];
 
@@ -203,42 +211,41 @@ describe("config list replace/extend", () => {
         const merged = mergeConfig(testConfig(), { filesystem: { denyRead: value as never } }, "test.json");
         assert.deepEqual(merged.filesystem.denyRead, DEFAULT_CONFIG.filesystem.denyRead);
         assert.deepEqual(merged.provenance.lists["filesystem.denyRead"], DEFAULT_CONFIG.provenance.lists["filesystem.denyRead"]);
-        assert.ok(
-          merged.diagnostics.some((entry) => entry.includes("test.json.filesystem.denyRead") && entry.includes(diagnostic)),
-          `expected a diagnostic naming the list and ${diagnostic}; got ${JSON.stringify(merged.diagnostics)}`,
-        );
+        const matching = merged.diagnostics.filter((entry) => entry.includes("test.json.filesystem.denyRead") && entry.includes(diagnostic));
+        assert.equal(matching.length, 1, `expected one diagnostic naming the list and ${diagnostic}; got ${JSON.stringify(merged.diagnostics)}`);
       });
     }
 
-    it("leaves an earlier layer's extension standing", () => {
-      const afterGlobal = mergeConfig(testConfig(), { commands: { allow: { replace: false, values: ["cargo *"] } } }, "global.json");
-      const afterProject = mergeConfig(afterGlobal, { commands: { allow: { replace: false } as never } }, "project.json");
+    it("leaves an earlier layer's addition standing", () => {
+      const afterGlobal = mergeConfig(testConfig(), { commands: { allow: ["cargo *"] } }, "global.json");
+      const afterProject = mergeConfig(afterGlobal, { commands: { allow: { replace: true, values: [] } as never } }, "project.json");
       assert.deepEqual(afterProject.commands.allow, afterGlobal.commands.allow);
-      assert.equal(afterProject.provenance.lists["commands.allow"]["cargo *"], "global.json");
+      assert.deepEqual(afterProject.provenance.lists["commands.allow"]["cargo *"], G);
     });
   });
 });
 
 describe("config provenance", () => {
-  it("seeds every default list entry with source \"default\"", () => {
+  it("seeds every default list entry with the default layer", () => {
     const config = testConfig();
-    assert.equal(config.provenance.lists["filesystem.denyRead"]["~/.ssh"], "default");
-    assert.equal(config.provenance.lists["environment.allow"]["PATH"], "default");
-    assert.equal(config.provenance.lists["commands.allow"]["grep *"], "default");
+    assert.deepEqual(config.provenance.lists["filesystem.denyRead"]["~/.ssh"], { layer: "default" });
+    assert.deepEqual(config.provenance.lists["environment.unset"]["*_TOKEN"], { layer: "default" });
+    assert.deepEqual(config.provenance.lists["commands.allow"]["grep *"], { layer: "default" });
   });
 
-  it("labels replaced arrays with the writing source, entry by entry", () => {
-    const merged = mergeConfig(testConfig(), { filesystem: { denyRead: ["/only/this"] }, environment: { unset: ["MY_SECRET"] } }, "global.json");
-    assert.deepEqual(merged.provenance.lists["filesystem.denyRead"], { "/only/this": "global.json" });
-    assert.deepEqual(merged.provenance.lists["environment.unset"], { MY_SECRET: "global.json" });
-    assert.equal(merged.provenance.lists["filesystem.allowWrite"]["."], "default", "untouched lists keep default provenance");
-  });
-
-  it("tracks last-writer-wins across layered global then project merges", () => {
-    const afterGlobal = mergeConfig(testConfig(), { network: { allowedDomains: ["global.example"] } }, "global.json");
-    assert.deepEqual(afterGlobal.provenance.lists["network.allowedDomains"], { "global.example": "global.json" });
-    const afterProject = mergeConfig(afterGlobal, { network: { allowedDomains: ["project.example"] } }, "project.json");
-    assert.deepEqual(afterProject.provenance.lists["network.allowedDomains"], { "project.example": "project.json" });
+  it("names the layer, the grant, and the file behind each entry", () => {
+    const merged = mergeConfig(
+      testConfig(),
+      {
+        environment: { unset: ["MY_SECRET"] },
+        grants: [{ id: "npm-registry", request: "let npm reach its registry", created: "2026-11-11", ops: [{ op: "add-to-list", list: "network.allowedDomains", values: ["registry.npmjs.org"] }] }],
+      },
+      "global.json",
+    );
+    assert.deepEqual(merged.provenance.lists["environment.unset"].MY_SECRET, { layer: "global", file: "global.json" });
+    assert.deepEqual(merged.provenance.lists["network.allowedDomains"]["registry.npmjs.org"], { layer: "global", grantId: "npm-registry", file: "global.json" });
+    assert.deepEqual(merged.provenance.lists["filesystem.allowWrite"]["."], { layer: "default" }, "untouched lists keep default provenance");
+    assert.deepEqual(merged.grants, [{ layer: "global", id: "npm-registry", request: "let npm reach its registry", file: "global.json" }]);
   });
 });
 
@@ -255,7 +262,7 @@ describe("capabilities config", () => {
     assert.deepEqual(config.capabilities.classes, [
       { id: "touches-customer-data", name: "touches-customer-data", definition: "Customer records.", default: "ask" },
     ]);
-    assert.equal(config.provenance.capabilityClasses["touches-customer-data"], globalPath);
+    assert.deepEqual(config.provenance.classes["touches-customer-data"], { layer: "global", file: globalPath });
   });
 
   it("skips invalid class entries with a diagnostic and still loads the rest", () => {
@@ -298,8 +305,8 @@ describe("capabilities config", () => {
     const merged = mergeConfig(base, { capabilities: { classes: [{ id: "alpha", definition: "Project alpha." }] } }, projectPath);
     assert.deepEqual(merged.capabilities.classes.map((entry) => entry.id), ["alpha", "beta"], "position is preserved");
     assert.equal(merged.capabilities.classes[0]!.definition, "Project alpha.", "project wins per id");
-    assert.equal(merged.provenance.capabilityClasses.alpha, projectPath);
-    assert.equal(merged.provenance.capabilityClasses.beta, globalPath, "untouched classes keep their source");
+    assert.equal(merged.provenance.classes.alpha?.file, projectPath);
+    assert.equal(merged.provenance.classes.beta?.file, globalPath, "untouched classes keep their source");
   });
 
   it("accepts built-in definition overrides and rejects unknown keys", () => {
@@ -309,7 +316,7 @@ describe("capabilities config", () => {
       globalPath,
     );
     assert.deepEqual(config.capabilities.definitions, { "read-project": "New wording." });
-    assert.equal(config.provenance.capabilityDefinitions["read-project"], globalPath);
+    assert.deepEqual(config.provenance.definitions["read-project"], { layer: "global", file: globalPath });
     assert.match(config.diagnostics.join("\n"), /definitions\.made-up: not a built-in capability class/);
   });
 
@@ -340,7 +347,7 @@ describe("commands.classify config", () => {
   it("parses template → capability entries against the built-in classes", () => {
     const config = mergeConfig(testConfig(), { commands: { classify: [{ template: "docker *", capability: "run-dev-tools" }] } }, globalPath);
     assert.deepEqual(config.commands.classify, [{ template: "docker *", capability: "run-dev-tools" }]);
-    assert.equal(config.provenance.lists["commands.classify"]["docker *"], globalPath);
+    assert.equal(config.provenance.lists["commands.classify"]["docker *"]?.file, globalPath);
     assert.deepEqual(config.diagnostics, []);
   });
 
@@ -368,7 +375,7 @@ describe("commands.classify config", () => {
       globalPath,
     );
     assert.deepEqual(config.commands.classify, [{ template: "docker *", capability: "run-dev-tools" }]);
-    assert.match(config.diagnostics.join("\n"), /classify\[0\]: "k8s-ops" is not a known capability class — declare it in capabilities\.classes first/);
+    assert.match(config.diagnostics.join("\n"), /classify\[0\]: "k8s-ops" is not a known capability class — declare it \(capabilities\.classes or an add-class op\) first/);
   });
 
   it("skips malformed entries entry by entry, with the array index in the diagnostic", () => {
@@ -401,19 +408,17 @@ describe("commands.classify config", () => {
     assert.match(diagnostics, /classify\[6\]: unexpected key disposition/);
   });
 
-  it("takes both list forms, extending by default entry order", () => {
+  it("takes a bare array or {add}, appending in entry order", () => {
     const base = mergeConfig(testConfig(), { commands: { classify: [{ template: "kubectl *", capability: "read-system" }] } }, globalPath);
-    const extended = mergeConfig(base, { commands: { classify: { replace: false, values: [{ template: "docker *", capability: "run-dev-tools" }] } } }, projectPath);
+    const extended = mergeConfig(base, { commands: { classify: { add: [{ template: "docker *", capability: "run-dev-tools" }] } } }, projectPath);
+    const bare = mergeConfig(base, { commands: { classify: [{ template: "docker *", capability: "run-dev-tools" }] } }, projectPath);
     assert.deepEqual(extended.commands.classify, [
       { template: "kubectl *", capability: "read-system" },
       { template: "docker *", capability: "run-dev-tools" },
     ]);
-    assert.equal(extended.provenance.lists["commands.classify"]["kubectl *"], globalPath);
-    assert.equal(extended.provenance.lists["commands.classify"]["docker *"], projectPath);
-
-    const replaced = mergeConfig(base, { commands: { classify: [{ template: "docker *", capability: "run-dev-tools" }] } }, projectPath);
-    assert.deepEqual(replaced.commands.classify, [{ template: "docker *", capability: "run-dev-tools" }]);
-    assert.deepEqual(replaced.provenance.lists["commands.classify"], { "docker *": projectPath });
+    assert.deepEqual(bare.commands.classify, extended.commands.classify);
+    assert.equal(extended.provenance.lists["commands.classify"]["kubectl *"]?.file, globalPath);
+    assert.equal(extended.provenance.lists["commands.classify"]["docker *"]?.file, projectPath);
   });
 
   it("credits the introducing layer for a restatement but the re-mapping layer for a changed class", () => {
@@ -424,20 +429,20 @@ describe("commands.classify config", () => {
     );
     const merged = mergeConfig(
       base,
-      { commands: { classify: { replace: false, values: [{ template: "docker *", capability: "run-dev-tools" }, { template: "kubectl *", capability: "off-machine-effects" }] } } },
+      { commands: { classify: [{ template: "docker *", capability: "run-dev-tools" }, { template: "kubectl *", capability: "off-machine-effects" }] } },
       projectPath,
     );
     assert.deepEqual(merged.commands.classify, [
       { template: "kubectl *", capability: "off-machine-effects" },
       { template: "docker *", capability: "run-dev-tools" },
     ], "a re-mapped template keeps its position");
-    assert.equal(merged.provenance.lists["commands.classify"]["docker *"], globalPath, "a pure restatement credits the layer that introduced it");
-    assert.equal(merged.provenance.lists["commands.classify"]["kubectl *"], projectPath);
+    assert.equal(merged.provenance.lists["commands.classify"]["docker *"]?.file, globalPath, "a pure restatement credits the layer that introduced it");
+    assert.equal(merged.provenance.lists["commands.classify"]["kubectl *"]?.file, projectPath);
   });
 
-  it("leaves the inherited list alone when the envelope itself is malformed", () => {
+  it("leaves the inherited list alone when the envelope itself is malformed or removed", () => {
     const base = mergeConfig(testConfig(), { commands: { classify: [{ template: "kubectl *", capability: "read-system" }] } }, globalPath);
-    for (const value of [{ replace: false }, { values: [] }, { replace: false, values: {} }, "kubectl *", { replace: false, values: [], merge: true }]) {
+    for (const value of [{ replace: false, values: [] }, { values: [] }, { add: {} }, "kubectl *", { add: [], merge: true }, { remove: ["kubectl *"] }]) {
       const merged = mergeConfig(base, { commands: { classify: value as never } }, projectPath);
       assert.deepEqual(merged.commands.classify, base.commands.classify, JSON.stringify(value));
       assert.deepEqual(merged.provenance.lists["commands.classify"], base.provenance.lists["commands.classify"]);
@@ -451,44 +456,21 @@ describe("commands.classify config", () => {
   });
 });
 
-// The pi-guard → pi-rail compatibility seam. rail.json is the name now, but a
-// user whose live config is still guard.json must keep working — and must not
-// end up with half their settings in each file.
-describe("rail.json / legacy guard.json resolution", () => {
+describe("loadConfig layering", () => {
   const writeJson = (dir: string, name: string, body: unknown) => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, name), JSON.stringify(body), "utf8");
   };
 
-  it("prefers rail.json, falls back to guard.json, and defaults to rail.json when neither exists", () => {
-    const fixture = makeFixtureDir();
-    try {
-      assert.deepEqual(resolveConfigFile(fixture.dir), { path: path.join(fixture.dir, "rail.json"), legacy: false });
-
-      writeJson(fixture.dir, "guard.json", {});
-      assert.deepEqual(resolveConfigFile(fixture.dir), { path: path.join(fixture.dir, "guard.json"), legacy: true });
-
-      writeJson(fixture.dir, "rail.json", {});
-      assert.deepEqual(resolveConfigFile(fixture.dir), {
-        path: path.join(fixture.dir, "rail.json"),
-        legacy: false,
-        ignoredLegacyPath: path.join(fixture.dir, "guard.json"),
-      });
-    } finally {
-      fixture.cleanup();
-    }
-  });
-
   /** loadConfig against a throwaway agent dir and project dir; both layers start empty. */
-  function withLayers(fn: (layers: { globalDir: string; projectDir: string; load: () => ReturnType<typeof loadConfig> }) => void): void {
+  function withLayers(fn: (layers: { globalDir: string; projectDir: string; load: (trusted?: boolean) => ReturnType<typeof loadConfig> }) => void): void {
     withTempAgentDir((agentDir) => {
       const project = makeFixtureDir();
       try {
-        const ctx = { cwd: project.dir, isProjectTrusted: () => true } as unknown as ExtensionContext;
         fn({
           globalDir: path.join(agentDir, "extensions"),
           projectDir: path.join(project.dir, CONFIG_DIR_NAME),
-          load: () => loadConfig(ctx),
+          load: (trusted = true) => loadConfig({ cwd: project.dir, isProjectTrusted: () => trusted } as unknown as ExtensionContext),
         });
       } finally {
         project.cleanup();
@@ -496,104 +478,71 @@ describe("rail.json / legacy guard.json resolution", () => {
     });
   }
 
-  it("loads a legacy global guard.json exactly as before, with one advisory", () => {
-    withLayers(({ globalDir, load }) => {
-      writeJson(globalDir, "guard.json", { backend: "none", network: { enabled: false } });
-      const config = load();
-      assert.equal(config.backend, "none");
-      assert.equal(config.network.enabled, false);
-      assert.equal(config.sources.at(-1), path.join(globalDir, "guard.json"));
-      const advisory = config.diagnostics.filter((line) => line.includes("guard.json"));
-      assert.equal(advisory.length, 1);
-      assert.match(advisory[0]!, /Loaded legacy .*guard\.json/);
-      assert.match(advisory[0]!, /rename it to rail\.json/);
-    });
-  });
-
-  it("loads a global rail.json with no advisory at all", () => {
+  it("loads a global rail.json with no diagnostics at all", () => {
     withLayers(({ globalDir, load }) => {
       writeJson(globalDir, "rail.json", { backend: "none" });
       const config = load();
       assert.equal(config.backend, "none");
       assert.deepEqual(config.diagnostics, []);
+      assert.equal(globalRailConfigPath(), path.join(globalDir, "rail.json"));
     });
   });
 
-  it("lets rail.json win over a guard.json beside it and says the guard.json was ignored", () => {
-    withLayers(({ globalDir, load }) => {
+  // guard.json loading and its advisory are gone: a stray one is simply not a config file.
+  it("never reads a legacy guard.json, and says nothing about it", () => {
+    withLayers(({ globalDir, projectDir, load }) => {
       writeJson(globalDir, "guard.json", { backend: "none", statusLine: "never" });
-      writeJson(globalDir, "rail.json", { backend: "seatbelt" });
+      writeJson(projectDir, "guard.json", { statusLine: "never" });
       const config = load();
       assert.equal(config.backend, "seatbelt");
-      assert.equal(config.statusLine, "always", "nothing from the shadowed guard.json leaks in");
-      assert.equal(config.sources.at(-1), path.join(globalDir, "rail.json"));
-      const advisory = config.diagnostics.filter((line) => line.includes("guard.json"));
-      assert.equal(advisory.length, 1);
-      assert.match(advisory[0]!, /Ignored .*guard\.json/);
-      assert.match(advisory[0]!, /rail\.json takes precedence/);
+      assert.equal(config.statusLine, "always");
+      assert.deepEqual(config.sources, ["defaults"]);
+      assert.deepEqual(config.diagnostics, []);
     });
   });
 
-  it("applies the same fallback and precedence to the project layer", () => {
+  it("ignores an untrusted project config with one diagnostic", () => {
     withLayers(({ projectDir, load }) => {
-      writeJson(projectDir, "guard.json", { statusLine: "never" });
-      const legacy = load();
-      assert.equal(legacy.statusLine, "never");
-      assert.match(legacy.diagnostics.join("\n"), /Loaded legacy .*guard\.json/);
-
-      writeJson(projectDir, "rail.json", { statusLine: "auto" });
-      const both = load();
-      assert.equal(both.statusLine, "auto");
-      assert.match(both.diagnostics.join("\n"), /Ignored .*guard\.json/);
+      writeJson(projectDir, "rail.json", { statusLine: "never" });
+      const config = load(false);
+      assert.equal(config.statusLine, "always");
+      assert.match(config.diagnostics.join("\n"), /Ignoring untrusted project config/);
     });
   });
 
-  it("layers a legacy global guard.json under a project rail.json", () => {
+  // The list forms and grants have to survive the JSON round trip, not just
+  // mergeConfig: defaults → global → project is the layering users actually get.
+  it("folds base keys and grants through the real three-layer load, in order", () => {
     withLayers(({ globalDir, projectDir, load }) => {
-      writeJson(globalDir, "guard.json", { backend: "none", statusLine: "never" });
-      writeJson(projectDir, "rail.json", { statusLine: "auto" });
-      const config = load();
-      assert.equal(config.backend, "none", "the legacy global layer still applies");
-      assert.equal(config.statusLine, "auto", "the project layer still wins");
-      assert.deepEqual(config.sources, ["defaults", path.join(globalDir, "guard.json"), path.join(projectDir, "rail.json")]);
-    });
-  });
-
-  it("resolves the global path to whichever file exists", () => {
-    withTempAgentDir((agentDir) => {
-      const globalDir = path.join(agentDir, "extensions");
-      assert.equal(globalRailConfigPath(), path.join(globalDir, "rail.json"));
-      writeJson(globalDir, "guard.json", {});
-      assert.equal(globalRailConfigPath(), path.join(globalDir, "guard.json"));
-      writeJson(globalDir, "rail.json", {});
-      assert.equal(globalRailConfigPath(), path.join(globalDir, "rail.json"));
-    });
-  });
-
-  // The list forms have to survive the JSON round trip, not just mergeConfig:
-  // defaults → global → project is the layering users actually get.
-  it("carries extend and replace through the real three-layer load", () => {
-    withLayers(({ globalDir, projectDir, load }) => {
+      const globalPath = path.join(globalDir, "rail.json");
+      const projectPath = path.join(projectDir, "rail.json");
       writeJson(globalDir, "rail.json", {
         capabilities: { classes: [{ id: "k8s-ops", definition: "Cluster operations.", disposition: "ask" }] },
-        commands: { allow: { replace: false, values: ["cargo *"] }, classify: [{ template: "kubectl *", capability: "k8s-ops" }] },
-        network: { allowedDomains: { replace: false, values: ["global.example"] } },
+        commands: { allow: ["cargo *"], classify: [{ template: "kubectl *", capability: "k8s-ops" }] },
+        network: { allowedDomains: ["global.example"] },
+        grants: [{ id: "k8s-deny", request: "never touch clusters", created: "2026-11-11", ops: [{ op: "set-disposition", capability: "k8s-ops", disposition: "deny" }] }],
       });
       writeJson(projectDir, "rail.json", {
-        commands: { allow: { replace: false, values: ["just *"] }, classify: { replace: false, values: [{ template: "helm *", capability: "k8s-ops" }] } },
-        network: { allowedDomains: ["project.example"] },
+        dispositions: { "k8s-ops": "judge" },
+        commands: { allow: ["just *"], classify: { add: [{ template: "helm *", capability: "k8s-ops" }] } },
+        network: { allowedDomains: { remove: ["global.example"], add: ["project.example"] } },
+        grants: [{ id: "k8s-deny", request: "the project's own grant of the same id", created: "2026-11-11", ops: [{ op: "set-disposition", capability: "k8s-ops", disposition: "ask" }] }],
       });
       const config = load();
+      assert.deepEqual(config.diagnostics, []);
       assert.deepEqual(config.commands.allow, [...DEFAULT_CONFIG.commands.allow, "cargo *", "just *"]);
       assert.deepEqual(config.commands.classify, [
         { template: "kubectl *", capability: "k8s-ops" },
         { template: "helm *", capability: "k8s-ops" },
       ], "a project layer can classify into a class the global layer declared");
-      assert.equal(config.provenance.lists["commands.classify"]["helm *"], path.join(projectDir, "rail.json"));
-      assert.deepEqual(config.network.allowedDomains, ["project.example"]);
-      assert.equal(config.provenance.lists["commands.allow"]["cargo *"], path.join(globalDir, "rail.json"));
-      assert.equal(config.provenance.lists["commands.allow"]["just *"], path.join(projectDir, "rail.json"));
-      assert.deepEqual(config.provenance.lists["network.allowedDomains"], { "project.example": path.join(projectDir, "rail.json") });
+      assert.deepEqual(config.network.allowedDomains, [...DEFAULT_CONFIG.network.allowedDomains, "project.example"]);
+      // global base → global grants → project base → project grants: the
+      // project's grant is last and wins, and a same-id grant in another
+      // layer is a separate grant that provenance tells apart.
+      assert.equal(config.dispositions["k8s-ops"], "ask");
+      assert.deepEqual(config.provenance.dispositions["k8s-ops"], { layer: "project", grantId: "k8s-deny", file: projectPath });
+      assert.deepEqual(config.grants.map((grant) => `${grant.layer}:${grant.id}`), ["global:k8s-deny", "project:k8s-deny"]);
+      assert.deepEqual(config.sources, ["defaults", globalPath, projectPath]);
     });
   });
 });

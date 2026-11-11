@@ -114,6 +114,12 @@ export interface RailReviewTelemetry extends RailTelemetryBase {
   forwarded?: boolean;
   usage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
   projection?: ReviewProjection;
+  /**
+   * The named grant whose rule, table row, or class produced the deciding
+   * label (decidingGrant in src/policy-store.ts). Detail tier: dropped with
+   * telemetry off — nothing replays from it, and the corpus keeps it always.
+   */
+  grant?: string;
 }
 
 export interface RailBlockTelemetry extends RailTelemetryBase {

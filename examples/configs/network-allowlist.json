@@ -6,8 +6,36 @@
   },
   "network": {
     "enabled": true,
-    "allowedDomains": ["github.com", "*.github.com", "*.githubusercontent.com", "registry.npmjs.org"],
-    "deniedDomains": []
+    "allowedDomains": {
+      "add": [
+        "registry.npmjs.org"
+      ],
+      "remove": [
+        "gitlab.com",
+        "*.gitlab.com",
+        "bitbucket.org",
+        "*.bitbucket.org",
+        "codeberg.org",
+        "*.codeberg.org",
+        "sr.ht",
+        "*.sr.ht",
+        "ghcr.io",
+        "*.ghcr.io",
+        "docker.io",
+        "*.docker.io",
+        "registry-1.docker.io",
+        "auth.docker.io",
+        "production.cloudflare.docker.com",
+        "quay.io",
+        "*.quay.io",
+        "gcr.io",
+        "*.gcr.io",
+        "*.pkg.dev",
+        "registry.k8s.io",
+        "mcr.microsoft.com",
+        "public.ecr.aws"
+      ]
+    }
   },
   "classifier": {
     "enabled": true,

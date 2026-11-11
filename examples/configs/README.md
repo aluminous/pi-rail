@@ -4,36 +4,36 @@ Copy one of these files to `~/.pi/agent/extensions/rail.json` for a global
 profile or to `.pi/rail.json` in a trusted project.
 
 Configuration is layered over Pi Rail's defaults. Omitted fields retain their
-default values; an array replaces the inherited list wholesale, and the object
-form `{"replace": false, "values": [...]}` adds to it instead (see "Replacing
-or extending a list" in the main README).
+default values, and lists only append: a bare array adds entries to the
+inherited list, and `{"add": [...], "remove": [...]}` also drops inherited
+entries by name (see "Lists only append" in the main README). Nothing a lower
+layer set disappears unless a file says so explicitly.
 
-Every list in these profiles is written as an array, so each one states its
-whole policy rather than inheriting part of it — which is what you want from a
-profile you copy wholesale. Two would read more clearly as extensions in a
-config of your own: `offline-restricted.json` restates the entire default
-`denyWrite` list to add `.git` to it, and `network-allowlist.json` restates the
-GitHub domains to add `registry.npmjs.org`. Written as extensions those would
-be one entry each — but `network-allowlist.json` would then also inherit the
-container-registry defaults it deliberately drops, so both are left as arrays
-here.
+So each profile says what it changes, not the whole list. `network-allowlist.json`
+adds `registry.npmjs.org` and removes the container-registry defaults it does
+not want; `offline-restricted.json` removes every default network domain and
+the package-cache write roots, and adds `.git` to `denyWrite`. The temp
+directory roots stay writable in every profile: one of them is the platform
+temp directory, which a file cannot name portably.
 
-- `classifier-focused.json` disables filesystem and network restrictions and
-  environment scrubbing, leaving tool actions to classifier review and command
-  rules. The Seatbelt backend still wraps shell processes.
+- `classifier-focused.json` disables filesystem and network restrictions,
+  leaving tool actions to classifier review and command rules (environment
+  scrubbing keeps its defaults). The Seatbelt backend still wraps shell processes.
 - `balanced.json` keeps the default filesystem and network restrictions and
   adds fail-closed classifier review.
 - `offline-restricted.json` permits writes only in the project and temporary
-  directory, blocks all networking, retains sensitive-path denies, and adds
-  fail-closed classifier review.
+  directories, blocks all networking, retains sensitive-path denies (plus
+  `.git`), and adds fail-closed classifier review.
 - `network-allowlist.json` disables filesystem restrictions and permits network
-  access only to the listed domains. It is the explicit allowlist-only example.
+  access only to the GitHub defaults plus `registry.npmjs.org`. It is the
+  explicit allowlist-only example.
 - `filesystem-denylist.json` disables network restrictions and otherwise allows
-  filesystem access except for the listed sensitive paths. It is the explicit
-  denylist-driven example; `allowWrite: ["/"]` supplies the sandbox runtime's
-  broad writable root, while `denyWrite` carves sensitive paths back out.
-- `dispositions-deny-by-default.json` disables file/network restrictions and
-  environment scrubbing, then routes every capability class to `deny` except
+  filesystem access except for the default sensitive paths. It is the explicit
+  denylist-driven example; adding `"/"` to `allowWrite` supplies the sandbox
+  runtime's broad writable root, while the default `denyWrite` carves
+  sensitive paths back out.
+- `dispositions-deny-by-default.json` disables file/network restrictions, then
+  routes every capability class to `deny` except
   reading the project and running its dev tools. It is the strict
   deny-by-default disposition profile.
 - `dispositions-allow-by-default.json` also leans entirely on the disposition
@@ -46,10 +46,24 @@ here.
   waiting for a model to happen to use the class you defined. `terraform apply`
   is mapped to the built-in `off-machine-effects` rather than to a custom
   class, which shows the same list re-pointing a command at a stricter built-in.
+  It also shows the most-specific-rule-wins ordering (`helm version *` →
+  `read-system` carves the local version probe out of the broad `helm *` →
+  `k8s-ops`, whichever is listed first), `flags` allowlists (`git worktree remove *`
+  with `"flags": []` stays out of reach of `--force` and its abbreviations;
+  `git cat-file *` is allowed only with its read-only flags), and a class that
+  `extends` `local-destructive`, so read-only mode still denies it.
+
+A grant — a named policy change with its own examples — is a separate file,
+evaluated and confirmed with `/rail grant add`:
+[`../grants/worktree-cleanup.json`](../grants/worktree-cleanup.json) adds a
+rules-only `worktree-cleanup` class and the classify rules that reach it, with
+negative examples for the forced and chained forms (see "Grants by hand" in the
+main README).
 
 `network.enabled` means “enforce network restrictions.” With it set to `false`,
-networking is unrestricted. To deny all networking, set it to `true` with an
-empty `allowedDomains` array and `deniedDomains: ["*"]`.
+networking is unrestricted. To deny all networking, set it to `true` and
+remove every inherited `allowedDomains` entry, as `offline-restricted.json`
+does.
 
 The sandbox runtime's domain policy is allowlist-based, so a network
 denylist-only policy is not supported. Its write policy also requires at least

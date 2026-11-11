@@ -170,7 +170,7 @@ describe("commands.classify matching", () => {
     assert.equal(describeSegmentMatch(match.segments[0]!), "`kubectl get pods` → classify rule `kubectl *` (k8s-ops)");
   });
 
-  it("checks user rules before the allowlist, so a built-in template can be re-classified", () => {
+  it("ranks a user rule above the built-in on the same template, so a built-in template can be re-classified", () => {
     const rules = { classify: [{ template: "git log *", capability: "off-machine-effects" }], allow: DEFAULT_COMMAND_ALLOWLIST };
     const match = explainCommandMatch("git log --oneline", rules);
     assert.deepEqual(matchedCapabilities(match), ["off-machine-effects"]);
@@ -179,10 +179,10 @@ describe("commands.classify matching", () => {
     assert.deepEqual(matchedCapabilities(explainCommandMatch("git status", rules)), ["read-project"]);
   });
 
-  it("takes the first matching rule when two classify rules overlap", () => {
+  it("takes the most specific rule when two classify rules overlap, in either order", () => {
     const classify = [
-      { template: "kubectl get *", capability: "read-system" },
       { template: "kubectl *", capability: "k8s-ops" },
+      { template: "kubectl get *", capability: "read-system" },
     ];
     assert.deepEqual(matchedCapabilities(explainCommandMatch("kubectl get pods", { classify, allow: [] })), ["read-system"]);
     assert.deepEqual(matchedCapabilities(explainCommandMatch("kubectl delete pod x", { classify, allow: [] })), ["k8s-ops"]);

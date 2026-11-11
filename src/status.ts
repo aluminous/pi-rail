@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text } from "@earendil-works/pi-tui";
 import { classifierEnabled, resolveClassifierModel } from "./classifier.ts";
 import { type ResolvedRailConfig, type StatusLineMode } from "./config.ts";
+import { anySeatUnsaved } from "./reviewer-seats.ts";
 import type { RuntimeState } from "./state.ts";
 
 function formatCompactCount(label: string, total: number, turn: number): string {
@@ -18,13 +19,19 @@ export function networkPolicyLabel(config: ResolvedRailConfig): string {
   return config.network.allowedDomains.length > 0 ? `${config.network.allowedDomains.length} domains` : "network blocked";
 }
 
-/** Compact classifier label: "classifier off", "auto (provider/id)", "provider/id", or "model unavailable (spec)". */
+/**
+ * Compact classifier label: "classifier off", "auto (provider/id)",
+ * "provider/id", or "model unavailable (spec)" — the session's effective namer.
+ * A trailing "*" marks a session value /rail model has not saved yet (any
+ * seat, the same marker as the picker's tabs).
+ */
 export function classifierModelLabel(ctx: ExtensionContext, config: ResolvedRailConfig | undefined, state: RuntimeState): string {
-  if (!config || !classifierEnabled(config, state.classifier)) return "classifier off";
+  const unsaved = config && anySeatUnsaved(config, state.classifier) ? "*" : "";
+  if (!config || !classifierEnabled(config, state.classifier)) return `classifier off${unsaved}`;
   const spec = state.classifier.modelOverride ?? config.classifier.model;
   const model = resolveClassifierModel(ctx, config, state.classifier);
-  if (!model) return `model unavailable (${spec})`;
-  return spec === "auto" ? `auto (${model.provider}/${model.id})` : `${model.provider}/${model.id}`;
+  if (!model) return `model unavailable (${spec})${unsaved}`;
+  return `${spec === "auto" ? `auto (${model.provider}/${model.id})` : `${model.provider}/${model.id}`}${unsaved}`;
 }
 
 /** In "auto" mode the statusline appears only when something needs attention: the rail is off or erroring, or a call was denied/blocked since the last user message. */

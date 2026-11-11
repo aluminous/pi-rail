@@ -106,7 +106,7 @@ async function closeOverlay(name: string, marker: string): Promise<void> {
   await waitFor((pane) => !pane.includes(marker), `${name} overlay to close`, UI_TIMEOUT_MS);
 }
 
-test("pi TUI: rail startup, the tabbed status page, the disposition page, no [rail] conversation reports", async (t) => {
+test("pi TUI: rail startup, the tabbed status page, the disposition page, the model picker, no [rail] conversation reports", async (t) => {
   const tmuxPath = which("tmux");
   const piPath = which("pi");
   if (tmuxPath === undefined || piPath === undefined) {
@@ -214,6 +214,21 @@ test("pi TUI: rail startup, the tabbed status page, the disposition page, no [ra
       UI_TIMEOUT_MS,
     );
     await closeOverlay("disposition page", "Capability policy");
+
+    // /rail model opens the reviewer-model picker: one tab per seat, Tab and
+    // Shift+Tab switch. Nothing is picked here — a pick is session-only, but
+    // the test never saves, so the developer's rail.json is never written.
+    await submitCommand("/rail model");
+    await waitFor(
+      (pane) => pane.includes("Rail reviewer models") && pane.includes("Tab: namer | judge | configurator") && pane.includes("Ctrl+S saves"),
+      "reviewer model picker with its three seat tabs",
+      UI_TIMEOUT_MS,
+    );
+    tmux("send-keys", "-t", TARGET, "Tab");
+    await waitFor((pane) => pane.includes("It cannot be turned off"), "judge tab after Tab", UI_TIMEOUT_MS);
+    tmux("send-keys", "-t", TARGET, "BTab");
+    await waitFor((pane) => pane.includes("Names every reviewed action"), "namer tab after Shift+Tab", UI_TIMEOUT_MS);
+    await closeOverlay("reviewer model picker", "Rail reviewer models");
 
     // /rail policy rules opens the status page directly on its policy tab, as
     // a provenance table. No footer assertion here: the policy tab is tall

@@ -24,7 +24,7 @@ import { capabilityRegistry, capabilityRegistryIds } from "../src/capabilities.t
 import { testConfig } from "./helpers.ts";
 
 /** The stock taxonomy: no config classes, no session edits. */
-const REGISTRY = capabilityRegistry(undefined, undefined);
+const REGISTRY = capabilityRegistry(undefined);
 const BUILTIN_IDS = capabilityRegistryIds(REGISTRY);
 
 /** parseNamerResult against the stock registry; custom-vocabulary cases pass their own id set. */

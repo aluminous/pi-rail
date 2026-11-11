@@ -7,7 +7,13 @@ import type { RailBackend } from "../backends/types.ts";
 
 export function createSandboxedBashOps(params: {
   backend: RailBackend;
-  config: ResolvedRailConfig;
+  /**
+   * Read when a command starts, not when the ops are created: the scrub must
+   * use the same policy the backend wraps with in the same tick, or a policy
+   * change committed in between (src/session-policy.ts) would scrub with one
+   * environment list and sandbox with another.
+   */
+  config: () => ResolvedRailConfig;
   enabled: () => boolean;
   initialized: () => boolean;
   lastError: () => string | undefined;
@@ -20,7 +26,7 @@ export function createSandboxedBashOps(params: {
       if (!params.enabled()) throw new Error("Rail is disabled");
       if (!params.initialized()) throw new Error(`Rail is not initialized${params.lastError() ? `: ${params.lastError()}` : ""}`);
 
-      const scrubbedEnv = scrubEnvironment(env, params.config);
+      const scrubbedEnv = scrubEnvironment(env, params.config());
       const wrapped = await params.backend.wrapBash(command, cwd, scrubbedEnv);
       const recordEnd = params.recordCommand?.(command);
 

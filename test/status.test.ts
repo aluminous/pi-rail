@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { recordCapabilityOutcome, recordScreenVerdict } from "../src/capabilities.ts";
 import { globalRailConfigPath, mergeConfig, type ResolvedRailConfig } from "../src/config.ts";
+import { addSessionGrant, setSessionDisposition } from "../src/session-policy.ts";
 import {
   createRuntimeState,
   recordCapabilityDecision,
@@ -15,7 +16,7 @@ import {
   type RuntimeState,
 } from "../src/state.ts";
 import { costSummary, formatCost, PLAIN_THEME, statusReportLines, statusTabLines, STATUS_TABS, type StatusTab } from "../src/status-tabs.ts";
-import { statusLineVisible } from "../src/status.ts";
+import { classifierModelLabel, statusLineVisible } from "../src/status.ts";
 import { showRailView, toggleRailView } from "../src/live-view.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -121,9 +122,9 @@ describe("session tab", () => {
 
   it("marks a session override on the disposition cell", () => {
     const state = createRuntimeState();
-    state.capabilities.overrides["read-project"] = "deny";
+    setSessionDisposition(state, "read-project", "deny");
     recordCapabilityDecision(state, "read", { target: "", labels: ["read-project"], decision: "deny", disposition: "deny", reason: "no", reviewed: false });
-    assert.match(row(tab(state, testConfig(), "session"), "read-project"), /deny \(session\)/);
+    assert.match(row(tab(state, testConfig(), "session"), "read-project"), /deny \[session\]/);
   });
 
   it("breaks errors down by cause, busiest first", () => {
@@ -290,6 +291,28 @@ describe("engine tab", () => {
     assert.doesNotMatch(text, /Session approvals|Session guidance/, "session-scoped state lives on the session tab");
   });
 
+  it("shows each reviewer seat's effective setting and marks a session value that is not saved", () => {
+    const state = createRuntimeState();
+    const config = testConfig((c) => (c.classifier.enabled = true));
+    state.classifier.judgeModelOverride = "openai/gpt-5.4";
+    state.classifier.grantModelOverride = "auto"; // same as the config: no mark
+    const text = tab(state, config, "engine");
+    assert.match(row(text, "namer model setting"), /namer model setting\s+auto$/);
+    assert.match(row(text, "judge model setting"), /judge model setting\s+openai\/gpt-5\.4 \(this session, unsaved; saved: current\)$/);
+    assert.match(row(text, "configurator model setting"), /configurator model setting\s+auto$/);
+  });
+
+  it("marks the statusline's namer label while any seat is unsaved", () => {
+    const state = createRuntimeState();
+    const config = testConfig((c) => (c.classifier.enabled = true));
+    const ctx = { model: undefined, modelRegistry: { getAvailable: () => [{ provider: "openai-codex", id: "gpt-5.4-mini" }], find: () => undefined } } as unknown as ExtensionContext;
+    assert.equal(classifierModelLabel(ctx, config, state), "auto (openai-codex/gpt-5.4-mini)");
+    state.classifier.judgeModelOverride = "current";
+    assert.equal(classifierModelLabel(ctx, config, state), "auto (openai-codex/gpt-5.4-mini)", "a session value equal to the saved one is not a change");
+    state.classifier.grantModelOverride = "openai/gpt-5.4";
+    assert.equal(classifierModelLabel(ctx, config, state), "auto (openai-codex/gpt-5.4-mini)*");
+  });
+
   it("shows session guidance and approved paths on the session tab", () => {
     const state = createRuntimeState();
     state.classifier.sessionGuidance = ["User allowed bash (npm run deploy) with comment: staging deploys are fine"];
@@ -339,13 +362,31 @@ describe("policy tab", () => {
   it("annotates provenance per entry, marking built-in defaults with a muted default", () => {
     const projectPath = path.join("/repo", CONFIG_DIR_NAME, "rail.json");
     const afterGlobal = mergeConfig(testConfig(), { filesystem: { denyRead: ["/secret/global"] } }, globalRailConfigPath());
-    const config = mergeConfig(afterGlobal, { environment: { allow: ["PATH", "HOME"] } }, projectPath);
+    // Restating a default (*_TOKEN) claims it for the restating layer.
+    const config = mergeConfig(afterGlobal, { environment: { unset: ["PROJECT_TOOL_TOKEN", "*_TOKEN"] } }, projectPath);
     const text = tab(createRuntimeState(), config, "policy");
     assert.match(text, /source: default is built in/);
     assert.match(row(text, "/secret/global"), /\/secret\/global\s+global$/);
-    assert.match(row(text, "PATH"), /PATH\s+project$/);
-    assert.match(row(text, "HOME"), /HOME\s+project$/);
+    assert.match(row(text, "PROJECT_TOOL_TOKEN"), /PROJECT_TOOL_TOKEN\s+project$/);
+    assert.match(row(text, "*_TOKEN"), /\*_TOKEN\s+project$/);
+    assert.match(row(text, "*_SECRET"), /\*_SECRET\s+default$/);
     assert.match(row(text, "~/.ssh"), /~\/\.ssh\s+default$/, "built-in entries say default explicitly");
+  });
+
+  it("names the grant behind an entry, and shows session-layer rules the moment they exist", () => {
+    const projectPath = path.join("/repo", CONFIG_DIR_NAME, "rail.json");
+    const config = mergeConfig(
+      testConfig(),
+      { grants: [{ id: "worktree-cleanup", request: "allow cleaning up worktrees", created: "2026-11-11", ops: [{ op: "allow-command", template: "git worktree prune" }] }] },
+      projectPath,
+    );
+    const state = createRuntimeState();
+    addSessionGrant(state, { id: "k8s", request: "kubectl is ops", created: "2026-11-11", ops: [{ op: "classify", template: "kubectl *", capability: "off-machine-effects" }] });
+    const text = tab(state, config, "policy");
+    assert.match(row(text, "git worktree prune"), /git worktree prune\s+project · worktree-cleanup$/);
+    assert.match(row(text, "kubectl"), /kubectl \* → off-machine-effects\s+session · k8s$/);
+    assert.match(text, /─ Grants/);
+    assert.match(row(text, "worktree-cleanup"), /worktree-cleanup\s+project\s+allow cleaning up worktrees/);
   });
 
   it("no longer reports legacy classifier rule tiers", () => {
