@@ -26,6 +26,7 @@ import {
   editSessionDefinition,
   editSessionDeleteClass,
   editSessionDisposition,
+  invalidateSessionCache,
   parseGrant,
   parseOp,
   removeSessionGrant as removeGrantFromLayer,
@@ -33,9 +34,11 @@ import {
   sessionPolicyLayer,
   type FileLayerName,
   type Grant,
+  type GrantLayerName,
   type PolicyOp,
   type SessionLayer,
 } from "./policy-store.ts";
+import type { ResolvedRailConfig } from "./config.ts";
 import type { RuntimeState } from "./state.ts";
 
 /** The custom entry type session snapshots are written under. */
@@ -184,7 +187,7 @@ export function sessionRemovedClasses(state: RuntimeState): CapabilityId[] {
   return state.sessionPolicy.edits.flatMap((op) => (op.op === "remove-class" ? [op.id] : []));
 }
 
-// ── Named session grants (API only for now; no UI) ───────────────────────────
+// ── Named session grants (/rail grant add and the /rail grants view) ─────────
 
 /**
  * Adds or replaces a named session grant and returns the diagnostics folding
@@ -218,21 +221,99 @@ export interface GrantFileTarget {
 }
 
 /**
- * Promotes a named session grant into a config file's `grants` array, and
- * folds it into the live base under that file's provenance — the same "no
- * effective value moves" rule Ctrl+S follows, so promotion never changes what
- * the rail decides this session. `write` is injectable for tests.
+ * Refolds the base config from the files, in place, after a file-layer
+ * change (a grant promoted, demoted, revoked, or saved), so the change is in
+ * force on the very next tool call. `load` is loadConfig bound to the
+ * session's ctx; tests pass their own.
+ *
+ * In place: the base object keeps its identity (anything holding it sees the
+ * new policy) and the session-layer cache is dropped. Two things the refold
+ * does not move, because the session cannot move them mid-flight:
+ *
+ * - `enabled`, which /rail on and /rail off set on the live base;
+ * - the sandbox-backed lists (filesystem, network, environment). Seatbelt's
+ *   profile is compiled from them when the rail starts, and a JS path policy
+ *   that moved without the sandbox would disagree with it (the reason the
+ *   session layer refuses those lists; GRANTS_PLAN phase 4 lifts it). A
+ *   change to them is kept on disk and reported as applying at restart.
+ *
+ * A refold also picks up any other edit made to the config files since the
+ * session loaded them — it is a reload, not a patch.
+ */
+export function reloadBaseConfig(state: RuntimeState, load: () => ResolvedRailConfig): string[] {
+  const old = state.baseConfig;
+  const fresh = load();
+  if (!old) {
+    state.config = fresh;
+    return [];
+  }
+  const notes: string[] = [];
+  fresh.enabled = old.enabled;
+  const sandboxLists = ["filesystem.allowRead", "filesystem.denyRead", "filesystem.allowWrite", "filesystem.denyWrite", "network.allowedDomains", "network.deniedDomains", "environment.allow", "environment.unset"] as const;
+  const changed = sandboxLists.filter((list) => {
+    const [top, key] = list.split(".") as ["filesystem" | "network" | "environment", string];
+    const read = (config: ResolvedRailConfig) => (config[top] as unknown as Record<string, unknown>)[key];
+    return JSON.stringify(read(old)) !== JSON.stringify(read(fresh));
+  });
+  if (changed.length > 0 || old.filesystem.enabled !== fresh.filesystem.enabled || old.network.enabled !== fresh.network.enabled) {
+    notes.push(`${[...changed, ...(old.filesystem.enabled !== fresh.filesystem.enabled ? ["filesystem.enabled"] : []), ...(old.network.enabled !== fresh.network.enabled ? ["network.enabled"] : [])].join(", ")} changed on disk and apply when the rail next starts — the sandbox profile is compiled at start.`);
+  }
+  fresh.filesystem = old.filesystem;
+  fresh.network = old.network;
+  fresh.environment = old.environment;
+  for (const list of sandboxLists) fresh.provenance.lists[list] = old.provenance.lists[list];
+  for (const key of Object.keys(old) as Array<keyof ResolvedRailConfig>) delete old[key];
+  Object.assign(old, fresh);
+  invalidateSessionCache(old);
+  state.config = old;
+  return notes;
+}
+
+/** How grant moves reach files and the live base; the defaults write the real config files. */
+export interface GrantFileOps {
+  write?: (file: string, grant: Grant) => void;
+  remove?: (file: string, id: string) => Record<string, unknown> | undefined;
+  /**
+   * Refolds the base from the files after a change. Given (the /rail grants
+   * view always passes it), the change is live at once; absent, the older
+   * in-place fold below is all that happens and a demoted or revoked file
+   * grant keeps its effects until the next load.
+   */
+  reload?: () => ResolvedRailConfig;
+  /** Collects what the refold could not apply live (sandbox lists), for the caller to show. */
+  notes?: string[];
+}
+
+/**
+ * Promotes a named session grant into a config file's `grants` array. With a
+ * `reload`, the base is refolded from the files; without one, the grant's ops
+ * fold into the live base under that file's provenance — the same "no
+ * effective value moves" rule Ctrl+S follows. Either way promotion never
+ * changes what the rail decides this session.
+ *
+ * Promotion asks for no new approval, widening or not: the grant's ops were
+ * approved, sensitive ones one by one, when it was applied to the session,
+ * and promotion moves it unchanged. `write` is injectable for tests.
  */
 export function promoteSessionGrant(
   state: RuntimeState,
   id: string,
   target: GrantFileTarget,
-  write: (file: string, grant: Grant) => void = addGrantToConfigFile,
+  write: ((file: string, grant: Grant) => void) | GrantFileOps = addGrantToConfigFile,
 ): string | undefined {
+  const ops: GrantFileOps = typeof write === "function" ? { write } : write;
   const grant = state.sessionPolicy.grants.find((entry) => entry.id === id);
   if (!grant) return `No session grant "${id}".`;
-  write(target.file, grant);
+  try {
+    (ops.write ?? addGrantToConfigFile)(target.file, grant);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
   removeSessionGrant(state, id);
+  if (ops.reload) {
+    ops.notes?.push(...reloadBaseConfig(state, ops.reload));
+    return undefined;
+  }
   const base = state.baseConfig;
   if (base) {
     applyOpsInPlace(base, grant.ops, { layer: target.layer, grantId: id, file: target.file }, `${target.file} grant ${id} ops`);
@@ -243,24 +324,42 @@ export function promoteSessionGrant(
 }
 
 /**
- * Demotes a config file's grant to the session layer. The live base keeps the
- * grant's effects (and their file provenance) until the config is next loaded
- * — refolding needs the file layers, which the session does not keep — so the
- * effective policy does not move now either; on the next load it is the
- * session copy alone that applies.
+ * Demotes a config file's grant to the session layer. With a `reload` (what
+ * the grants view passes) the base is refolded without the file grant, so
+ * from the next tool call only the session copy applies — and a sandbox-list
+ * op in it, which the session layer refuses, stops applying to the file tools
+ * while the sandbox keeps it until restart (see reloadBaseConfig). Without
+ * one, the live base keeps the grant's effects until the config is next
+ * loaded.
  */
 export function demoteGrantToSession(
   state: RuntimeState,
   source: GrantFileTarget,
   id: string,
-  remove: (file: string, id: string) => Record<string, unknown> | undefined = removeGrantFromConfigFile,
+  remove: ((file: string, id: string) => Record<string, unknown> | undefined) | GrantFileOps = removeGrantFromConfigFile,
 ): string | undefined {
+  const ops: GrantFileOps = typeof remove === "function" ? { remove } : remove;
   if (state.sessionPolicy.grants.some((entry) => entry.id === id)) return `This session already has a grant "${id}".`;
-  const raw = remove(source.file, id);
+  const raw = (ops.remove ?? removeGrantFromConfigFile)(source.file, id);
   if (!raw) return `${source.file} has no grant "${id}".`;
   const diagnostics: string[] = [];
   const grant = parseGrant(raw, `${source.file} grant`, diagnostics);
   if (!grant) return diagnostics.join("; ") || `${source.file} grant "${id}" did not parse.`;
   addSessionGrant(state, grant);
+  if (ops.reload) ops.notes?.push(...reloadBaseConfig(state, ops.reload));
+  return undefined;
+}
+
+/**
+ * Revokes a grant: deletes it from its layer and nothing else. A session
+ * grant leaves the session layer (persisted at once); a file grant leaves its
+ * file and, with a `reload`, the live base too.
+ */
+export function revokeGrant(state: RuntimeState, layer: GrantLayerName, id: string, file?: string, ops: GrantFileOps = {}): string | undefined {
+  if (layer === "session") return removeSessionGrant(state, id) ? undefined : `No session grant "${id}".`;
+  if (!file) return `No ${layer} config file to revoke "${id}" from.`;
+  const raw = (ops.remove ?? removeGrantFromConfigFile)(file, id);
+  if (!raw) return `${file} has no grant "${id}".`;
+  if (ops.reload) ops.notes?.push(...reloadBaseConfig(state, ops.reload));
   return undefined;
 }

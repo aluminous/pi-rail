@@ -155,8 +155,8 @@ export interface RailStats {
   turnBlocked: number;
 }
 
-/** "status"/"policy" are the toggleable live views; "report" is one-shot output (smoke, critique). */
-export type RailViewKind = "status" | "policy" | "report";
+/** "status"/"policy"/"grants" are the toggleable live views; "grant" is the grant confirmation; "report" is one-shot output (smoke, critique). */
+export type RailViewKind = "status" | "policy" | "grants" | "grant" | "report";
 
 /**
  * An open live rail view — a TUI overlay popup or an RPC widget.
@@ -261,6 +261,12 @@ export interface RuntimeState {
   lastUiContext?: ExtensionContext;
   /** Serializes approval dialogs (the session's own and forwarded ones); see withDialogLock. */
   dialogQueue: Promise<void>;
+  /**
+   * Decisions each named grant decided this session (grant id → count), for
+   * the grants view. Live only: session replay does not rebuild it, since the
+   * `grant` field it would read is telemetry detail (absent with telemetry off).
+   */
+  grantDecisions: Record<string, number>;
 }
 
 export function createRailStats(): RailStats {
@@ -309,6 +315,7 @@ export function createRuntimeState(): RuntimeState {
     availableModelSpecs: [],
     subagentAckWarned: new Set(),
     dialogQueue: Promise.resolve(),
+    grantDecisions: {},
   } as Omit<RuntimeState, "config" | "baseConfig"> as RuntimeState;
   let base: ResolvedRailConfig | undefined;
   Object.defineProperty(state, "config", {
@@ -348,6 +355,7 @@ export function resetSessionState(state: RuntimeState): void {
   state.lastBashCommand = undefined;
   state.subagentAckWarned = new Set();
   state.dialogQueue = Promise.resolve();
+  state.grantDecisions = {};
 }
 
 /**
@@ -614,6 +622,11 @@ export function recordCapabilityDecision(state: RuntimeState, toolName: string, 
       model: record.model,
     },
   });
+}
+
+/** One decision a named grant decided (see decidingGrant). */
+export function recordGrantDecision(state: RuntimeState, grant: string): void {
+  state.grantDecisions[grant] = (state.grantDecisions[grant] ?? 0) + 1;
 }
 
 /** A read or allowlisted command skipped classifier review deterministically. */

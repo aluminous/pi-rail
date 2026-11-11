@@ -9,6 +9,7 @@ import {
   CUSTOM_CLASS_ID_PATTERN,
   DISPOSITIONS,
   capabilityRegistry,
+  isRulesOnlyClass,
   getEffectiveDisposition,
   isBuiltinCapabilityId,
   type BuiltinCapabilityId,
@@ -93,6 +94,8 @@ export interface DispositionRow {
   fullDefinition: string;
   /** Custom classes: the built-in this one extends, which is how presets reach it. */
   extends?: BuiltinCapabilityId;
+  /** Rules-only: the namer never sees this class; only commands.classify rules reach it. */
+  rulesOnly: boolean;
 }
 
 /** Buckets that partition the seven outcomes: auto-allowed, brought to the user, auto-denied. */
@@ -145,8 +148,19 @@ export function dispositionRows(config: ResolvedRailConfig | undefined, state: R
       sessionEdited: definitionEdits.has(entry.id),
       fullDefinition: entry.definition,
       ...(entry.extends ? { extends: entry.extends } : {}),
+      rulesOnly: isRulesOnlyClass(entry),
     };
   });
+}
+
+/**
+ * "extends local-destructive · rules only · " — the class facts shown ahead of
+ * its definition wherever class details are listed. Rules-only is called out
+ * because it changes what the definition is for: the namer never reads it.
+ */
+export function classDetailPrefix(row: Pick<DispositionRow, "extends" | "rulesOnly">): string {
+  const parts = [...(row.extends ? [`extends ${row.extends}`] : []), ...(row.rulesOnly ? ["rules only (classify rules reach it; the namer never sees it)"] : [])];
+  return parts.length > 0 ? `${parts.join(" · ")} · ` : "";
 }
 
 export function dispositionRow(config: ResolvedRailConfig | undefined, state: RuntimeState, id: CapabilityId): DispositionRow {
@@ -232,6 +246,7 @@ export function saveDispositions(
       definition: op.definition,
       disposition: op.disposition ?? "ask",
       ...(op.extends ? { extends: op.extends } : {}),
+      ...(op.namer !== undefined ? { namer: op.namer } : {}),
     });
     result.added.push(op.id);
   }
@@ -276,6 +291,7 @@ function toPersistedClass(entry: CapabilityClass): PersistedCapabilityClass {
     definition: entry.definition,
     disposition: entry.default,
     ...(entry.extends ? { extends: entry.extends } : {}),
+    ...(entry.namer === false ? { namer: false } : {}),
   };
 }
 

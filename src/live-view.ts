@@ -135,3 +135,16 @@ export function toggleRailPanel(ctx: ExtensionContext, state: RuntimeState, kind
   openPanel(ctx, state, kind, factory);
   return true;
 }
+
+/**
+ * Opens an interactive docked panel, replacing any open view (never toggling
+ * it shut): for one-shot dialogs such as the grant confirmation, where a
+ * second invocation means "show me this one". False outside the TUI, as for
+ * toggleRailPanel.
+ */
+export function showRailPanel(ctx: ExtensionContext, state: RuntimeState, kind: RailViewKind, factory: RailPanelFactory): boolean {
+  if (ctx.mode !== "tui" || !ctx.hasUI) return false;
+  state.liveView?.close();
+  openPanel(ctx, state, kind, factory);
+  return true;
+}

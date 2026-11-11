@@ -53,6 +53,13 @@ temp directory, which a file cannot name portably.
   `git cat-file *` is allowed only with its read-only flags), and a class that
   `extends` `local-destructive`, so read-only mode still denies it.
 
+A grant — a named policy change with its own examples — is a separate file,
+evaluated and confirmed with `/rail grant add`:
+[`../grants/worktree-cleanup.json`](../grants/worktree-cleanup.json) adds a
+rules-only `worktree-cleanup` class and the classify rules that reach it, with
+negative examples for the forced and chained forms (see "Grants by hand" in the
+main README).
+
 `network.enabled` means “enforce network restrictions.” With it set to `false`,
 networking is unrestricted. To deny all networking, set it to `true` and
 remove every inherited `allowedDomains` entry, as `offline-restricted.json`

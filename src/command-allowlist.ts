@@ -288,6 +288,8 @@ export interface CommandRule {
   rank: readonly number[];
   /** Where the rule came from, for explanations ("default", "project · worktree-cleanup"). */
   origin?: string;
+  /** The named grant that wrote the rule, for attributing a decision to it (absent for base keys and defaults). */
+  grant?: string;
 }
 
 /**
@@ -463,6 +465,8 @@ export interface CommandSegmentVerdict {
   flags?: readonly string[];
   /** Where the winning rule came from, when the rule set says. */
   origin?: string;
+  /** The named grant behind the winning rule, when one wrote it. */
+  grant?: string;
   /** Other rules that matched and lost, most specific first. */
   outranked?: OutrankedRule[];
   /** Rules that would have matched but for a flag they do not list. */
@@ -534,6 +538,7 @@ function segmentVerdict(command: ShellCommand, set: CommandRuleSet, rules: Prepa
     source: winner.rule.source,
     ...(winner.rule.flags ? { flags: winner.rule.flags } : {}),
     ...(winner.rule.origin ? { origin: winner.rule.origin } : {}),
+    ...(winner.rule.grant ? { grant: winner.rule.grant } : {}),
     ...(outranked.length > 0 ? { outranked } : {}),
     ...(flagMisses.length > 0 ? { flagMisses } : {}),
   };

@@ -111,7 +111,7 @@ function isSandboxList(list: StringListKey): boolean {
  */
 export type PolicyOp =
   | { op: "set-disposition"; capability: CapabilityId; disposition: Disposition }
-  | { op: "add-class"; id: string; name?: string; definition: string; disposition?: Disposition; extends?: BuiltinCapabilityId }
+  | { op: "add-class"; id: string; name?: string; definition: string; disposition?: Disposition; extends?: BuiltinCapabilityId; namer?: boolean }
   | { op: "remove-class"; id: string }
   | { op: "set-definition"; capability: CapabilityId; definition: string }
   | { op: "classify"; template: string; capability: CapabilityId; flags?: string[] }
@@ -124,7 +124,7 @@ export type PolicyOpName = PolicyOp["op"];
 /** Fields each op accepts beyond `op`. Anything else is an error for that op; a missing required field fails its own check below. */
 const OP_FIELDS: Record<PolicyOpName, { required: string[]; optional: string[] }> = {
   "set-disposition": { required: ["capability", "disposition"], optional: [] },
-  "add-class": { required: ["id", "definition"], optional: ["name", "disposition", "extends"] },
+  "add-class": { required: ["id", "definition"], optional: ["name", "disposition", "extends", "namer"] },
   "remove-class": { required: ["id"], optional: [] },
   "set-definition": { required: ["capability", "definition"], optional: [] },
   classify: { required: ["template", "capability"], optional: ["flags"] },
@@ -263,6 +263,7 @@ export function parseOp(raw: unknown, where: string, diagnostics: string[]): Pol
       // built-ins, and a chain through custom classes could be removed or
       // redeclared out from under it.
       if (raw.extends !== undefined && !isBuiltinCapabilityId(raw.extends)) return fail(`extends must be a built-in class id (${BUILTIN_CAPABILITY_IDS.join(", ")})`);
+      if (raw.namer !== undefined && typeof raw.namer !== "boolean") return fail("namer must be true or false");
       const label = typeof raw.name === "string" ? raw.name.trim() : "";
       return {
         op: "add-class",
@@ -271,6 +272,7 @@ export function parseOp(raw: unknown, where: string, diagnostics: string[]): Pol
         definition,
         ...(raw.disposition !== undefined ? { disposition: raw.disposition as Disposition } : {}),
         ...(raw.extends !== undefined ? { extends: raw.extends as BuiltinCapabilityId } : {}),
+        ...(raw.namer !== undefined ? { namer: raw.namer as boolean } : {}),
       };
     }
     case "remove-class": {
@@ -782,6 +784,20 @@ function setList(config: ResolvedRailConfig, list: StringListKey, values: string
   }
 }
 
+/**
+ * Whether an add-class op without an explicit `namer` leaves the class in the
+ * namer's vocabulary. A class a named grant adds is rules-only (GRANTS_PLAN
+ * decision "Grant-added classes are rules-only by default"): seen live, the
+ * namer labelled `git worktree remove --force` with both worktree-cleanup and
+ * local-destructive, and only severity-max kept it from being allowed. A class
+ * from a file's base `capabilities.classes`, or added on the policy page (the
+ * implicit session-edits grant), is a vocabulary entry the user wrote for the
+ * namer, and keeps the namer default.
+ */
+export function addClassNamerDefault(provenance: Provenance): boolean {
+  return provenance.grantId === undefined || provenance.grantId === SESSION_EDITS_GRANT_ID;
+}
+
 function knownClass(config: ResolvedRailConfig, id: string): boolean {
   return isBuiltinCapabilityId(id) || config.capabilities.classes.some((entry) => entry.id === id);
 }
@@ -811,6 +827,7 @@ function applyOp(config: ResolvedRailConfig, op: PolicyOp, provenance: Provenanc
         // that cannot silently widen what the agent may do.
         default: op.disposition ?? "ask",
         ...(op.extends ? { extends: op.extends } : {}),
+        ...((op.namer ?? addClassNamerDefault(provenance)) ? {} : { namer: false }),
       };
       const at = config.capabilities.classes.findIndex((existing) => existing.id === op.id);
       // Same-id redeclaration keeps its position, so the namer payload order
@@ -1089,6 +1106,7 @@ export function editSessionAddClass(session: SessionLayer, entry: CapabilityClas
     definition: entry.definition,
     disposition: entry.default,
     ...(entry.extends ? { extends: entry.extends } : {}),
+    ...(entry.namer !== undefined ? { namer: entry.namer } : {}),
   };
   const kept = session.edits.filter((existing) => !((existing.op === "remove-class" || existing.op === "add-class") && existing.id === entry.id));
   // Class ops lead the list so a row edit for the class (which validates
@@ -1255,6 +1273,7 @@ export function applyOpsToRawConfig(raw: RailConfig, ops: readonly PolicyOp[]): 
           definition: op.definition,
           ...(op.disposition ? { disposition: op.disposition } : {}),
           ...(op.extends ? { extends: op.extends } : {}),
+          ...(op.namer !== undefined ? { namer: op.namer } : {}),
         };
         const at = classes.findIndex((existing) => isObject(existing) && existing.id === op.id);
         if (at === -1) classes.push(entry);
@@ -1361,6 +1380,7 @@ export function commandRulesOf(config: ResolvedRailConfig, disposition?: (capabi
       // assembled in code rather than folded) still ranks above the defaults.
       rank: provenance ? provenanceRank(config, provenance) : [LAYER_ORDER.global, 0],
       ...(provenance ? { origin: provenanceLabel(provenance) } : {}),
+      ...(namedGrantOf(provenance) ? { grant: namedGrantOf(provenance) } : {}),
     });
   }
   const allowProvenance = config.provenance.lists["commands.allow"];
@@ -1374,9 +1394,39 @@ export function commandRulesOf(config: ResolvedRailConfig, disposition?: (capabi
       source: "allow",
       rank: provenance ? provenanceRank(config, provenance) : [DEFAULT_COMMAND_ALLOWLIST.includes(template) ? LAYER_ORDER.default : LAYER_ORDER.global, 0],
       ...(provenance ? { origin: provenanceLabel(provenance) } : {}),
+      ...(namedGrantOf(provenance) ? { grant: namedGrantOf(provenance) } : {}),
     });
   }
   return { rules, disposition: disposition ?? ((capability) => getEffectiveDisposition(config, undefined, capability).disposition) };
+}
+
+/** The named grant behind an entry: its grant id, unless that is the implicit session-edits grant or there is none. */
+export function namedGrantOf(provenance: Provenance | undefined): string | undefined {
+  const id = provenance?.grantId;
+  return id && id !== SESSION_EDITS_GRANT_ID ? id : undefined;
+}
+
+/**
+ * The named grant that produced a decision, for the `grant` field on review
+ * records and for /rail explain: the grant whose classify/allow rule produced
+ * the deciding label when a rule did, else the grant that set the deciding
+ * class's table row, else the grant that declared the class (its default is
+ * the row). A preset-decided label belongs to no grant — read-only mode
+ * decided, whatever wrote the label. `segments` are the matched command
+ * segments when a command rule labelled the action.
+ */
+export function decidingGrant(
+  config: ResolvedRailConfig,
+  decidedBy: EffectiveDisposition,
+  segments?: ReadonlyArray<{ capability?: CapabilityId; grant?: string }>,
+): string | undefined {
+  if (decidedBy.scope === "preset") return undefined;
+  const rule = segments?.find((segment) => segment.capability === decidedBy.id && segment.grant);
+  if (rule?.grant) return rule.grant;
+  const row = namedGrantOf(decidedBy.provenance);
+  if (row) return row;
+  if (decidedBy.scope === "default" && !isBuiltinCapabilityId(decidedBy.id)) return namedGrantOf(config.provenance.classes[decidedBy.id]);
+  return undefined;
 }
 
 // ── Direction ────────────────────────────────────────────────────────────────
@@ -1396,10 +1446,10 @@ const DENY_LISTS: StringListKey[] = ["filesystem.denyRead", "filesystem.denyWrit
  * Whether `op`, applied over `before`, can only loosen, can only tighten, or
  * changes nothing. Conservative by construction: anything not provably
  * tightening or neutral is widening, so a later gate that auto-applies
- * tightening ops can never be talked into a loosening one. Nothing consumes
- * this yet (GRANTS_PLAN phase 3 gates on it).
+ * tightening ops can never be talked into a loosening one. The grant gates
+ * (src/grant-eval.ts) read it: a widening op needs a negative example.
  */
-export function opDirection(op: PolicyOp, before: ResolvedRailConfig): OpDirection {
+export function opDirection(op: PolicyOp, before: ResolvedRailConfig, provenance?: Provenance): OpDirection {
   switch (op.op) {
     case "set-disposition": {
       const current = getEffectiveDisposition(before, undefined, op.capability).disposition;
@@ -1416,8 +1466,13 @@ export function opDirection(op: PolicyOp, before: ResolvedRailConfig): OpDirecti
         return disposition === "deny" ? "tightening" : "widening";
       }
       // A redeclaration with new wording moves the namer's boundaries, which
-      // is never provably one direction.
+      // is never provably one direction — and so does moving the class into or
+      // out of the namer's vocabulary (`provenance`, where the op will apply,
+      // decides the default when the op does not say; without it an op that
+      // does not say is taken to keep the class's current visibility).
       if (existing.definition !== op.definition) return "widening";
+      const namer = op.namer ?? (provenance ? addClassNamerDefault(provenance) : existing.namer !== false);
+      if ((existing.namer !== false) !== namer) return "widening";
       if (existing.extends !== op.extends) {
         // Dropping the parent can only bring presets down on the class (a
         // parentless class is a writing class to every preset); any other

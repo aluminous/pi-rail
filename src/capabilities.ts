@@ -66,6 +66,15 @@ export interface CapabilityClass {
    * declaring one.
    */
   extends?: BuiltinCapabilityId;
+  /**
+   * Custom classes only: false makes the class rules-only — it is left out of
+   * the namer's vocabulary and prompt entirely and is reachable only through
+   * `commands.classify` rules. Absent means the namer may use it. A class a
+   * grant adds is rules-only unless the grant opts in (GRANTS_PLAN decision
+   * "Grant-added classes are rules-only by default"): a class meant to be
+   * reached by a narrow rule must not be one mislabel away from widening.
+   */
+  namer?: boolean;
 }
 
 export const BUILTIN_CAPABILITY_CLASSES: CapabilityClass[] = [
@@ -341,6 +350,22 @@ export function capabilityRegistry(
     registry.push(entry);
   }
   return registry;
+}
+
+/**
+ * The classes the namer may use: the registry minus rules-only classes. This
+ * is what the namer's prompt lists and what its labels are validated against,
+ * so a label naming a rules-only class is dropped at parse like an unknown id.
+ * The judge keeps the full registry: it is handed labels a classify rule may
+ * have produced, and needs their definitions to review them.
+ */
+export function namerRegistry(registry: CapabilityClass[]): CapabilityClass[] {
+  return registry.filter((entry) => entry.namer !== false);
+}
+
+/** True for a class only classify rules can reach (see CapabilityClass.namer). */
+export function isRulesOnlyClass(entry: Pick<CapabilityClass, "namer"> | undefined): boolean {
+  return entry?.namer === false;
 }
 
 /** The id set the namer's labels are validated against. */

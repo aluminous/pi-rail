@@ -1,8 +1,8 @@
 // The replay corpus: a local, append-only record of rail decisions with the
 // FULL action input, kept so a candidate policy change can later be replayed
-// against what actually happened (GRANTS_PLAN.md, "Replay corpus"). Phase 0:
-// this module writes the corpus; nothing reads it yet except tests and the
-// typed reader exported for the next phase.
+// against what actually happened (GRANTS_PLAN.md, "Replay corpus"). This
+// module writes the corpus; src/grant-eval.ts replays it for the grant gates,
+// and the grants view counts what each grant decided from it.
 //
 // Why a separate store instead of the session log: session telemetry
 // (src/telemetry.ts) truncates targets and projections because session files
@@ -94,6 +94,8 @@ export interface CorpusRecord {
   resolvedDisposition?: Disposition;
   /** The label that produced `resolvedDisposition`. */
   decidedBy?: CapabilityId;
+  /** The named grant whose rule, row, or class produced the deciding label (decidingGrant); absent when none did. */
+  grant?: string;
   /** What became of the call: post-judge, post-user. */
   outcome: RailOutcome | "block";
   /** How the user answered an ask; absent when none was shown. */
@@ -392,6 +394,7 @@ export interface CorpusDecision {
   screenTripped?: boolean;
   resolvedDisposition?: Disposition;
   decidedBy?: CapabilityId;
+  grant?: string;
   outcome: CorpusRecord["outcome"];
   userAnswer?: UserAnswer;
   forwarded?: boolean;
@@ -446,6 +449,7 @@ export function buildCorpusRecord(decision: CorpusDecision, at: Date): CorpusRec
     ...(decision.screenTripped !== undefined ? { screenTripped: decision.screenTripped } : {}),
     ...(decision.resolvedDisposition !== undefined ? { resolvedDisposition: decision.resolvedDisposition } : {}),
     ...(decision.decidedBy !== undefined ? { decidedBy: decision.decidedBy } : {}),
+    ...(decision.grant !== undefined ? { grant: decision.grant } : {}),
     outcome: decision.outcome,
     ...(decision.userAnswer !== undefined ? { userAnswer: decision.userAnswer } : {}),
     ...(decision.forwarded ? { forwarded: true as const } : {}),
@@ -603,7 +607,7 @@ export function appendCorpusDecision(state: RuntimeState, decision: CorpusDecisi
 }
 
 // ---------------------------------------------------------------------------
-// Reader (for tests and the next phase; nothing in the rail reads the corpus yet)
+// Reader (the grant gates and the grants view replay and count from it)
 // ---------------------------------------------------------------------------
 
 function isCorpusRecord(value: unknown): value is CorpusRecord {

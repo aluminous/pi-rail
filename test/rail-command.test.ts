@@ -116,8 +116,12 @@ describe("rail argument completions", () => {
   it("lists all subcommands for an empty prefix", () => {
     const items = makeCommand().getArgumentCompletions("");
     assert.ok(items);
-    assert.deepEqual(items.map((i) => i.value), ["status", "policy", "policy rules", "set", "guide", "guide clear", "explain", "test", "test read", "test write", "why", "on", "off", "off session", "readonly", "model", "smoke", "critique"]);
+    assert.deepEqual(items.map((i) => i.value), ["status", "policy", "policy rules", "set", "grant add", "grant check", "grants", "guide", "guide clear", "explain", "test", "test read", "test write", "why", "on", "off", "off session", "readonly", "model", "smoke", "critique"]);
     assert.ok(items.every((i) => i.description));
+  });
+
+  it("completes the grant subcommands", () => {
+    assert.deepEqual(makeCommand().getArgumentCompletions("gra")?.map((i) => i.value), ["grant add", "grant check", "grants"]);
   });
 
   it("narrows subcommands by prefix", () => {

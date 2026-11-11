@@ -11,6 +11,8 @@ export interface PersistedCapabilityClass {
   definition: string;
   disposition?: Disposition;
   extends?: BuiltinCapabilityId;
+  /** false: rules-only — left out of the namer's vocabulary (see CapabilityClass.namer). */
+  namer?: boolean;
 }
 
 /** The global config file, resolved per call so a redirected agent dir (tests) is honoured. */

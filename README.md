@@ -69,6 +69,7 @@ Commands — everything lives under `/rail`, with argument autocomplete:
 - `/rail policy`: open the **capability policy page** — the editable capability table with live per-class stats (see [Dispositions](#dispositions)). Over RPC it degrades to select dialogs; invoking it again closes it.
 - `/rail policy rules`: open the status page on its **policy** tab — the resolved mechanism policy (filesystem, network, environment scrubbing, and the command allowlist, provenance-annotated per entry). Invoking another tab while the page is open switches rather than closing. Outside the TUI this stays a standalone live widget, as before.
 - `/rail set <class> [allow|judge|ask|deny]`: set one class for this session from the command line (completions offer class ids — including custom ones — then dispositions). Without a disposition it prints the current effective value and where it came from.
+- `/rail grant add <file>`: evaluate a grant file against the gates and open the confirmation; `/rail grant check <file>` prints the gate report and applies nothing; `/rail grants` lists every grant with what it decided, and revokes, promotes, or demotes (see [Grants by hand](#grants-by-hand)).
 - `/rail guide <text>`: add classifier guidance for this session without waiting to be asked (see [Session guidance](#session-guidance)). Bare `/rail guide` prompts for the text; `/rail guide clear` drops every entry.
 - `/rail on`: enable Pi Rail.
 - `/rail off`: disable for the next agent turn, then re-enable automatically.
@@ -251,7 +252,7 @@ unknown field on an op is an error for that op:
 | op | fields |
 |---|---|
 | `set-disposition` | `capability`, `disposition` |
-| `add-class` | `id`, `definition`, optional `name`, `disposition`, `extends` |
+| `add-class` | `id`, `definition`, optional `name`, `disposition`, `extends`, `namer` |
 | `remove-class` | `id` (custom classes only) |
 | `set-definition` | `capability`, `definition` |
 | `classify` | `template`, `capability`, optional `flags` |
@@ -260,9 +261,141 @@ unknown field on an op is an error for that op:
 
 A file's ordinary keys are its base policy and mean exactly these ops; a grant
 is the same thing with a name, so it can be attributed, moved, and revoked.
-`examples` are checked for shape and kept with the grant but not yet run.
-The same grant id in another layer is a separate grant — provenance tells
-them apart. The policy tab of `/rail status` lists every grant in force.
+`examples` are the grant's tests: they run every time a grant is added (its
+own) and every time another grant is added (everyone's) — see
+[Grants by hand](#grants-by-hand). The same grant id in another layer is a
+separate grant — provenance tells them apart. The policy tab of `/rail status`
+lists every grant in force, and `/rail grants` manages them.
+
+**Rules-only classes.** A class a grant adds is *rules-only* by default: it is
+left out of the namer's vocabulary entirely and only `classify` rules reach it.
+A class meant to be reached by a narrow rule must not be one mislabel away from
+widening — with `worktree-cleanup` in the namer's vocabulary, the namer was
+seen labelling `git worktree remove --force` with it. `"namer": true` on the
+`add-class` op opts in. Classes in a file's base `capabilities.classes` and
+classes added on the policy page keep the namer default (`"namer": false`
+there makes one rules-only too). The policy page shows "rules only" in the
+class's footer line.
+
+### Grants by hand
+
+Write a grant as a JSON file — one grant object — and hand it to the rail:
+
+- **`/rail grant check <file>`** runs every gate below and prints the report.
+  Nothing is applied; it works headless too.
+- **`/rail grant add <file>`** runs the same gates, then opens the
+  confirmation (a docked panel in the TUI; a sequence of selects over RPC).
+- **`/rail grants`** lists every grant with its layer, op count, how many
+  decisions it decided this session and across the replay corpus, and when it
+  last decided anything ("never decided" for one that never has). `g` / `p`
+  promote a session grant to the global / project config, `d` demotes a file
+  grant to the session, `r` (twice) revokes. Each takes effect on the next tool
+  call: a change to a file grant refolds the live policy from the files at
+  once. Filesystem, network, and environment list changes in a file grant are
+  the exception — the sandbox profile is compiled when the rail starts, so
+  those apply at restart, and the view says so.
+
+[`examples/grants/worktree-cleanup.json`](examples/grants/worktree-cleanup.json)
+is a complete grant that passes its own gates. The file shape:
+
+```jsonc
+{
+  "id": "worktree-cleanup",                        // kebab-case
+  "request": "i want to allow cleaning up worktrees", // required: the request in your own words
+  "created": "2026-11-11",                         // optional: defaults to today
+  "ops": [ /* the op table above */ ],
+  "examples": [
+    { "tool": "bash", "input": { "command": "git worktree remove ../pi-rail-maint" }, "expect": ["allow"] },
+    { "tool": "bash", "input": { "command": "git worktree remove --force ../x" }, "expect": ["ask", "judge", "deny"],
+      "why": "--force discards uncommitted work" }
+  ]
+}
+```
+
+An example passes when its dry-run outcome is one of `expect` (a deterministic
+policy block counts as `deny`). An example **with** `allow` in `expect` is
+positive; one without is **negative**.
+
+**The gates.** All code, run before anything is shown:
+
+1. **Structure** — every op and example parses (a grant with one bad op is
+   rejected whole, unlike config loading), referenced classes exist, templates
+   and flags are valid, and the id is not taken in the target layer.
+2. **Its own examples** pass. A grant with any widening op (see "widening
+   unless provably tightening" below) must have at least one passing negative
+   example.
+3. **Every other grant's examples** still pass with this one added. An example
+   that already failed without it is reported, not blamed on it.
+4. **No `critical` case in `eval/cases.ts` moves toward allow.**
+5. **An action you denied when asked** (in the replay corpus) that this grant
+   would allow is not a failure — changing your mind is legitimate — but it
+   becomes a sensitive op (below).
+
+Then the corpus diff: every recorded decision is replayed with and without the
+grant, and the confirmation shows what loosens, what tightens, and what is
+indeterminate ("3 past asks become allows · 0 critical cases change · 2
+indeterminate"). Redacted records are counted apart: their recorded labels and
+screen verdict are a floor the replay can never drop, and they are never
+re-named.
+
+**What a dry run can and cannot know.** The gates run the interceptor's own
+stage helpers in its order — path policy, the deterministic mappers, the
+content screen, the table — so a grant evaluates in the gates exactly as it
+would live, with these stated assumptions, repeated in every report:
+
+- **Seatbelt is assumed enforcing.** A deterministic allow holds live only
+  while the sandbox enforces; without it those commands go to the namer.
+- **The namer is not called.** An action no rule labels end to end is decided
+  live by a model. The gates instead check whether the grant changes anything
+  the namer sees (the namer-visible classes and their definitions) or what its
+  labels resolve to. If not, the action is decided as before the grant — a
+  negative example like the `--force` one above passes as "outside this
+  grant". If so (a definition edit, a new namer-visible class, a loosened
+  row), the item "needs a namer re-check", which fails gates 2–4. This is why
+  definition edits are the expensive rung, and why grant-added classes are
+  rules-only. A positive example must be decided by rules.
+- **The judge and you are not simulated**: `judge` and `ask` are outcomes in
+  their own right.
+- With the classifier off, an action no rule labels passes through unreviewed,
+  live and in the gates alike.
+
+**Sensitive ops** need their own approval, each one separately: removing a
+`denyRead`/`denyWrite`/`deniedDomains` entry; setting `credentials`,
+`persistence`, or `unclassified` (or a class extending one of them) to
+`allow`; any built-in row set to `allow`; a bare-head template (`git *`); any
+filesystem, network, or environment widening; and gate 5's previously denied
+actions. (Disabling the rail, the classifier, or `failClosed`, and changing
+models or the backend, are on the plan's list too, but no op can express them:
+those are file settings a grant cannot touch.)
+
+**The confirmation** shows the request, each op in plain language with its
+direction, the examples with pass marks, the corpus summary, and every gate
+failure. A grant that fails a gate offers only Discard and says why. Otherwise:
+**Apply for this session** · **Apply and save to global** · **Apply and save
+to project** (only when the project is trusted and has a `.pi` directory) ·
+**Discard**. Sensitive ops are listed above the answers, each with its own
+toggle, **off** by default, toggled with **Space** — never Enter. Enter on an
+answer applies the non-sensitive ops plus exactly the sensitive ones toggled
+on. If leaving out an unapproved sensitive op makes the rest fail its gates
+(its own examples, typically), the grant is re-evaluated and **not** applied,
+and the panel says which example broke. Over RPC each sensitive op gets its own
+select whose first, default answer drops it.
+
+Approval is a deliberate action in the rail's own dialog and never anything in
+words: not the grant's `request`, not an approval comment, not session
+guidance. A session without a UI of its own (headless, or a subagent child
+whose asks are forwarded) cannot approve a sensitive op and cannot apply a
+widening grant at all — `/rail grant add` prints the report and applies
+nothing. A grant that only tightens is applied to the session there.
+Promoting a session grant to a file asks for no new approval, widening or not:
+its ops were approved (sensitive ones one by one) when it was applied, and
+promotion moves it unchanged.
+
+**Attribution.** A review whose deciding label came from a grant — its classify
+or allow rule, its table row, or the class it declared — names it: `/rail
+explain` says "decided by grant worktree-cleanup", and the review records carry
+`grant` (telemetry detail tier; always in the replay corpus), which is where the
+grants view's counts come from.
 
 ### Session scope
 
@@ -925,6 +1058,7 @@ branch actually accumulated instead of starting blank.
 written when a session is persisted, because replay depends on them:
 
 - `"minimal"` (default): adds resolved disposition and the row that decided,
+  the grant behind the deciding label (`grant`),
   content-screen verdict, judge fields (model, verdict, latency, tokens) when
   the judge ran, attempts, latency, token usage, namer model, and a truncated
   projection of the tool input.
@@ -981,8 +1115,8 @@ or any write/edit content — a write keeps only a sha256 and a byte length.
   of `classifier.telemetry`, is never written while the rail is disabled,
   never leaves the machine, and is never part of the session file.
 
-Nothing reads the corpus yet; it exists so that later policy tooling has
-history to replay against.
+The grant gates replay the corpus ([Grants by hand](#grants-by-hand)), and
+`/rail grants` counts what each grant decided from its `grant` field.
 
 ## Related extensions
 

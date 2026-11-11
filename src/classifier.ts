@@ -3,6 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   capabilityRegistry,
   capabilityRegistryIds,
+  namerRegistry,
   getEffectiveDisposition,
   type CapabilityId,
   type CapabilityState,
@@ -389,7 +390,9 @@ export async function runNaming(params: {
   sessionGuidance?: string[];
 }): Promise<NamerResult> {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
-  const registry = capabilityRegistry(params.config);
+  // Rules-only classes are not the namer's vocabulary: absent from its prompt,
+  // and a label naming one is dropped at parse like any unknown id.
+  const registry = namerRegistry(capabilityRegistry(params.config));
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
   const response = await completeText({
     model: params.model,

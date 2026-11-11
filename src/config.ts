@@ -50,6 +50,8 @@ export interface CapabilityClassConfig {
   disposition?: unknown;
   /** A built-in class id this class narrows: presets that deny the parent deny it too. */
   extends?: unknown;
+  /** false keeps the class out of the namer's vocabulary: only classify rules reach it. */
+  namer?: unknown;
 }
 
 export interface CapabilitiesConfig {

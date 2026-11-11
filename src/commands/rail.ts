@@ -14,6 +14,7 @@ import { StatusPage } from "../tui/status-page.ts";
 import { pickFromList, type SelectItem } from "../tui/select-list.ts";
 import { formatError } from "../util.ts";
 import { createDispositionCommands } from "./dispositions.ts";
+import { createGrantCommands } from "./grant.ts";
 import { runModelCommand } from "./model.ts";
 import { createRailTest } from "./test.ts";
 import { createRailWhy } from "./why.ts";
@@ -33,6 +34,8 @@ export interface RailCommandDeps {
    * message; toggleReadOnly degrades to a notify-only toast when it is unset.
    */
   postRailNotice?(content: string): void;
+  /** Grant command seams (config loading, file writers, the corpus); tests override them. */
+  grantDeps?: Omit<Parameters<typeof createGrantCommands>[0], "state" | "notify">;
 }
 
 const SUBCOMMANDS: Array<{ value: string; description: string }> = [
@@ -40,6 +43,9 @@ const SUBCOMMANDS: Array<{ value: string; description: string }> = [
   { value: "policy", description: "Open the capability policy page (edit rows and classes for this session; Ctrl+S saves)" },
   { value: "policy rules", description: "Open the status page on the resolved mechanism rules: filesystem, network, environment" },
   { value: "set", description: "Set one class for this session: set <class> [allow|judge|ask|deny]" },
+  { value: "grant add", description: "Evaluate a grant file against the gates and confirm it: grant add <file>" },
+  { value: "grant check", description: "Evaluate a grant file and print the gate report, applying nothing: grant check <file>" },
+  { value: "grants", description: "List every grant: what each decided, revoke, promote, demote" },
   { value: "guide", description: "Add classifier guidance for this session: guide <text> (or bare to be prompted)" },
   { value: "guide clear", description: "Drop every guidance entry collected this session" },
   { value: "explain", description: "Show the newest decision trace (explain <n> for older ones)" },
@@ -71,6 +77,8 @@ export function createRailCommand(deps: RailCommandDeps) {
     persist: deps.persistDisposition,
     notify: show,
   });
+
+  const grants = createGrantCommands({ state, notify: show, ...deps.grantDeps });
 
   /**
    * `/rail guide`: volunteer classifier guidance instead of waiting to be
@@ -258,7 +266,7 @@ export function createRailCommand(deps: RailCommandDeps) {
     }
   }
 
-  type PanelAction = "on" | "off-turn" | "off-session" | "readonly" | "model" | "statusline" | "smoke" | "critique" | "status" | "dispositions" | "policy-rules" | "explain";
+  type PanelAction = "on" | "off-turn" | "off-session" | "readonly" | "model" | "statusline" | "smoke" | "critique" | "status" | "dispositions" | "grants" | "policy-rules" | "explain";
 
   async function openPanel(ctx: ExtensionContext): Promise<void> {
     const items: SelectItem<PanelAction>[] = [];
@@ -278,6 +286,7 @@ export function createRailCommand(deps: RailCommandDeps) {
       { value: "critique", label: "Critique capabilities", searchText: "critique capabilities classes screen rules review improve", description: "Have Pi's current model review the class definitions, table, and screen" },
       { value: "status", label: "Status page", searchText: "status report details approvals live popup overlay tabs models namer judge engine", description: "Live status page: decisions, reviewer cost, recent namings and judgements, engine, policy" },
       { value: "dispositions", label: "Dispositions…", searchText: "dispositions policy capabilities classes allow deny ask judge edit table page", description: "Edit the capability disposition table: arrows cycle a row for this session, Ctrl+S saves" },
+      { value: "grants", label: "Grants…", searchText: "grants grant revoke promote demote list request", description: "Every grant: what it decided, revoke, promote to a config file, demote to the session" },
       { value: "policy-rules", label: "Policy rules", searchText: "policy rules filesystem network environment provenance mechanism show", description: "Resolved filesystem/network/environment rules with their config provenance" },
       { value: "explain", label: "Explain last decision", searchText: "explain trace decision why last chain stages", description: "Show the decision chain the rail ran for the most recent tool call" },
     );
@@ -308,6 +317,8 @@ export function createRailCommand(deps: RailCommandDeps) {
         return openStatus(ctx);
       case "dispositions":
         return dispositions.openSettings(ctx);
+      case "grants":
+        return grants.openGrants(ctx);
       case "policy-rules":
         // Same routing as `/rail policy rules`: the status page's policy tab.
         return openStatus(ctx, "policy");
@@ -344,6 +355,8 @@ export function createRailCommand(deps: RailCommandDeps) {
       return;
     }
     if (sub === "set") return dispositions.runSet(rest, ctx);
+    if (sub === "grant") return grants.runGrant(rest, ctx);
+    if (sub === "grants" && !rest) return grants.openGrants(ctx);
     if (sub === "guide") return runGuide(rest, ctx);
     if (sub === "explain") return showExplain(ctx, rest);
     if (sub === "test") return runRailTest(rest, ctx);
@@ -358,7 +371,7 @@ export function createRailCommand(deps: RailCommandDeps) {
     if (sub === "smoke" && !rest) return deps.runRailSmoke(ctx);
     if (sub === "critique") return deps.runCritique(rest, ctx);
 
-    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|smoke|critique …]", "warning");
+    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|grant add|check <file>|grants|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|smoke|critique …]", "warning");
   }
 
   function getArgumentCompletions(argumentPrefix: string) {

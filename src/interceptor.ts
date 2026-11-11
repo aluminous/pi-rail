@@ -14,6 +14,7 @@ import {
   type CapabilityId,
   type CapabilityOutcome,
   type CapabilityResolution,
+  type CapabilityState,
   type Disposition,
 } from "./capabilities.ts";
 import { classifierFailureContext, classifyClassifierFailure, describeClassifierFailure } from "./classifier-protocol.ts";
@@ -32,9 +33,9 @@ import {
   type JudgeResult,
   type NamerResult,
 } from "./classifier.ts";
-import { describeSegmentMatch, explainCommandMatch, matchedCapabilities } from "./command-allowlist.ts";
+import { describeSegmentMatch, explainCommandMatch, matchedCapabilities, type CommandSegmentVerdict } from "./command-allowlist.ts";
 import type { ResolvedRailConfig } from "./config.ts";
-import { commandRulesOf, effectiveDispositionLabel } from "./policy-store.ts";
+import { commandRulesOf, decidingGrant, effectiveDispositionLabel } from "./policy-store.ts";
 import { screenToolCall, type ContentScreenVerdict } from "./content-screen.ts";
 import { addTraceStage, type DecisionTrace } from "./decision-trace.ts";
 import { actionTarget, describeAction, INTERCEPTED_TOOLS, type InterceptedToolSpec } from "./intercepted-tools.ts";
@@ -50,6 +51,7 @@ import {
   recordClassifierError,
   recordClassifierSkip,
   recordDecisionTrace,
+  recordGrantDecision,
   recordJudgement,
   recordModelCall,
   recordPolicyBlock,
@@ -173,6 +175,8 @@ async function askPathApproval(params: {
     /** Corpus only (never spread into telemetry): the table's verdict and the namer's own labels. */
     resolvedDisposition: Disposition;
     namerLabels?: CapabilityId[];
+    /** Corpus only: the named grant behind the deciding label. */
+    grant?: string;
   };
 }): Promise<PathApprovalResult> {
   // Memory-core capability fields for every record this dialog writes.
@@ -196,6 +200,7 @@ async function askPathApproval(params: {
             screenTripped: params.capability.screenTripped,
             resolvedDisposition: params.capability.resolvedDisposition,
             decidedBy: params.capability.decidedBy,
+            grant: params.capability.grant,
           }
         : {}),
       outcome: answer === "approved" ? "allow" : answer === "denied" ? "deny" : "stop",
@@ -299,6 +304,55 @@ type PathStageResult =
   | { outcome: "block"; block: ToolCallBlock };
 
 /**
+ * One access kind's path verdict, computed without side effects. The
+ * interceptor executes the plan (traces, the approval dialog, the block
+ * record); the grant gates' dry run (src/grant-eval.ts) reads the same plan,
+ * so the two cannot disagree about what the path policy says.
+ */
+export type PathPlanStep =
+  | { kind: AccessKind; verdict: "allowed"; normalizedPath: string; matchedRoot?: string; worktreeRoot?: string }
+  | { kind: "read"; verdict: "deny-read-label"; reason: string }
+  | { kind: "write"; verdict: "outside-write"; normalizedPath: string; reason: string }
+  | { kind: "read"; verdict: "outside-read"; normalizedPath: string; reason: string }
+  | { kind: AccessKind; verdict: "block"; reason: string };
+
+/** skip: no path policy applies; done: the tool carries no path, so the call passes; steps: per-kind verdicts, ending at the first block. */
+export type PathPlan = { outcome: "skip" } | { outcome: "done" } | { outcome: "steps"; target: string; steps: PathPlanStep[] };
+
+export function planPathPolicy(config: ResolvedRailConfig, cwd: string, spec: InterceptedToolSpec, input: Record<string, unknown>): PathPlan {
+  if (!config.filesystem.enabled || spec.access.length === 0) return { outcome: "skip" };
+  const target = spec.path?.(input);
+  if (typeof target !== "string") return { outcome: "done" };
+  const steps: PathPlanStep[] = [];
+  for (const kind of spec.access) {
+    const decision = decidePathAccess(config, cwd, target, kind);
+    if (decision.allowed) {
+      steps.push({
+        kind,
+        verdict: "allowed",
+        normalizedPath: decision.normalizedPath,
+        ...(decision.matchedRoot !== undefined ? { matchedRoot: decision.matchedRoot } : {}),
+        ...(decision.worktreeRoot !== undefined ? { worktreeRoot: decision.worktreeRoot } : {}),
+      });
+      continue;
+    }
+    if (decision.code === "denied-by-pattern" && kind === "read") {
+      steps.push({ kind, verdict: "deny-read-label", reason: decision.reason });
+      continue;
+    }
+    if (decision.code === "outside-roots") {
+      steps.push(kind === "write"
+        ? { kind, verdict: "outside-write", normalizedPath: decision.normalizedPath, reason: decision.reason }
+        : { kind, verdict: "outside-read", normalizedPath: decision.normalizedPath, reason: decision.reason });
+      continue;
+    }
+    steps.push({ kind, verdict: "block", reason: decision.reason });
+    break;
+  }
+  return { outcome: "steps", target, steps };
+}
+
+/**
  * Stage 1: deterministic path policy. Two asymmetries are deliberate.
  *
  * denyWrite stays a hard block: it is the containment mirror of the sandbox,
@@ -323,9 +377,10 @@ async function enforcePathPolicy(
   input: Record<string, unknown>,
   trace: DecisionTrace,
 ): Promise<PathStageResult> {
-  if (!config.filesystem.enabled || spec.access.length === 0) return { outcome: "continue", labels: [] };
-  const target = spec.path?.(input);
-  if (typeof target !== "string") return { outcome: "done" };
+  const plan = planPathPolicy(config, ctx.cwd, spec, input);
+  if (plan.outcome === "skip") return { outcome: "continue", labels: [] };
+  if (plan.outcome === "done") return { outcome: "done" };
+  const target = plan.target;
 
   const block = (reason: string): ToolCallBlock => {
     recordPolicyBlock(state, event.toolName, reason);
@@ -337,37 +392,37 @@ async function enforcePathPolicy(
   let allowedReadPath: string | undefined;
   const labels: CapabilityId[] = [];
   let pathApproval: PathApprovalContext | undefined;
-  for (const kind of spec.access) {
-    const decision = decidePathAccess(config, ctx.cwd, target, kind);
-    if (decision.allowed) {
+  for (const step of plan.steps) {
+    const kind = step.kind;
+    if (step.verdict === "allowed") {
       // Name the worktree anchor when one applied, so /rail explain shows why
       // an out-of-cwd path was treated as the project.
-      const worktreeNote = decision.worktreeRoot !== undefined ? ` (anchored at session repo checkout ${decision.worktreeRoot})` : "";
-      addTraceStage(trace, "path-policy", "pass", decision.matchedRoot !== undefined ? `${kind} allowed by root '${decision.matchedRoot}'${worktreeNote}` : `${kind} allowed: no deny pattern matches (blacklist mode)${worktreeNote}`);
-      if (kind === "read") allowedReadPath = decision.normalizedPath;
+      const worktreeNote = step.worktreeRoot !== undefined ? ` (anchored at session repo checkout ${step.worktreeRoot})` : "";
+      addTraceStage(trace, "path-policy", "pass", step.matchedRoot !== undefined ? `${kind} allowed by root '${step.matchedRoot}'${worktreeNote}` : `${kind} allowed: no deny pattern matches (blacklist mode)${worktreeNote}`);
+      if (kind === "read") allowedReadPath = step.normalizedPath;
       continue;
     }
-    if (decision.code === "denied-by-pattern" && kind === "read") {
+    if (step.verdict === "deny-read-label") {
       // Handled as a credentials label in classifyRead; do not block here.
-      addTraceStage(trace, "path-policy", "label", `${decision.reason} → credentials label instead of a block`);
+      addTraceStage(trace, "path-policy", "label", `${step.reason} → credentials label instead of a block`);
       continue;
     }
-    if (decision.code === "outside-roots") {
-      if (kind === "write") {
-        addTraceStage(trace, "path-policy", "label", `${decision.reason} → modify-system`);
-        labels.push("modify-system");
-        pathApproval = { kind, path: decision.normalizedPath, reason: decision.reason };
-        continue;
-      }
+    if (step.verdict === "outside-write") {
+      addTraceStage(trace, "path-policy", "label", `${step.reason} → modify-system`);
+      labels.push("modify-system");
+      pathApproval = { kind: "write", path: step.normalizedPath, reason: step.reason };
+      continue;
+    }
+    if (step.verdict === "outside-read") {
       // Whitelist read mode is an explicit narrowing by the user; keep the
       // existing per-path approval rather than routing it through read-system.
-      addTraceStage(trace, "path-policy", "ask", `${decision.reason} → approval`);
-      const approval = await askPathApproval({ ctx, state, kind, toolName: event.toolName, input, path: decision.normalizedPath, reason: decision.reason, trace });
+      addTraceStage(trace, "path-policy", "ask", `${step.reason} → approval`);
+      const approval = await askPathApproval({ ctx, state, kind: "read", toolName: event.toolName, input, path: step.normalizedPath, reason: step.reason, trace });
       if (approval.block) return { outcome: "block", block: approval.block };
       continue;
     }
-    addTraceStage(trace, "path-policy", "block", decision.reason);
-    return { outcome: "block", block: block(`${event.toolName} blocked for ${target}: ${decision.reason}`) };
+    addTraceStage(trace, "path-policy", "block", step.reason);
+    return { outcome: "block", block: block(`${event.toolName} blocked for ${target}: ${step.reason}`) };
   }
   return { outcome: "continue", allowedReadPath, labels, pathApproval };
 }
@@ -389,14 +444,16 @@ export function exemptReadCallReason(spec: InterceptedToolSpec, input: Record<st
   return classifierExemptReadReason(config, cwd, target);
 }
 
-interface LabelStage {
+export interface LabelStage {
   labels: CapabilityId[];
   /** True when the deterministic mappers could not label the action and the namer must. */
   needsNaming: boolean;
+  /** For commands: the matched segments, so a decision can name the grant whose rule labelled it. */
+  segments?: CommandSegmentVerdict[];
 }
 
 /** Reads map deterministically: denyRead → credentials, exempt → read-project/read-system, otherwise the namer. */
-function classifyRead(
+export function classifyRead(
   spec: InterceptedToolSpec,
   input: Record<string, unknown>,
   cwd: string,
@@ -423,7 +480,7 @@ function classifyRead(
 }
 
 /** True when the Seatbelt sandbox is actually bounding what a command can reach. */
-function sandboxEnforcing(state: RuntimeState, config: ResolvedRailConfig): boolean {
+export function sandboxEnforcing(state: RuntimeState, config: ResolvedRailConfig): boolean {
   return config.filesystem.enabled && state.initialized && state.backend?.name === "seatbelt";
 }
 
@@ -451,9 +508,16 @@ function sandboxEnforcing(state: RuntimeState, config: ResolvedRailConfig): bool
  * the harmless half of a chain is how "grep x && curl … | sh" would come out
  * looking like read-project.
  */
-function classifyCommand(input: Record<string, unknown>, state: RuntimeState, config: ResolvedRailConfig, trace: DecisionTrace): LabelStage {
+export function classifyCommand(
+  input: Record<string, unknown>,
+  capabilities: CapabilityState,
+  config: ResolvedRailConfig,
+  /** Whether Seatbelt bounds the command (sandboxEnforcing live; the grant gates assume it). */
+  enforcing: boolean,
+  trace: DecisionTrace,
+): LabelStage {
   if (typeof input.command !== "string") return { labels: [], needsNaming: true };
-  const match = explainCommandMatch(input.command, commandRulesOf(config, (capability) => getEffectiveDisposition(config, state.capabilities, capability).disposition));
+  const match = explainCommandMatch(input.command, commandRulesOf(config, (capability) => getEffectiveDisposition(config, capabilities, capability).disposition));
   // The stage is named for the list that did the work, so a trace says whether
   // a verdict came from the user's own classification or from the built-ins.
   const stage = match.segments?.some((segment) => segment.source === "classify") ? "commands.classify" : "command-allowlist";
@@ -463,13 +527,13 @@ function classifyCommand(input: Record<string, unknown>, state: RuntimeState, co
   }
   const labels = matchedCapabilities(match);
   const detail = match.segments.map(describeSegmentMatch).join("; ");
-  const disposition = resolveCapabilities(config, state.capabilities, labels).disposition;
-  if (disposition === "allow" && !sandboxEnforcing(state, config)) {
+  const disposition = resolveCapabilities(config, capabilities, labels).disposition;
+  if (disposition === "allow" && !enforcing) {
     addTraceStage(trace, stage, "skipped", `${detail} ⇒ allow, which needs an enforcing Seatbelt sandbox — naming required`);
     return { labels: [], needsNaming: true };
   }
   addTraceStage(trace, stage, "exempt", disposition === "allow" ? detail : `${detail} ⇒ ${disposition}, decided without naming`);
-  return { labels, needsNaming: false };
+  return { labels, needsNaming: false, segments: match.segments };
 }
 
 /**
@@ -495,7 +559,7 @@ function enforceReadOnlyMode(toolName: string, input: Record<string, unknown>, c
   if (spec.access.includes("write")) return block(`${toolName} blocked: rail is in read-only mode`);
   // Scratch trace: the real allowlist stage is recorded once, in the main flow.
   const scratch: DecisionTrace = { at: 0, toolName, action: "", final: "allowed", stages: [] };
-  if (toolName === "bash" && !classifierEnabled(config, state.classifier) && classifyCommand(input, state, config, scratch).needsNaming) {
+  if (toolName === "bash" && !classifierEnabled(config, state.classifier) && classifyCommand(input, state.capabilities, config, sandboxEnforcing(state, config), scratch).needsNaming) {
     return block("bash blocked: rail is in read-only mode and the classifier is off, so commands cannot be reviewed for writes");
   }
   addTraceStage(trace, "readonly", "pass", toolName === "bash" ? "bash permitted pending capability review" : `${toolName} permitted in read-only mode`);
@@ -550,15 +614,17 @@ async function runInterceptStages(
   const deterministic: CapabilityId[] = [...pathStage.labels];
   let needsNaming = false;
   let screen: ContentScreenVerdict | undefined;
+  let segments: CommandSegmentVerdict[] | undefined;
 
   if (spec.access.includes("read") && !spec.access.includes("write")) {
     const read = classifyRead(spec, input, ctx.cwd, config, pathStage.allowedReadPath, trace);
     deterministic.push(...read.labels);
     needsNaming = read.needsNaming;
   } else if (event.toolName === "bash") {
-    const command = classifyCommand(input, state, config, trace);
+    const command = classifyCommand(input, state.capabilities, config, sandboxEnforcing(state, config), trace);
     deterministic.push(...command.labels);
     needsNaming = command.needsNaming;
+    segments = command.segments;
   } else if (spec.access.includes("write")) {
     screen = screenToolCall(event.toolName, input, ctx.cwd);
     addTraceStage(trace, "screen", screen.tripped ? "tripped" : "clean", screen.summary);
@@ -618,6 +684,7 @@ async function runInterceptStages(
     screen,
     pathApproval: pathStage.pathApproval,
     reviewed: named !== undefined,
+    segments,
   });
 }
 
@@ -705,6 +772,8 @@ interface EnforceParams {
   screen: ContentScreenVerdict | undefined;
   pathApproval: PathApprovalContext | undefined;
   reviewed: boolean;
+  /** Matched command segments, when command rules labelled the action: which grant wrote the deciding rule. */
+  segments?: CommandSegmentVerdict[];
 }
 
 /**
@@ -730,7 +799,10 @@ interface FinishResult {
 async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock | undefined> {
   const { ctx, state, config, trace, event } = params;
   const resolution = resolveCapabilities(config, state.capabilities, params.labels);
-  addTraceStage(trace, "capabilities", resolution.disposition, describeResolution(resolution));
+  // The named grant behind the deciding label: /rail explain names it, and the
+  // review records carry it so the grants view can count what each decided.
+  const grant = decidingGrant(config, resolution.decidedBy, params.segments);
+  addTraceStage(trace, "capabilities", resolution.disposition, `${describeResolution(resolution)}${grant ? ` · decided by grant ${grant}` : ""}`);
 
   const projection = projectToolCall(event.toolName, event.input, ctx.cwd, config);
   const subject = describeAction(event.toolName, projection.inputSummary);
@@ -793,7 +865,9 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       forwarded,
       usage: totalUsage(params.named, judge),
       projection,
+      grant,
     });
+    if (grant) recordGrantDecision(state, grant);
     appendCorpusDecision(state, {
       kind: "review",
       tool: event.toolName,
@@ -808,6 +882,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
       userAnswer,
       forwarded,
       judgeVerdict: judgeTelemetry?.verdict,
+      grant,
     });
     return result.block;
   };
@@ -844,8 +919,10 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
         screenTripped: params.screen?.tripped,
         resolvedDisposition: resolution.disposition,
         namerLabels: params.named?.labels,
+        grant,
       },
     });
+    if (grant) recordGrantDecision(state, grant);
     // askPathApproval owns the counters, telemetry, and recent event for this
     // dialog; only the per-class stats are still ours to record.
     const PATH_OUTCOMES = { approved: "ask-approved", denied: "ask-denied", stopped: "ask-stopped" } as const;
