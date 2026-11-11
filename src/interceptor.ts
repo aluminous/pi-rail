@@ -32,7 +32,8 @@ import {
   type NamerResult,
 } from "./classifier.ts";
 import { describeSegmentMatch, explainCommandMatch, matchedCapabilities } from "./command-allowlist.ts";
-import { configSourceLabel, type ResolvedRailConfig } from "./config.ts";
+import type { ResolvedRailConfig } from "./config.ts";
+import { effectiveDispositionLabel } from "./policy-store.ts";
 import { screenToolCall, type ContentScreenVerdict } from "./content-screen.ts";
 import { addTraceStage, type DecisionTrace } from "./decision-trace.ts";
 import { actionTarget, describeAction, INTERCEPTED_TOOLS, type InterceptedToolSpec } from "./intercepted-tools.ts";
@@ -580,7 +581,7 @@ async function runInterceptStages(
     namerModel = describeModel(() => resolveClassifierModel(ctx, config, state.classifier));
     try {
       named = await withWorkingMessage(ctx, "Classifying...", () =>
-        nameToolCall({ ctx, config, state: state.classifier, toolName: event.toolName, input: event.input, completeFn, capabilities: state.capabilities }),
+        nameToolCall({ ctx, config, state: state.classifier, toolName: event.toolName, input: event.input, completeFn }),
       );
       namerLatencyMs = Math.round(performance.now() - startedAt);
       recordModelCall(state, { role: "namer", model: namerModel, latencyMs: namerLatencyMs, usage: named.tokenUsage });
@@ -674,8 +675,7 @@ function handleNamerFailure(
 
 function describeResolution(resolution: CapabilityResolution): string {
   const rows = resolution.effective.map((entry) => {
-    const scope = entry.scope === "config" ? configSourceLabel(entry.source ?? "config") : entry.scope === "preset" ? `${entry.source} preset` : entry.scope;
-    return `${entry.id}→${entry.disposition} (${scope})`;
+    return `${entry.id}→${entry.disposition} [${effectiveDispositionLabel(entry)}]`;
   });
   return `${rows.join(", ")} ⇒ ${resolution.disposition}`;
 }
@@ -683,11 +683,10 @@ function describeResolution(resolution: CapabilityResolution): string {
 /** "off-machine-effects, which you have set to ask (default)" — the attribution line every block and prompt carries. */
 function attribution(resolution: CapabilityResolution, registry: CapabilityClass[]): string {
   const decided = resolution.decidedBy;
-  const scope =
-    decided.scope === "config" ? configSourceLabel(decided.source ?? "config")
-    : decided.scope === "preset" ? `${decided.source} preset`
-    : decided.scope === "session" ? "this session"
-    : "default";
+  // The implicit session-edits grant reads "this session", as it always has;
+  // anything else names its layer and grant, e.g. "project · worktree-cleanup".
+  const label = effectiveDispositionLabel(decided);
+  const scope = label === "session" ? "this session" : label;
   return `${decided.id} (${capabilityName(decided.id, registry)}), which is set to ${decided.disposition} (${scope})`;
 }
 
@@ -738,7 +737,7 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
   // the tool-name prefix (the record and the rings carry the tool separately).
   const guidanceSubject = subject.startsWith(`${event.toolName}: `) ? subject.slice(event.toolName.length + 2) : subject;
   const target = actionTarget(event.toolName, event.input);
-  const registry = capabilityRegistry(config, state.capabilities);
+  const registry = capabilityRegistry(config);
   let disposition = resolution.disposition;
   let judge: JudgeResult | undefined;
   let judgeTelemetry: RailJudgeTelemetry | undefined;
@@ -954,7 +953,6 @@ async function runJudgeStage(
         authorizationEvidence: params.named?.authorizationEvidence,
         recentGuardDecisions: recentDecisionsForJudge(state),
         completeFn: params.completeFn,
-        capabilities: state.capabilities,
       }),
     );
     const latencyMs = Math.round(performance.now() - startedAt);

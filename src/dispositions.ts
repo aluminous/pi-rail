@@ -1,33 +1,50 @@
 /**
  * The view model behind the disposition settings page: one row per capability
- * class, resolved against the persisted config, the session overrides, and any
- * session preset. The TUI page and the RPC select degradation both read it, so
- * the two surfaces describe the same table in the same words.
+ * class, resolved against the folded policy (config files plus the session
+ * layer of src/policy-store.ts) and any session preset. The TUI page and the
+ * RPC select degradation both read it, so the two surfaces describe the same
+ * table in the same words.
  */
 import {
   CUSTOM_CLASS_ID_PATTERN,
   DISPOSITIONS,
-  addSessionClass,
   capabilityRegistry,
-  clearSessionDisposition,
-  deleteSessionClass,
   getEffectiveDisposition,
   isBuiltinCapabilityId,
-  setSessionDefinition,
-  setSessionDisposition,
   type CapabilityClass,
   type CapabilityId,
   type CapabilityStats,
   type Disposition,
   type EffectiveDisposition,
 } from "./capabilities.ts";
-import { configSourceLabel, globalRailConfigPath, type ResolvedRailConfig } from "./config.ts";
+import { globalRailConfigPath, type ResolvedRailConfig } from "./config.ts";
 import {
+  appendPersistentBaseOps,
   updatePersistentCapabilityClass,
   updatePersistentCapabilityDefinition,
   updatePersistentDisposition,
   type PersistedCapabilityClass,
 } from "./persistent-settings.ts";
+import {
+  applyOpsInPlace,
+  baseConfigOf,
+  invalidateSessionCache,
+  provenanceLabel,
+  withSessionLayer,
+  withoutSessionEdits,
+  type PolicyOp,
+} from "./policy-store.ts";
+import {
+  addSessionClass,
+  clearSessionDisposition,
+  clearSessionPolicyEdits,
+  deleteSessionClass,
+  sessionAddedClasses,
+  sessionDispositionEdit,
+  sessionEditedDefinitions,
+  setSessionDefinition,
+  setSessionDisposition,
+} from "./session-policy.ts";
 import { syncCapabilityPreset, type RuntimeState } from "./state.ts";
 
 /** One-line help per disposition, for select labels and completions. */
@@ -52,11 +69,11 @@ export interface DispositionRow {
   name: string;
   /** Short form of the class definition, for the page footer and select descriptions. */
   definition: string;
-  /** The row the user edits: the session override when set, else the persisted value. */
+  /** The row the user edits: the folded table value, session layer included, before any preset. */
   value: Disposition;
-  /** What the row would be with no session override: config-merged, else the class default. */
+  /** What the row would be with this session's edit undone: config files and named session grants. */
   persisted: Disposition;
-  /** A session override moved this row off its persisted value — the page highlights these. */
+  /** A session edit moved this row off its persisted value — the page highlights these, and Ctrl+S writes them. */
   modified: boolean;
   /** What actually decides, including a session preset tightening the row. */
   effective: EffectiveDisposition;
@@ -89,33 +106,40 @@ function statsLabel(stats: CapabilityStats | undefined): string {
   return parts.join(" · ");
 }
 
-/** Every class in registry order. Recomputed on each refresh, so live stats, class edits, and preset changes land without extra plumbing. */
+/**
+ * Every class in registry order. Recomputed on each refresh, so live stats, class edits, and preset changes land without extra plumbing.
+ * `config` may be the base or the effective config; the session layer comes from `state` either way.
+ */
 export function dispositionRows(config: ResolvedRailConfig | undefined, state: RuntimeState): DispositionRow[] {
   // The preset is derived from state.readOnly; sync here so a read-only toggle
   // while the page is open shows up on the next refresh.
   syncCapabilityPreset(state);
-  const sessionAdded = new Set(state.capabilities.customClasses.map((entry) => entry.id));
-  return capabilityRegistry(config, state.capabilities).map((entry) => {
-    const persisted = getEffectiveDisposition(config, undefined, entry.id).disposition;
-    const override = state.capabilities.overrides[entry.id];
-    const effective = getEffectiveDisposition(config, state.capabilities, entry.id);
+  const effective = config ? withSessionLayer(config, state.sessionPolicy) : undefined;
+  const inherited = config ? withoutSessionEdits(config, state.sessionPolicy) : undefined;
+  const sessionAdded = new Set(sessionAddedClasses(state).map((entry) => entry.id));
+  const definitionEdits = sessionEditedDefinitions(state);
+  return capabilityRegistry(effective).map((entry) => {
+    const persisted = getEffectiveDisposition(inherited, undefined, entry.id).disposition;
+    const value = getEffectiveDisposition(effective, undefined, entry.id).disposition;
+    const edit = sessionDispositionEdit(state, entry.id);
+    const resolved = getEffectiveDisposition(effective, state.capabilities, entry.id);
     const stats = state.capabilities.stats[entry.id];
     return {
       id: entry.id,
       name: entry.name,
       definition: shortDefinition(entry.definition),
-      value: override ?? persisted,
+      value,
       persisted,
-      modified: override !== undefined && override !== persisted,
-      effective,
-      presetTightened: effective.scope === "preset",
+      modified: edit !== undefined && edit !== persisted,
+      effective: resolved,
+      presetTightened: resolved.scope === "preset",
       stats,
       statsLabel: statsLabel(stats),
       builtin: isBuiltinCapabilityId(entry.id),
       sessionNew: sessionAdded.has(entry.id),
-      // A session-added class carries its edits inside its own entry, so only
-      // a definitionEdits key counts as editing something that already existed.
-      sessionEdited: state.capabilities.definitionEdits[entry.id] !== undefined,
+      // A session-added class carries its edits inside its own add-class op,
+      // so only a set-definition edit counts as editing something that already existed.
+      sessionEdited: definitionEdits.has(entry.id),
       fullDefinition: entry.definition,
     };
   });
@@ -133,14 +157,15 @@ export function cycleDisposition(current: Disposition, step: 1 | -1): Dispositio
 }
 
 /**
- * Applies a row edit at session scope. Landing back on the persisted value
- * drops the override instead of recording a no-op one, so Ctrl+S only ever
- * writes rows the user actually changed.
+ * Applies a row edit at session scope (an op in session-edits). Landing back
+ * on the persisted value drops the edit instead of recording a no-op one, so
+ * Ctrl+S only ever writes rows the user actually changed.
  */
 export function setRowDisposition(config: ResolvedRailConfig | undefined, state: RuntimeState, id: CapabilityId, disposition: Disposition): void {
-  const persisted = getEffectiveDisposition(config, undefined, id).disposition;
-  if (disposition === persisted) clearSessionDisposition(state.capabilities, id);
-  else setSessionDisposition(state.capabilities, id, disposition);
+  const inherited = config ? withoutSessionEdits(config, state.sessionPolicy) : undefined;
+  const persisted = getEffectiveDisposition(inherited, undefined, id).disposition;
+  if (disposition === persisted) clearSessionDisposition(state, id);
+  else setSessionDisposition(state, id, disposition);
 }
 
 export interface SaveResult {
@@ -160,87 +185,77 @@ export interface DispositionPersistence {
   disposition(id: CapabilityId, disposition: Disposition | undefined): void;
   capabilityClass(id: string, entry: PersistedCapabilityClass | undefined): void;
   capabilityDefinition(id: string, definition: string | undefined): void;
+  /** Every other op kind (classify rules, command allowances, list edits), written into base keys. */
+  baseOps(ops: PolicyOp[]): void;
 }
 
 export const DEFAULT_DISPOSITION_PERSISTENCE: DispositionPersistence = {
   disposition: updatePersistentDisposition,
   capabilityClass: updatePersistentCapabilityClass,
   capabilityDefinition: updatePersistentCapabilityDefinition,
+  baseOps: (ops) => appendPersistentBaseOps(ops),
 };
 
 /**
- * Ctrl+S: writes every session change — disposition rows, added classes,
- * definition edits, deleted classes — to the global config, folds each into the
- * in-memory resolved config, and clears the session layer. Everything is
- * persisted now, so the modified/new/edited markers go away and no effective
- * value moves.
+ * Ctrl+S: promotes the session-edits grant into the global config's base keys
+ * — disposition rows, added classes, definition edits, removed classes, and
+ * anything else it holds — then folds the same ops into the in-memory base
+ * under global provenance and empties session-edits. Everything is persisted
+ * now, so the modified/new/edited markers go away and no effective value
+ * moves. Named session grants are untouched: they promote as grants, not as
+ * base keys. The base is edited in place because the policy page and the
+ * select flow hold it across the save.
  */
 export function saveDispositions(
   config: ResolvedRailConfig | undefined,
   state: RuntimeState,
-  persist: DispositionPersistence = DEFAULT_DISPOSITION_PERSISTENCE,
+  persist: Partial<DispositionPersistence> = DEFAULT_DISPOSITION_PERSISTENCE,
 ): SaveResult {
+  const writer: DispositionPersistence = { ...DEFAULT_DISPOSITION_PERSISTENCE, ...persist };
   const result: SaveResult = { saved: [], shadowed: [], added: [], edited: [], removed: [] };
+  const edits = [...state.sessionPolicy.edits];
+  if (edits.length === 0) return result;
   const globalPath = globalRailConfigPath();
+  const base = config ? baseConfigOf(config) : undefined;
 
   // Classes first: a disposition row for a class added in the same session has
   // to land in a config that already declares the class.
-  for (const entry of [...state.capabilities.customClasses]) {
-    persist.capabilityClass(entry.id, toPersistedClass(entry));
-    result.added.push(entry.id);
-    if (config) {
-      const at = config.capabilities.classes.findIndex((existing) => existing.id === entry.id);
-      if (at === -1) config.capabilities.classes.push({ ...entry });
-      else config.capabilities.classes[at] = { ...entry };
-      config.provenance.capabilityClasses[entry.id] = globalPath;
-    }
+  for (const op of edits) {
+    if (op.op !== "add-class") continue;
+    writer.capabilityClass(op.id, { id: op.id, ...(op.name ? { name: op.name } : {}), definition: op.definition, disposition: op.disposition ?? "ask" });
+    result.added.push(op.id);
   }
-  state.capabilities.customClasses = [];
-
-  for (const [id, definition] of Object.entries(state.capabilities.definitionEdits)) {
-    if (isBuiltinCapabilityId(id)) {
-      persist.capabilityDefinition(id, definition);
-      if (config) {
-        config.capabilities.definitions[id] = definition;
-        config.provenance.capabilityDefinitions[id] = globalPath;
-      }
+  for (const op of edits) {
+    if (op.op !== "set-definition") continue;
+    if (isBuiltinCapabilityId(op.capability)) {
+      writer.capabilityDefinition(op.capability, op.definition);
     } else {
       // A persisted custom class stores its definition inline, so editing it is
       // a rewrite of the class entry rather than a definitions-map override.
-      const existing = config?.capabilities.classes.find((entry) => entry.id === id);
-      if (existing) {
-        existing.definition = definition;
-        persist.capabilityClass(id, toPersistedClass(existing));
-        config!.provenance.capabilityClasses[id] = globalPath;
-      }
+      const existing = base?.capabilities.classes.find((entry) => entry.id === op.capability);
+      if (existing) writer.capabilityClass(op.capability, toPersistedClass({ ...existing, definition: op.definition }));
     }
-    result.edited.push(id);
+    result.edited.push(op.capability);
   }
-  state.capabilities.definitionEdits = {};
+  for (const op of edits) {
+    if (op.op !== "remove-class") continue;
+    writer.capabilityClass(op.id, undefined);
+    result.removed.push(op.id);
+  }
+  for (const op of edits) {
+    if (op.op !== "set-disposition") continue;
+    writer.disposition(op.capability, op.disposition);
+    result.saved.push(op.capability);
+    if (base?.provenance.dispositions[op.capability]?.layer === "project") result.shadowed.push(op.capability);
+  }
+  const rest = edits.filter((op) => !["add-class", "set-definition", "remove-class", "set-disposition"].includes(op.op));
+  if (rest.length > 0) writer.baseOps(rest);
 
-  for (const id of [...state.capabilities.deletedCustom]) {
-    persist.capabilityClass(id, undefined);
-    result.removed.push(id);
-    if (config) {
-      config.capabilities.classes = config.capabilities.classes.filter((entry) => entry.id !== id);
-      delete config.provenance.capabilityClasses[id];
-    }
+  if (base) {
+    applyOpsInPlace(base, edits, { layer: "global", file: globalPath }, `${globalPath} (saved session edits)`);
+    invalidateSessionCache(base);
   }
-  state.capabilities.deletedCustom = [];
-
-  for (const [key, disposition] of Object.entries(state.capabilities.overrides)) {
-    const id = key as CapabilityId;
-    if (!disposition) continue;
-    persist.disposition(id, disposition);
-    result.saved.push(id);
-    if (config) {
-      const previous = config.provenance.dispositions[id];
-      if (previous !== undefined && previous !== "default" && previous !== globalPath) result.shadowed.push(id);
-      config.dispositions[id] = disposition;
-      config.provenance.dispositions[id] = globalPath;
-    }
-    clearSessionDisposition(state.capabilities, id);
-  }
+  clearSessionPolicyEdits(state);
   return result;
 }
 
@@ -255,13 +270,7 @@ function toPersistedClass(entry: CapabilityClass): PersistedCapabilityClass {
 
 /** True when Ctrl+S has anything to write. */
 export function hasUnsavedChanges(state: RuntimeState): boolean {
-  const capabilities = state.capabilities;
-  return (
-    Object.keys(capabilities.overrides).length > 0
-    || capabilities.customClasses.length > 0
-    || Object.keys(capabilities.definitionEdits).length > 0
-    || capabilities.deletedCustom.length > 0
-  );
+  return state.sessionPolicy.edits.length > 0;
 }
 
 // ── Class editing (session scope until Ctrl+S) ───────────────────────────────
@@ -284,9 +293,9 @@ export function addClass(
   if (!id) return "A class id is required.";
   if (isBuiltinCapabilityId(id)) return `${id} is a built-in class. Edit its definition instead of redefining it.`;
   if (!CUSTOM_CLASS_ID_PATTERN.test(id)) return "Ids are kebab-case: a letter, then letters, digits, or hyphens (2-41 characters).";
-  if (capabilityRegistry(config, state.capabilities).some((entry) => entry.id === id)) return `${id} already exists.`;
+  if (capabilityRegistry(effectiveOf(config, state)).some((entry) => entry.id === id)) return `${id} already exists.`;
   if (!definition) return "A definition is required — it is the prompt text the namer reads.";
-  addSessionClass(state.capabilities, {
+  addSessionClass(state, {
     id,
     name: input.name?.trim() || id,
     definition,
@@ -304,8 +313,8 @@ export function editClassDefinition(
 ): string | undefined {
   const trimmed = definition.trim();
   if (!trimmed) return "A definition is required — it is the prompt text the namer reads.";
-  if (!capabilityRegistry(config, state.capabilities).some((entry) => entry.id === id)) return `Unknown capability class: ${id}.`;
-  setSessionDefinition(state.capabilities, id, trimmed);
+  if (!capabilityRegistry(effectiveOf(config, state)).some((entry) => entry.id === id)) return `Unknown capability class: ${id}.`;
+  setSessionDefinition(state, id, trimmed);
   return undefined;
 }
 
@@ -316,17 +325,27 @@ export function editClassDefinition(
  */
 export function deleteClass(state: RuntimeState, id: CapabilityId): string | undefined {
   if (isBuiltinCapabilityId(id)) return `${id} is built-in and cannot be deleted — set it to deny, or edit its definition.`;
-  deleteSessionClass(state.capabilities, id);
-  clearSessionDisposition(state.capabilities, id);
+  // The edit helper drops the class's row and definition edits with it.
+  deleteSessionClass(state, id);
   return undefined;
 }
 
-/** "built-in default", "global config", "project config", "this session", "read-only preset". */
+/** The effective config for (config, state), whichever of base or effective the caller holds. */
+function effectiveOf(config: ResolvedRailConfig | undefined, state: RuntimeState): ResolvedRailConfig | undefined {
+  return config ? withSessionLayer(config, state.sessionPolicy) : undefined;
+}
+
+/**
+ * "built-in default", "global config", "project config (grant x)", "this
+ * session", "session grant x", "read-only preset".
+ */
 export function describeDispositionSource(effective: EffectiveDisposition): string {
   if (effective.scope === "default") return "built-in default";
-  if (effective.scope === "session") return "this session";
   if (effective.scope === "preset") return `${effective.source} preset`;
-  return `${configSourceLabel(effective.source ?? "config")} config`;
+  const provenance = effective.provenance;
+  const label = provenanceLabel(provenance);
+  if (effective.scope === "session") return label === "session" ? "this session" : `session grant ${provenance?.grantId}`;
+  return provenance?.grantId ? `${provenance.layer} config (grant ${provenance.grantId})` : `${label} config`;
 }
 
 /** Banner for an active session preset; undefined when none is active. */

@@ -387,11 +387,9 @@ export async function runNaming(params: {
   toolName: string;
   input: unknown;
   sessionGuidance?: string[];
-  /** Session taxonomy edits; folded into the registry the namer is shown and validated against. */
-  capabilities?: CapabilityState;
 }): Promise<NamerResult> {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
-  const registry = capabilityRegistry(params.config, params.capabilities);
+  const registry = capabilityRegistry(params.config);
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
   const response = await completeText({
     model: params.model,
@@ -419,10 +417,9 @@ export async function runJudging(params: {
   authorizationEvidence?: string;
   sessionGuidance?: string[];
   recentGuardDecisions?: string[];
-  capabilities?: CapabilityState;
 }): Promise<JudgeResult> {
   const projection = projectToolCall(params.toolName, params.input, params.io.cwd, params.config);
-  const registry = capabilityRegistry(params.config, params.capabilities);
+  const registry = capabilityRegistry(params.config);
   const budget: RetryBudget = { attempts: 0, maxAttempts: 5 };
   const response = await completeText({
     model: params.model,
@@ -452,7 +449,6 @@ export async function nameToolCall(params: {
   toolName: string;
   input: unknown;
   completeFn?: CompleteFn;
-  capabilities?: CapabilityState;
 }): Promise<NamerResult> {
   const model = resolveClassifierModel(params.ctx, params.config, params.state);
   if (!model) throw new ClassifierModelUnavailableError(`Classifier model not found: ${params.state.modelOverride ?? params.config.classifier.model}`);
@@ -463,7 +459,6 @@ export async function nameToolCall(params: {
     toolName: params.toolName,
     input: params.input,
     sessionGuidance: params.state.sessionGuidance,
-    capabilities: params.capabilities,
   });
 }
 
@@ -477,7 +472,6 @@ export async function judgeToolCall(params: {
   authorizationEvidence?: string;
   recentGuardDecisions?: string[];
   completeFn?: CompleteFn;
-  capabilities?: CapabilityState;
 }): Promise<JudgeResult> {
   const model = resolveJudgeModel(params.ctx, params.config, params.state);
   if (!model) throw new ClassifierModelUnavailableError(`Judge model not found: ${judgeModelSpec(params.config, params.state)}`);
@@ -491,7 +485,6 @@ export async function judgeToolCall(params: {
     authorizationEvidence: params.authorizationEvidence,
     sessionGuidance: params.state.sessionGuidance,
     recentGuardDecisions: params.recentGuardDecisions,
-    capabilities: params.capabilities,
   });
 }
 
@@ -503,7 +496,7 @@ export async function judgeToolCall(params: {
  * tabulates below, plus a policy summary and cwd the critique cannot improve.
  */
 export function buildCapabilityPromptForCritique(config: ResolvedRailConfig, capabilities: CapabilityState | undefined): string {
-  const table = capabilityRegistry(config, capabilities).map((entry) => {
+  const table = capabilityRegistry(config).map((entry) => {
     const effective = getEffectiveDisposition(config, capabilities, entry.id);
     return `- ${entry.id}: ${effective.disposition} (${effective.scope})\n  ${entry.definition}`;
   });

@@ -20,7 +20,7 @@ export interface DispositionPageParams {
   rows(): DispositionRow[];
   /** Cycles one row's disposition at session scope; the page re-reads rows() after. */
   cycle(id: CapabilityId, step: 1 | -1): void;
-  /** Ctrl+S: persists the session overrides and notifies. */
+  /** Ctrl+S: promotes the session edits to the global config and notifies. */
   save(): void;
   /** One-line note about an active session preset, when there is one. */
   banner(): string | undefined;

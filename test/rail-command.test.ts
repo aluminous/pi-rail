@@ -5,6 +5,7 @@ import { BUILTIN_CAPABILITY_IDS, type CapabilityId, type Disposition } from "../
 import { createRailCommand } from "../src/commands/rail.ts";
 import { addClass, setRowDisposition } from "../src/dispositions.ts";
 import { addSessionGuidance } from "../src/classifier.ts";
+import { sessionDispositionEdit, sessionDispositionEdits } from "../src/session-policy.ts";
 import { createRuntimeState, type RuntimeState } from "../src/state.ts";
 import { DispositionPage } from "../src/tui/disposition-page.ts";
 import { StatusPage } from "../src/tui/status-page.ts";
@@ -106,8 +107,9 @@ function tuiCtx() {
 
 const settled = () => new Promise((resolve) => setImmediate(resolve));
 
+/** This session's table-row edits: the set-disposition ops in the session-edits grant. */
 function overrides(state: RuntimeState) {
-  return state.capabilities.overrides;
+  return sessionDispositionEdits(state);
 }
 
 describe("rail argument completions", () => {
@@ -434,7 +436,7 @@ describe("/rail set with a custom class", () => {
 
     await command.handler("set touches-customer-data deny", ctx);
     assert.match(notes.at(-1)!, /touches-customer-data → deny for this session/);
-    assert.equal(state.capabilities.overrides["touches-customer-data"], "deny");
+    assert.equal(sessionDispositionEdit(state, "touches-customer-data"), "deny");
 
     await command.handler("set touches-customer-data", ctx);
     assert.match(notes.at(-1)!, /touches-customer-data: deny — this session/);

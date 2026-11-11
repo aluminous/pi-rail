@@ -15,6 +15,7 @@ import type { ClassifierTokenUsage, RailDecision, RailOutcome } from "./classifi
 import type { ClassifierState } from "./classifier.ts";
 import type { ResolvedRailConfig } from "./config.ts";
 import { TRACE_LIMIT, type DecisionTrace } from "./decision-trace.ts";
+import { baseConfigOf, createSessionLayer, invalidateSessionCache, withSessionLayer, type SessionLayer } from "./policy-store.ts";
 import type { AccessKind } from "./policy.ts";
 import type { CorpusWriter } from "./replay-corpus.ts";
 
@@ -175,7 +176,27 @@ export interface RailLiveView {
 }
 
 export interface RuntimeState {
+  /**
+   * The effective policy: the config files folded (the base), with the
+   * session layer on top. An accessor, not a field: every reader — the
+   * interceptor's classify rules, the namer's registry, the status pages —
+   * must see session ops on the very next read, and an accessor is the one
+   * place that cannot be forgotten. Assigning sets the base; assigning a
+   * derived value back maps it to its base so the session layer never stacks
+   * twice. Recomputed only when the base or the session layer changes.
+   */
   config: ResolvedRailConfig | undefined;
+  /** The base alone: config files folded, no session layer. What a row "persists" as. */
+  readonly baseConfig: ResolvedRailConfig | undefined;
+  /**
+   * Session-layer grants: named session grants plus the implicit
+   * session-edits grant the policy page writes. Survives resume (persisted
+   * as a session entry by src/session-policy.ts) and deliberately does not
+   * rewind with /tree — it is a setting the user chose, not branch memory.
+   */
+  sessionPolicy: SessionLayer;
+  /** Whether session-layer changes are written to the session file; false for ephemeral sessions and tests. */
+  sessionPolicyPersistent: boolean;
   backend: RailBackend | undefined;
   enabled: boolean;
   disabledForNextAgent: boolean;
@@ -185,7 +206,7 @@ export interface RuntimeState {
   lastError: string | undefined;
   warnings: string[];
   classifier: ClassifierState;
-  /** Session disposition overrides, the read-only preset, and per-class stats. */
+  /** The read-only preset and per-class stats. */
   capabilities: CapabilityState;
   /** Open live status/policy view (TUI overlay or RPC widget), if any. */
   liveView?: RailLiveView;
@@ -269,8 +290,7 @@ export function createRailStats(): RailStats {
 }
 
 export function createRuntimeState(): RuntimeState {
-  return {
-    config: undefined,
+  const state = {
     backend: undefined,
     enabled: false,
     disabledForNextAgent: false,
@@ -280,6 +300,8 @@ export function createRuntimeState(): RuntimeState {
     warnings: [],
     classifier: {},
     capabilities: createCapabilityState(),
+    sessionPolicy: createSessionLayer(),
+    sessionPolicyPersistent: false,
     approvals: { read: [], write: [] },
     stats: createRailStats(),
     decisions: [],
@@ -287,7 +309,20 @@ export function createRuntimeState(): RuntimeState {
     availableModelSpecs: [],
     subagentAckWarned: new Set(),
     dialogQueue: Promise.resolve(),
-  };
+  } as Omit<RuntimeState, "config" | "baseConfig"> as RuntimeState;
+  let base: ResolvedRailConfig | undefined;
+  Object.defineProperty(state, "config", {
+    enumerable: true,
+    get: () => (base ? withSessionLayer(base, state.sessionPolicy) : undefined),
+    set: (value: ResolvedRailConfig | undefined) => {
+      base = value ? baseConfigOf(value) : undefined;
+      // Assignment is also how in-place edits of the base announce themselves
+      // (enableRail flipping `enabled`), so a cached derived copy must not survive it.
+      if (base) invalidateSessionCache(base);
+    },
+  });
+  Object.defineProperty(state, "baseConfig", { enumerable: false, get: () => base });
+  return state;
 }
 
 /** Resets per-session fields in place; the state object identity is shared by closures. */
@@ -302,6 +337,10 @@ export function resetSessionState(state: RuntimeState): void {
   state.warnings = [];
   state.classifier = {};
   state.capabilities = createCapabilityState();
+  // A new session starts with an empty session layer; resume restores it from
+  // the session file (src/session-policy.ts) after this reset.
+  state.sessionPolicy = createSessionLayer();
+  state.sessionPolicyPersistent = false;
   state.approvals = { read: [], write: [] };
   state.stats = createRailStats();
   state.decisions = [];

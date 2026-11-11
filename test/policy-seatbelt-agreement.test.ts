@@ -182,6 +182,7 @@ describe("keychain reads", () => {
   });
 
   it("stands down when a config file denies the keychain itself", () => {
+    // The default list already holds the entry; restating it claims it.
     const config = mergeConfig(testConfig(), { filesystem: { denyRead: ["~/Library/Keychains"] } }, "/tmp/rail.json");
     assert.ok(!runtimeAllowRead(config).includes(keychainDir), "a configured deny must not be read back");
     // The two system stores were never the user's deny, so they stay allowed.
@@ -193,7 +194,12 @@ describe("keychain reads", () => {
     assert.ok(!runtimeAllowRead(config).includes(keychainDir));
   });
 
-  it("still re-allows when a config file replaces denyRead without the keychain", () => {
+  it("keeps the keychain denied for bash when a config file restates the default deny among others", () => {
+    const config = mergeConfig(testConfig(), { filesystem: { denyRead: ["~/Library/Keychains", "~/.ssh"] } }, "/tmp/rail.json");
+    assert.ok(!runtimeAllowRead(config).includes(keychainDir), "a restated default is the user's claim, not a no-op");
+  });
+
+  it("still re-allows when a config file adds denies but leaves the keychain default alone", () => {
     const config = mergeConfig(testConfig(), { filesystem: { denyRead: ["~/.ssh"] } }, "/tmp/rail.json");
     assert.ok(runtimeAllowRead(config).includes(keychainDir));
   });
@@ -201,12 +207,12 @@ describe("keychain reads", () => {
   it("still re-allows when a config file only extends denyRead", () => {
     // The default keychain entry survives an extension with its "default"
     // provenance, which is what keeps the read-back applicable.
-    const config = mergeConfig(testConfig(), { filesystem: { denyRead: { replace: false, values: ["~/.terraform.d"] } } }, "/tmp/rail.json");
+    const config = mergeConfig(testConfig(), { filesystem: { denyRead: ["~/.terraform.d"] } }, "/tmp/rail.json");
     assert.ok(runtimeAllowRead(config).includes(keychainDir));
   });
 
   it("stands down when an extension adds the keychain deny itself", () => {
-    const config = mergeConfig(testConfig(), { filesystem: { denyRead: { replace: false, values: [keychainDir] } } }, "/tmp/rail.json");
+    const config = mergeConfig(testConfig(), { filesystem: { denyRead: [keychainDir] } }, "/tmp/rail.json");
     assert.ok(!runtimeAllowRead(config).includes(keychainDir));
   });
 });

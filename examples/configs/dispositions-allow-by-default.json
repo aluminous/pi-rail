@@ -7,10 +7,6 @@
   "network": {
     "enabled": false
   },
-  "environment": {
-    "allow": [],
-    "unset": []
-  },
   "classifier": {
     "enabled": true,
     "model": "auto",

@@ -13,6 +13,7 @@ import type { EffectivePolicy } from "./backends/types.ts";
 import { capabilityRegistry, getEffectiveDisposition, usedCapabilityStats, type CapabilityStats } from "./capabilities.ts";
 import { classifierEnabled, judgeModelSpec } from "./classifier.ts";
 import { configSourceLabel, type ProvenanceListKey, type ResolvedRailConfig } from "./config.ts";
+import { effectiveDispositionLabel, provenanceLabel, withSessionLayer, type Provenance } from "./policy-store.ts";
 import { getPersistentConfigPath } from "./persistent-settings.ts";
 import { resolveConfigPath } from "./policy.ts";
 import {
@@ -198,10 +199,10 @@ const SCREEN_COLUMN: TableColumn = { header: "screen ✗/✓", align: "right" };
  */
 function capabilityRows(view: StatusView, withScreen: boolean): string[][] {
   const { state, config } = view;
-  const used = usedCapabilityStats(state.capabilities, capabilityRegistry(config, state.capabilities));
+  const used = usedCapabilityStats(state.capabilities, capabilityRegistry(config));
   return used.map(({ id, stats }) => {
     const effective = getEffectiveDisposition(config, state.capabilities, id);
-    const disposition = effective.scope === "default" ? effective.disposition : `${effective.disposition} (${effective.scope === "config" ? configSourceLabel(effective.source ?? "config") : effective.scope})`;
+    const disposition = effective.scope === "default" ? effective.disposition : `${effective.disposition} [${effectiveDispositionLabel(effective)}]`;
     const row = [
       id,
       disposition,
@@ -242,7 +243,7 @@ function sessionTab(view: StatusView): string[] {
     .filter(([, count]) => count > 0)
     .sort(([aKind, aCount], [bKind, bCount]) => bCount - aCount || aKind.localeCompare(bKind))
     .map(([kind, count]) => [kind, String(count)]);
-  const withScreen = usedCapabilityStats(state.capabilities, capabilityRegistry(view.config, state.capabilities))
+  const withScreen = usedCapabilityStats(state.capabilities, capabilityRegistry(view.config))
     .some(({ stats }) => stats.screenTripped + stats.screenClean > 0);
 
   const lines = [
@@ -506,18 +507,18 @@ const ENTRY_COLUMNS: TableColumn[] = [{ header: "entry", min: 12 }, { header: "s
  * config pattern, so each list's lookup also indexes the resolved form.
  */
 function sourceLookup(config: ResolvedRailConfig, listKey: ProvenanceListKey, resolvePaths: boolean, theme: PanelTheme): (entry: string) => string {
-  const lookup = new Map<string, string>();
-  for (const [entry, source] of Object.entries(config.provenance.lists[listKey])) {
-    lookup.set(entry, source);
-    if (resolvePaths) lookup.set(resolveConfigPath(process.cwd(), entry), source);
+  const lookup = new Map<string, Provenance>();
+  for (const [entry, provenance] of Object.entries(config.provenance.lists[listKey])) {
+    lookup.set(entry, provenance);
+    if (resolvePaths) lookup.set(resolveConfigPath(process.cwd(), entry), provenance);
   }
   return (entry: string) => {
     // Built-in defaults render a muted "default" — explicit enough to read
     // without a legend, quiet enough that the handful of entries a config
-    // file set still stand out at full strength.
-    const source = lookup.get(entry);
-    if (!source || source === "default") return theme.fg("muted", "default");
-    return configSourceLabel(source);
+    // file or grant set still stand out at full strength.
+    const provenance = lookup.get(entry);
+    if (!provenance || provenance.layer === "default") return theme.fg("muted", "default");
+    return provenanceLabel(provenance);
   };
 }
 
@@ -553,7 +554,7 @@ function policyTab(view: StatusView): string[] {
   const effective = state.backend?.describeEffectivePolicy(config);
   const degraded = effective?.filesystem.degraded ?? [];
   return [
-    ...note(theme, width, "source: default is built in; global/project name the config file that set the entry"),
+    ...note(theme, width, "source: default is built in; global/project/session name the layer that set the entry, then the grant when one did (project · worktree-cleanup)"),
     "",
     heading(theme, "Filesystem"),
     line(`Restrictions: ${config.filesystem.enabled ? "enabled" : "disabled (lists still route classifier exemptions)"}`),
@@ -586,6 +587,18 @@ function policyTab(view: StatusView): string[] {
     "",
     heading(theme, "Config sources"),
     ...renderTable(theme, [{ header: "source", min: 12 }, { header: "label", min: 6 }], config.sources.map((source) => [source, configSourceLabel(source)]), width),
+    ...(config.grants.length > 0
+      ? [
+          "",
+          heading(theme, "Grants"),
+          ...renderTable(
+            theme,
+            [{ header: "grant", min: 8 }, { header: "layer", min: 6 }, { header: "request", min: 12 }],
+            config.grants.map((grant) => [grant.id, grant.layer, grant.request]),
+            width,
+          ),
+        ]
+      : []),
     "",
     ...note(theme, width, "the decision policy itself is the disposition table — /rail policy opens it"),
   ];
@@ -612,7 +625,16 @@ export const TAB_TITLES: Record<StatusTab, string> = {
 };
 
 export function statusTabLines(view: StatusView, tab: StatusTab): string[] {
-  return RENDERERS[tab](view);
+  return RENDERERS[tab](effectiveView(view));
+}
+
+/**
+ * The view over the effective policy whichever config the caller passed: a
+ * base config gets the session layer folded on, an effective one is returned
+ * as is (withSessionLayer maps it back to its base first).
+ */
+function effectiveView(view: StatusView): StatusView {
+  return { ...view, config: withSessionLayer(view.config, view.state.sessionPolicy) };
 }
 
 /**

@@ -112,28 +112,19 @@ The top-level `statusLine` config field controls when the statusline is shown
 
 ## Configuration
 
-Config is merged in this order:
+Policy is folded from layers, each one applied over everything before it:
 
 1. Built-in defaults.
-2. `~/.pi/agent/extensions/rail.json`
-3. `<cwd>/.pi/rail.json` when the project is trusted.
+2. `~/.pi/agent/extensions/rail.json` — its base keys, then its `grants`.
+3. `<cwd>/.pi/rail.json` when the project is trusted — base keys, then `grants`.
+4. The session layer: named session grants, then this session's `/rail policy`
+   and `/rail set` edits.
 
 `/rail model` persists reviewer-model choices by updating the global extension config at `~/.pi/agent/extensions/rail.json`. It does not write extension-specific fields into Pi's main `settings.json`. A trusted project config can still override the global settings, including individual `dispositions` rows.
 
-### Migrating from `guard.json`
-
-Both layers were called `guard.json` before the rename, and both still accept
-that name:
-
-- If only `guard.json` is present, it is loaded exactly as before and one
-  advisory asks you to rename it to `rail.json`.
-- If both are present, `rail.json` wins and the advisory says the `guard.json`
-  was ignored — merge anything you still want out of it, then delete it.
-- Persistent writes (Ctrl+S on the policy page, `/rail model`, statusline
-  visibility) go back to whichever file was loaded, so saving from a session
-  running on `guard.json` will not scatter your settings across two files.
-
-Renaming the file is the whole migration; its contents are unchanged.
+Only `rail.json` is read. A `guard.json` left over from before the pi-guard →
+pi-rail rename is ignored without comment; rename it (and convert any
+`{"replace", "values"}` lists, below) if you still want it.
 
 Example `.pi/rail.json`:
 
@@ -144,18 +135,15 @@ Example `.pi/rail.json`:
   "statusLine": "always",
   "filesystem": {
     "enabled": true,
-    "allowRead": [],
-    "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker", "~/.netrc", ".env", ".env.*", "*.pem", "*.key"],
-    "allowWrite": [".", "/tmp", "~/.cache", "~/Library/Caches", "~/.npm", "~/.cargo/registry", "~/.cargo/git", "~/.gradle/caches", "~/.m2/repository", "~/go/pkg/mod"],
-    "denyWrite": [".pi", ".env", ".env.*", "*.pem", "*.key", "~/.ssh", "~/.aws", "~/.gnupg", "~/.kube", "~/.docker"]
+    "denyRead": ["~/.config/my-cloud-cli"],
+    "allowWrite": ["~/.cache/my-tool"]
   },
   "environment": {
-    "allow": ["PATH", "HOME", "TMPDIR", "CI", "TERM"],
-    "unset": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+    "unset": ["MY_SERVICE_TOKEN"]
   },
   "network": {
     "enabled": true,
-    "allowedDomains": ["github.com", "*.github.com", "*.githubusercontent.com", "ghcr.io", "*.ghcr.io", "docker.io", "*.docker.io", "registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "quay.io", "*.quay.io", "gcr.io", "*.gcr.io", "*.pkg.dev", "registry.k8s.io", "mcr.microsoft.com", "public.ecr.aws"]
+    "allowedDomains": { "add": ["registry.npmjs.org"], "remove": ["docker.io", "*.docker.io"] }
   },
   "dispositions": {
     "off-machine-effects": "ask",
@@ -185,48 +173,112 @@ Ready-to-copy profiles are available under [`examples/configs`](examples/configs
 - [`filesystem-denylist.json`](examples/configs/filesystem-denylist.json): unrestricted networking with a denylist-driven filesystem policy.
 - [`dispositions-deny-by-default.json`](examples/configs/dispositions-deny-by-default.json) and [`dispositions-allow-by-default.json`](examples/configs/dispositions-allow-by-default.json): disposition-table profiles that drop the deterministic file/network boundaries and let the capability table carry the policy — strict deny-by-default, and permissive with a concrete deny set.
 
-Config files are layered over the built-in defaults, so omitted arrays retain
-their defaults rather than becoming empty.
+### Lists only append
 
-### Replacing or extending a list
-
-An array in a config file **replaces** the inherited list wholesale. That is
-what an array has always meant and still means, so no existing config changes
-behaviour. To add to the inherited list instead of restating it, give the list
-as an object:
+A list in a config file **adds** to the list it inherits; it never replaces
+it. Dropping an inherited entry is an explicit `remove`:
 
 ```json
 {
-  "commands": { "allow": { "replace": false, "values": ["cargo *", "just *"] } },
-  "network": { "allowedDomains": { "replace": false, "values": ["crates.io", "static.crates.io"] } }
+  "commands": { "allow": ["cargo *", "just *"] },
+  "network": { "allowedDomains": { "add": ["crates.io", "static.crates.io"], "remove": ["docker.io", "*.docker.io"] } }
 }
 ```
 
-- `{"replace": false, "values": [...]}` appends `values` to the inherited list.
-  Entries already inherited are not repeated, and the result keeps the
-  inherited entries first, in order, followed by the new ones.
-- `{"replace": true, "values": [...]}` is identical to the bare array — useful
-  when you want the intent spelled out next to a neighbouring extension.
-- Both keys are required, `replace` must be a boolean, and no other key is
-  accepted. A malformed list is reported as a diagnostic and **left exactly as
-  inherited** — a list is policy, and a half-read one is worse than the one
-  already in force.
+- A bare array means `{"add": [...]}`. Entries already inherited are not
+  repeated; the result keeps the inherited entries first, in order, followed by
+  the new ones.
+- `{"add": [...], "remove": [...]}` — either key optional — also drops the
+  named inherited entries. Removing an entry that is not there is a no-op.
+  Within one list the removes apply first, so `{"remove": [x], "add": [x]}`
+  moves an inherited entry to the end of the list.
+- The old `{"replace": …, "values": …}` form has been **removed**. A list
+  written that way, or otherwise malformed, gets one diagnostic and is **left
+  exactly as inherited** — a list is policy, and a half-read one is worse than
+  the one already in force. Nothing a lower layer set disappears because a
+  higher layer forgot to restate it.
 
 Every list takes both forms: `filesystem.allowRead`, `filesystem.denyRead`,
 `filesystem.allowWrite`, `filesystem.denyWrite`, `environment.allow`,
-`environment.unset`, `network.allowedDomains`, `network.deniedDomains`,
-`commands.allow`, and `commands.classify` — whose entries are objects rather
-than strings, so its `values` holds objects too.
+`environment.unset`, `network.allowedDomains`, `network.deniedDomains`, and
+`commands.allow`. `commands.classify` takes a bare array or `{"add": [...]}`
+of rule objects; classify rules cannot be removed by a later layer yet.
 
-Layering works the same way at every level: the global config extends the
-defaults, and the project config extends whatever the global config left. An
-extension over an earlier extension accumulates; an array at any layer drops
-everything under it and starts from its own values.
+`/rail policy rules` annotates each entry with where it came from — `default`,
+`global`, `project`, `session`, or the grant that added it, as in
+`project · worktree-cleanup`. Restating a built-in default claims it: the entry
+keeps its place but is shown as (and treated as) the restating layer's own,
+since nobody needs to restate a default to keep it. Restating an entry an
+earlier config layer or grant introduced still credits that introducer.
 
-`/rail policy rules` annotates each entry with the config that contributed it,
-so an extended list shows a mix of unmarked defaults and `[global]`/`[project]`
-additions. An entry that a later layer restates keeps the source of the layer
-that introduced it.
+### Grants
+
+A grant is a named, self-contained policy change: the request in your words
+and the operations it produced. Grants live in a config file's `grants` array
+(global or project) and apply after that file's base keys:
+
+```jsonc
+{
+  "grants": [
+    {
+      "id": "worktree-cleanup",                  // kebab-case, unique within the file
+      "request": "i want to allow cleaning up worktrees",
+      "created": "2026-11-11",
+      "ops": [
+        { "op": "add-class", "id": "worktree-cleanup", "disposition": "allow",
+          "definition": "Removing or pruning linked git worktrees of this repo. Deleting anything else is local-destructive instead." },
+        { "op": "classify", "template": "git worktree prune", "capability": "worktree-cleanup" }
+      ],
+      "examples": [
+        { "tool": "bash", "input": { "command": "git worktree prune" }, "expect": ["allow"] }
+      ]
+    }
+  ]
+}
+```
+
+The ops are a closed vocabulary, each validated on its own — a bad op is
+skipped with a diagnostic and the rest of the grant still applies, and an
+unknown field on an op is an error for that op:
+
+| op | fields |
+|---|---|
+| `set-disposition` | `capability`, `disposition` |
+| `add-class` | `id`, `definition`, optional `name`, `disposition` |
+| `remove-class` | `id` (custom classes only) |
+| `set-definition` | `capability`, `definition` |
+| `classify` | `template`, `capability` |
+| `allow-command` | `template` |
+| `add-to-list` / `remove-from-list` | `list` (any list above except `commands.classify`), `values` |
+
+A file's ordinary keys are its base policy and mean exactly these ops; a grant
+is the same thing with a name, so it can be attributed, moved, and revoked.
+`examples` are checked for shape and kept with the grant but not yet run.
+The same grant id in another layer is a separate grant — provenance tells
+them apart. The policy tab of `/rail status` lists every grant in force.
+
+### Session scope
+
+Everything `/rail policy` and `/rail set` change lands in the session layer,
+as ops in an implicit `session-edits` grant, and is folded into the effective
+policy on the very next tool call — dispositions, new classes, definition
+edits, and class deletions alike, so a class added this session is
+immediately usable by a session grant's classify rule. **Ctrl+S** promotes
+`session-edits` into the global config's base keys.
+
+The session layer survives resuming the session and deliberately does **not**
+rewind with `/tree`: it is a setting you chose, not something the branch
+accumulated (the rail's memory — recent decisions, guidance, stats — does
+follow the branch). It is written to the session file on every change and
+restored from the latest record, whichever branch it was written on. A new
+session starts with an empty session layer, and an in-memory session writes
+nothing.
+
+Filesystem, network, and environment lists cannot change at the session layer
+yet: the Seatbelt profile is compiled from them when the rail starts, and a
+session change would leave the sandbox and the file tools disagreeing. Those
+ops are refused with a diagnostic; put them in a config file. `commands.*`
+lists work at session scope.
 
 ## Capability mode
 
@@ -279,7 +331,8 @@ denied`. The highlighted row's definition shows underneath.
 
 Every edit applies **immediately, for this session** — that is the point of
 the page: `local-destructive` and friends are meant to be re-scoped per
-session, and closing the page does not undo anything. Rows that differ from
+session, and closing the page does not undo anything (nor does resuming the
+session later; see [Session scope](#session-scope)). Rows that differ from
 the persisted value are coloured; **Ctrl+S** persists them to
 `~/.pi/agent/extensions/rail.json` and the colouring clears. Stats update
 live while the agent works.
@@ -528,15 +581,17 @@ change: it lists built-in classes by construction, so a *custom* class set to
 mode to stop, classify it into `modify-project`/`modify-system` or set its
 class to something stricter than `allow`.
 
-Both list forms work; the `values` of the object form holds objects. Each entry
-must be `{"template": …, "capability": …}` and nothing else. The capability
-must be a class the rail knows *at config load*: a built-in, or one declared in
-`capabilities.classes` (the same file may declare it — the taxonomy is merged
-before the rules that reference it). Classes added later with `/rail policy`
-live only in that session and cannot be referenced from config. An entry naming
-an unknown class, or carrying an unusable template — an empty one, a bare `*`,
-or a `*` that is not the last word — is reported as a diagnostic and skipped,
-leaving the other rules in force.
+The list takes a bare array or `{"add": [...]}`, and like every list it only
+appends: a later layer's rules go after the ones it inherits (a rule for a
+template already listed re-maps it in place instead). Each entry must be
+`{"template": …, "capability": …}` and nothing else. The capability must be a
+class known by the time the rule is folded: a built-in, or a custom class from
+this or any earlier layer — the same file may declare it, since a file's
+taxonomy is applied before its rules, and a session grant may classify into a
+class the session itself added. An entry naming an unknown class, or carrying
+an unusable template — an empty one, a bare `*`, or a `*` that is not the last
+word — is reported as a diagnostic and skipped, leaving the other rules in
+force.
 
 `/rail policy rules` lists the rules with their class and provenance, `/rail
 explain` shows a `commands.classify` stage naming the rule each segment
@@ -579,8 +634,8 @@ just drops out of the search list and every lookup reports "could not be found"
 as if the token were missing. Only reads are granted — keychain writes,
 renames, and deletes stay denied — and the read-back stands down for any
 keychain deny that came from a config file rather than the built-in defaults,
-so an explicit `denyRead` of `~/Library/Keychains` (or of a directory
-containing it) is honoured for bash too.
+so an explicit `"denyRead": ["~/Library/Keychains"]` (restating the default
+claims it) or a deny of a directory containing it is honoured for bash too.
 
 Use project or global config to narrow these defaults for more sensitive workspaces.
 
@@ -828,7 +883,7 @@ history to replay against.
 ## Related extensions
 
 - [`pi-sandbox`](https://github.com/carderne/pi-sandbox) (Chris Arderne) — the inspiration for Pi Rail: OS-level sandboxing for Pi with interactive permission prompts, on macOS `sandbox-exec` and Linux `bubblewrap`. Pi Rail adds the semantic layer on top of similar containment — capability naming, the disposition table, the judge; if you want a mature prompt-oriented sandbox without model review, especially on Linux, start there.
-- [`pi-guard`](https://github.com/jdiamond/pi-guard) (Jason Diamond) — a deterministic permission system for pi tools: allow/ask/deny rules with extensible matchers, no OS sandbox. Pi Rail's command allowlist plays a similar role, but its decisions sit inside Seatbelt containment and fall through to the classifier instead of rules alone. (This project was itself named pi-guard before being renamed to avoid the clash; an existing `guard.json` still loads — see [Configuration](#configuration).)
+- [`pi-guard`](https://github.com/jdiamond/pi-guard) (Jason Diamond) — a deterministic permission system for pi tools: allow/ask/deny rules with extensible matchers, no OS sandbox. Pi Rail's command allowlist plays a similar role, but its decisions sit inside Seatbelt containment and fall through to the classifier instead of rules alone. (This project was itself named pi-guard before being renamed to avoid the clash; a leftover `guard.json` is no longer read — see [Configuration](#configuration).)
 - [herdr](https://herdr.dev) — while a rail approval dialog is open, the rail emits `herdr:blocked` on pi's extension bus (with a label naming the ask), so herdr's pane state shows *waiting for input* instead of *working*. Refcounted and paired on every exit path; a no-op when herdr's integration isn't listening.
 
 ## Limitations

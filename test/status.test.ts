@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { CONFIG_DIR_NAME, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { recordCapabilityOutcome, recordScreenVerdict } from "../src/capabilities.ts";
 import { globalRailConfigPath, mergeConfig, type ResolvedRailConfig } from "../src/config.ts";
+import { addSessionGrant, setSessionDisposition } from "../src/session-policy.ts";
 import {
   createRuntimeState,
   recordCapabilityDecision,
@@ -121,9 +122,9 @@ describe("session tab", () => {
 
   it("marks a session override on the disposition cell", () => {
     const state = createRuntimeState();
-    state.capabilities.overrides["read-project"] = "deny";
+    setSessionDisposition(state, "read-project", "deny");
     recordCapabilityDecision(state, "read", { target: "", labels: ["read-project"], decision: "deny", disposition: "deny", reason: "no", reviewed: false });
-    assert.match(row(tab(state, testConfig(), "session"), "read-project"), /deny \(session\)/);
+    assert.match(row(tab(state, testConfig(), "session"), "read-project"), /deny \[session\]/);
   });
 
   it("breaks errors down by cause, busiest first", () => {
@@ -339,13 +340,31 @@ describe("policy tab", () => {
   it("annotates provenance per entry, marking built-in defaults with a muted default", () => {
     const projectPath = path.join("/repo", CONFIG_DIR_NAME, "rail.json");
     const afterGlobal = mergeConfig(testConfig(), { filesystem: { denyRead: ["/secret/global"] } }, globalRailConfigPath());
-    const config = mergeConfig(afterGlobal, { environment: { allow: ["PATH", "HOME"] } }, projectPath);
+    // Restating a default (HOME) claims it for the restating layer.
+    const config = mergeConfig(afterGlobal, { environment: { allow: ["PROJECT_TOOL_HOME", "HOME"] } }, projectPath);
     const text = tab(createRuntimeState(), config, "policy");
     assert.match(text, /source: default is built in/);
     assert.match(row(text, "/secret/global"), /\/secret\/global\s+global$/);
-    assert.match(row(text, "PATH"), /PATH\s+project$/);
+    assert.match(row(text, "PROJECT_TOOL_HOME"), /PROJECT_TOOL_HOME\s+project$/);
     assert.match(row(text, "HOME"), /HOME\s+project$/);
+    assert.match(row(text, "PATH"), /PATH\s+default$/);
     assert.match(row(text, "~/.ssh"), /~\/\.ssh\s+default$/, "built-in entries say default explicitly");
+  });
+
+  it("names the grant behind an entry, and shows session-layer rules the moment they exist", () => {
+    const projectPath = path.join("/repo", CONFIG_DIR_NAME, "rail.json");
+    const config = mergeConfig(
+      testConfig(),
+      { grants: [{ id: "worktree-cleanup", request: "allow cleaning up worktrees", created: "2026-11-11", ops: [{ op: "allow-command", template: "git worktree prune" }] }] },
+      projectPath,
+    );
+    const state = createRuntimeState();
+    addSessionGrant(state, { id: "k8s", request: "kubectl is ops", created: "2026-11-11", ops: [{ op: "classify", template: "kubectl *", capability: "off-machine-effects" }] });
+    const text = tab(state, config, "policy");
+    assert.match(row(text, "git worktree prune"), /git worktree prune\s+project · worktree-cleanup$/);
+    assert.match(row(text, "kubectl"), /kubectl \* → off-machine-effects\s+session · k8s$/);
+    assert.match(text, /─ Grants/);
+    assert.match(row(text, "worktree-cleanup"), /worktree-cleanup\s+project\s+allow cleaning up worktrees/);
   });
 
   it("no longer reports legacy classifier rule tiers", () => {

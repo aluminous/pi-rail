@@ -4,6 +4,7 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { addSessionGuidance, type ClassifierState } from "../src/classifier.ts";
 import { createCapabilityStats } from "../src/capabilities.ts";
 import { applyDerivedRailState, deriveRailState } from "../src/session-replay.ts";
+import { sessionDispositionEdit, setSessionDisposition } from "../src/session-policy.ts";
 import { createRuntimeState, lastRailDecision, recentClassifications, recentEvents, recentJudgements } from "../src/state.ts";
 import type { RailApprovalTelemetry, RailReviewTelemetry, RailTelemetryRecord } from "../src/telemetry.ts";
 
@@ -350,7 +351,8 @@ describe("applyDerivedRailState", () => {
     state.approvals.write.push("/tmp/approved");
     state.classifier.modelOverride = "openrouter/haiku";
     state.classifier.enabledOverride = false;
-    state.capabilities.overrides["local-destructive"] = "deny";
+    setSessionDisposition(state, "local-destructive", "deny");
+    const sessionPolicy = state.sessionPolicy;
     // Stats from before navigation: branch memory, so replay replaces them.
     state.capabilities.stats["stale-class"] = createCapabilityStats();
     const capabilities = state.capabilities;
@@ -363,7 +365,8 @@ describe("applyDerivedRailState", () => {
     assert.equal(state.classifier.modelOverride, "openrouter/haiku", "classifier settings are settings, not memory");
     assert.equal(state.classifier.enabledOverride, false);
     assert.equal(state.capabilities, capabilities, "the CapabilityState object keeps its identity");
-    assert.equal(state.capabilities.overrides["local-destructive"], "deny", "disposition overrides are settings, not memory");
+    assert.equal(sessionDispositionEdit(state, "local-destructive"), "deny", "session policy edits are settings, not memory");
+    assert.equal(state.sessionPolicy, sessionPolicy, "replay never touches the session policy layer");
     assert.equal(state.capabilities.stats["stale-class"], undefined, "…but the stats half is branch memory and was rebuilt");
     assert.equal(state.capabilities.stats["run-dev-tools"]?.hits, 1);
     assert.equal(state.dialogQueue, dialogQueue);

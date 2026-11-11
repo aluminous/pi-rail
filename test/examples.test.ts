@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { explainCommandMatch, matchedCapabilities } from "../src/command-allowlist.ts";
-import { mergeConfig, type RailConfig } from "../src/config.ts";
+import { readdirSync } from "node:fs";
+import { DEFAULT_CONFIG, mergeConfig, type RailConfig } from "../src/config.ts";
 import { getEffectiveDisposition } from "../src/capabilities.ts";
 import { testConfig } from "./helpers.ts";
 
@@ -17,8 +18,7 @@ describe("disposition-only example configurations", () => {
     const config = mergeConfig(testConfig(), readExample("dispositions-deny-by-default.json"), "example");
     assert.equal(config.filesystem.enabled, false);
     assert.equal(config.network.enabled, false);
-    assert.deepEqual(config.environment.allow, []);
-    assert.deepEqual(config.environment.unset, []);
+    assert.deepEqual(config.environment.allow, DEFAULT_CONFIG.environment.allow, "environment scrubbing keeps its defaults");
     assert.equal(config.dispositions["read-project"], "allow");
     assert.equal(config.dispositions["run-dev-tools"], "allow");
     assert.equal(config.dispositions["unclassified"], "deny");
@@ -56,5 +56,26 @@ describe("command classification example configuration", () => {
     assert.deepEqual(disposition("terraform plan -out plan.bin"), ["allow"]);
     assert.deepEqual(disposition("terraform apply plan.bin"), ["ask"], "the built-in off-machine-effects row still decides");
     assert.deepEqual(labels("terraform destroy"), [], "an unmapped subcommand is left to the namer");
+  });
+});
+
+describe("every example configuration", () => {
+  const dir = fileURLToPath(new URL("../examples/configs/", import.meta.url));
+  for (const name of readdirSync(dir).filter((file) => file.endsWith(".json"))) {
+    it(`${name} loads in the append-only list format without diagnostics`, () => {
+      const config = mergeConfig(testConfig(), readExample(name), "example");
+      assert.deepEqual(config.diagnostics, []);
+    });
+  }
+
+  it("lets the restricted profiles narrow the inherited lists with explicit removes", () => {
+    const offline = mergeConfig(testConfig(), readExample("offline-restricted.json"), "example");
+    assert.deepEqual(offline.network.allowedDomains, [], "every default domain is removed: networking is blocked");
+    assert.ok(!offline.filesystem.allowWrite.includes("~/.cache"));
+    assert.ok(offline.filesystem.allowWrite.includes("."));
+    assert.ok(offline.filesystem.denyWrite.includes(".git"));
+
+    const allowlist = mergeConfig(testConfig(), readExample("network-allowlist.json"), "example");
+    assert.deepEqual(allowlist.network.allowedDomains, ["github.com", "*.github.com", "*.githubusercontent.com", "registry.npmjs.org"]);
   });
 });

@@ -8,6 +8,7 @@ import type { RailBackend } from "../src/backends/types.ts";
 import { capabilityStats } from "../src/capabilities.ts";
 import type { CompleteFn } from "../src/classifier.ts";
 import { interceptToolCall, stopTurnForClassifierFailure, withWorkingMessage } from "../src/interceptor.ts";
+import { addSessionGrant } from "../src/session-policy.ts";
 import { deriveRailState } from "../src/session-replay.ts";
 import { createRuntimeState, lastRailDecision, modelUsageRows, recentClassifications, recentEvents, recentJudgements } from "../src/state.ts";
 import type { RailErrorTelemetry } from "../src/telemetry.ts";
@@ -278,6 +279,49 @@ describe("commands.classify labelling", () => {
     assert.equal(seen.calls, 0, "a tightening verdict never consults the namer");
     assert.deepEqual(recentEvents(state)[0]?.capabilities, ["k8s-ops"]);
     assert.equal(state.stats.ruleHits, 1);
+  });
+
+  // The session layer folds into state.config, so a class and a classify rule
+  // that exist only in this session decide the very next command — no config
+  // file, no reload, and no namer call.
+  it("lets a session grant's class and classify rule decide the very next command", async () => {
+    const config = testConfig((c) => {
+      c.classifier.enabled = true;
+      c.classifier.model = MODEL;
+      c.classifier.judgeModel = MODEL;
+    });
+    const state = railState(config);
+    const diagnostics = addSessionGrant(state, {
+      id: "no-clusters",
+      request: "never touch a cluster this session",
+      created: "2026-11-11",
+      ops: [
+        { op: "add-class", id: "k8s-ops", name: "Cluster ops", definition: "Cluster operations.", disposition: "deny" },
+        { op: "classify", template: "kubectl *", capability: "k8s-ops" },
+      ],
+    });
+    assert.deepEqual(diagnostics, []);
+    const { complete, seen } = reviewer();
+    const result = await interceptToolCall({ toolName: "bash", input: { command: "kubectl delete pod api" } }, reviewingCtx(), state, complete);
+    assert.equal(result?.block, true);
+    assert.match(result.reason, /k8s-ops \(Cluster ops\), which is set to deny \(default\)/, "a class's own default reads as default, wherever the class came from");
+    assert.equal(seen.calls, 0);
+  });
+
+  it("attributes a session grant's table row to the grant", async () => {
+    const state = railState(testConfig());
+    addSessionGrant(state, {
+      id: "no-pushes",
+      request: "no pushing today",
+      created: "2026-11-11",
+      ops: [
+        { op: "classify", template: "git push *", capability: "off-machine-effects" },
+        { op: "set-disposition", capability: "off-machine-effects", disposition: "deny" },
+      ],
+    });
+    const result = await interceptToolCall({ toolName: "bash", input: { command: "git push origin main" } }, reviewingCtx(), state, reviewer().complete);
+    assert.equal(result?.block, true);
+    assert.match(result.reason, /off-machine-effects \(Off-machine effects\), which is set to deny \(session · no-pushes\)/);
   });
 
   it("asks the user deterministically, with no naming call", async () => {

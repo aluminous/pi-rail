@@ -1,31 +1,35 @@
 // Capability taxonomy and disposition table: the shape of the twelve classes,
-// scope layering (default < config < session, preset tightening on top), and
+// scope layering (default < config < session, all folded by the policy store,
+// preset tightening on top), and
 // severity-max resolution across an action's labels.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   BUILTIN_CAPABILITY_CLASSES,
   BUILTIN_CAPABILITY_IDS,
-  addSessionClass,
   applyReadOnlyPreset,
   capabilityDefinitionsForPrompt,
   capabilityRegistry,
-  deleteSessionClass,
   recordCapabilityHits,
-  setSessionDefinition,
   type CapabilityClass,
   capabilityStats,
-  clearSessionDisposition,
   createCapabilityState,
   getEffectiveDisposition,
   recordCapabilityOutcome,
   recordScreenVerdict,
   resolveCapabilities,
-  setSessionDisposition,
   strictestDisposition,
   usedCapabilityStats,
 } from "../src/capabilities.ts";
 import { globalRailConfigPath, mergeConfig } from "../src/config.ts";
+import {
+  createSessionLayer,
+  editSessionAddClass,
+  editSessionDefinition,
+  editSessionDeleteClass,
+  editSessionDisposition,
+  withSessionLayer,
+} from "../src/policy-store.ts";
 import { testConfig } from "./helpers.ts";
 
 describe("taxonomy", () => {
@@ -110,21 +114,25 @@ describe("disposition scopes", () => {
     const fromConfig = getEffectiveDisposition(configured, state, "install-dependencies");
     assert.equal(fromConfig.disposition, "ask");
     assert.equal(fromConfig.scope, "config");
-    assert.equal(fromConfig.source, globalRailConfigPath());
+    assert.deepEqual(fromConfig.provenance, { layer: "global", file: globalRailConfigPath() });
 
-    setSessionDisposition(state, "install-dependencies", "allow");
-    assert.equal(getEffectiveDisposition(configured, state, "install-dependencies").scope, "session");
-    assert.equal(getEffectiveDisposition(configured, state, "install-dependencies").disposition, "allow");
+    // The session layer is folded into the config, not consulted beside it.
+    const session = createSessionLayer();
+    editSessionDisposition(session, "install-dependencies", "allow");
+    const effective = withSessionLayer(configured, session);
+    assert.equal(getEffectiveDisposition(effective, state, "install-dependencies").scope, "session");
+    assert.equal(getEffectiveDisposition(effective, state, "install-dependencies").disposition, "allow");
+    assert.equal(getEffectiveDisposition(configured, state, "install-dependencies").disposition, "ask", "the base is untouched");
 
-    clearSessionDisposition(state, "install-dependencies");
-    assert.equal(getEffectiveDisposition(configured, state, "install-dependencies").disposition, "ask");
+    editSessionDisposition(session, "install-dependencies", undefined);
+    assert.equal(getEffectiveDisposition(withSessionLayer(configured, session), state, "install-dependencies").disposition, "ask");
   });
 
   it("merges the table per row, keeping untouched classes on their defaults", () => {
     const merged = mergeConfig(testConfig(), { dispositions: { credentials: "deny" } }, globalRailConfigPath());
     assert.equal(merged.dispositions.credentials, "deny");
     assert.equal(merged.dispositions["local-destructive"], "judge");
-    assert.equal(merged.provenance.dispositions["local-destructive"], "default");
+    assert.deepEqual(merged.provenance.dispositions["local-destructive"], { layer: "default" });
   });
 
   it("rejects unknown classes and unknown dispositions with a diagnostic", () => {
@@ -141,9 +149,10 @@ describe("disposition scopes", () => {
     const write = getEffectiveDisposition(config, state, "modify-project");
     assert.equal(write.disposition, "deny");
     assert.equal(write.scope, "preset");
-    // A session override cannot re-open a class the preset denies.
-    setSessionDisposition(state, "modify-project", "allow");
-    assert.equal(getEffectiveDisposition(config, state, "modify-project").disposition, "deny");
+    // A session edit cannot re-open a class the preset denies.
+    const session = createSessionLayer();
+    editSessionDisposition(session, "modify-project", "allow");
+    assert.equal(getEffectiveDisposition(withSessionLayer(config, session), state, "modify-project").disposition, "deny");
     // Classes outside the preset are untouched; reads stay allowed.
     assert.equal(getEffectiveDisposition(config, state, "read-project").disposition, "allow");
     assert.equal(getEffectiveDisposition(config, state, "credentials").disposition, "deny");
@@ -160,7 +169,7 @@ describe("per-class stats", () => {
     assert.equal(capabilityStats(state, "persistence").outcomes["ask-denied"], 1);
     assert.equal(capabilityStats(state, "modify-project").screenTripped, 1);
     assert.equal(capabilityStats(state, "modify-project").screenClean, 1);
-    assert.deepEqual(usedCapabilityStats(state, capabilityRegistry(undefined, state)).map((entry) => entry.id), ["modify-project", "persistence"]);
+    assert.deepEqual(usedCapabilityStats(state, capabilityRegistry(undefined)).map((entry) => entry.id), ["modify-project", "persistence"]);
   });
 });
 
@@ -178,44 +187,44 @@ describe("capability registry", () => {
   };
 
   it("orders built-ins first, then config classes, then session additions", () => {
-    const state = createCapabilityState();
-    addSessionClass(state, { id: "session-only", name: "Session only", definition: "Added this session.", default: "ask" });
-    const registry = capabilityRegistry(customConfig([touchesData]), state);
+    const session = createSessionLayer();
+    editSessionAddClass(session, { id: "session-only", name: "Session only", definition: "Added this session.", default: "ask" });
+    const registry = capabilityRegistry(withSessionLayer(customConfig([touchesData]), session));
     assert.deepEqual(registry.slice(0, 12).map((entry) => entry.id), [...BUILTIN_CAPABILITY_IDS]);
     assert.deepEqual(registry.slice(12).map((entry) => entry.id), ["touches-customer-data", "session-only"]);
   });
 
   it("layers definition edits session over config over built-in", () => {
     const config = customConfig([], { "read-project": "Config wording." });
-    assert.equal(capabilityRegistry(config, undefined).find((e) => e.id === "read-project")!.definition, "Config wording.");
+    assert.equal(capabilityRegistry(config).find((e) => e.id === "read-project")!.definition, "Config wording.");
 
-    const state = createCapabilityState();
-    setSessionDefinition(state, "read-project", "Session wording.");
-    assert.equal(capabilityRegistry(config, state).find((e) => e.id === "read-project")!.definition, "Session wording.");
+    const session = createSessionLayer();
+    editSessionDefinition(session, "read-project", "Session wording.");
+    assert.equal(capabilityRegistry(withSessionLayer(config, session)).find((e) => e.id === "read-project")!.definition, "Session wording.");
     // The built-in text is untouched: the registry layers, it does not mutate.
     assert.match(BUILTIN_CAPABILITY_CLASSES.find((e) => e.id === "read-project")!.definition, /Reading, listing, or searching/);
   });
 
   it("drops config classes the session deleted, and forgets session ones outright", () => {
-    const state = createCapabilityState();
-    addSessionClass(state, { id: "session-only", name: "Session only", definition: "Added.", default: "ask" });
-    deleteSessionClass(state, "session-only");
-    deleteSessionClass(state, "touches-customer-data");
-    const ids = capabilityRegistry(customConfig([touchesData]), state).map((entry) => entry.id);
+    const session = createSessionLayer();
+    editSessionAddClass(session, { id: "session-only", name: "Session only", definition: "Added.", default: "ask" });
+    editSessionDeleteClass(session, "session-only");
+    editSessionDeleteClass(session, "touches-customer-data");
+    const ids = capabilityRegistry(withSessionLayer(customConfig([touchesData]), session)).map((entry) => entry.id);
     assert.equal(ids.includes("session-only"), false);
     assert.equal(ids.includes("touches-customer-data"), false);
-    assert.deepEqual(state.deletedCustom, ["touches-customer-data"], "only the persisted one needs removing on save");
+    assert.deepEqual(session.edits, [{ op: "remove-class", id: "touches-customer-data" }], "only the persisted one needs removing on save");
   });
 
   it("is byte-stable while the registry is unchanged, and moves when it is not", () => {
     const config = customConfig([touchesData]);
-    const a = JSON.stringify(capabilityDefinitionsForPrompt(capabilityRegistry(config, createCapabilityState())));
-    const b = JSON.stringify(capabilityDefinitionsForPrompt(capabilityRegistry(config, createCapabilityState())));
+    const a = JSON.stringify(capabilityDefinitionsForPrompt(capabilityRegistry(config)));
+    const b = JSON.stringify(capabilityDefinitionsForPrompt(capabilityRegistry(withSessionLayer(config, createSessionLayer()))));
     assert.equal(a, b, "same registry, same bytes — the cacheable prefix holds");
 
-    const edited = createCapabilityState();
-    setSessionDefinition(edited, "read-project", "Changed.");
-    assert.notEqual(a, JSON.stringify(capabilityDefinitionsForPrompt(capabilityRegistry(config, edited))));
+    const edited = createSessionLayer();
+    editSessionDefinition(edited, "read-project", "Changed.");
+    assert.notEqual(a, JSON.stringify(capabilityDefinitionsForPrompt(capabilityRegistry(withSessionLayer(config, edited)))));
   });
 
   it("resolves a custom class to its own default, and a deleted one to ask", () => {
@@ -224,13 +233,14 @@ describe("capability registry", () => {
     assert.equal(getEffectiveDisposition(config, state, "touches-customer-data").disposition, "deny");
     assert.equal(getEffectiveDisposition(config, state, "touches-customer-data").scope, "default");
 
-    // A session override still wins while the class exists.
-    setSessionDisposition(state, "touches-customer-data", "allow");
-    assert.equal(getEffectiveDisposition(config, state, "touches-customer-data").disposition, "allow");
+    // A session edit still wins while the class exists.
+    const session = createSessionLayer();
+    editSessionDisposition(session, "touches-customer-data", "allow");
+    assert.equal(getEffectiveDisposition(withSessionLayer(config, session), state, "touches-customer-data").disposition, "allow");
 
-    // Once deleted, an in-flight label resolves to ask rather than the stale override.
-    deleteSessionClass(state, "touches-customer-data");
-    const orphaned = getEffectiveDisposition(config, state, "touches-customer-data");
+    // Once deleted, an in-flight label resolves to ask rather than the stale edit.
+    editSessionDeleteClass(session, "touches-customer-data");
+    const orphaned = getEffectiveDisposition(withSessionLayer(config, session), state, "touches-customer-data");
     assert.equal(orphaned.disposition, "ask");
     assert.equal(orphaned.scope, "default");
   });
@@ -250,9 +260,10 @@ describe("capability registry", () => {
     const config = customConfig([touchesData]);
     const state = createCapabilityState();
     recordCapabilityHits(state, ["touches-customer-data", "read-project"]);
-    deleteSessionClass(state, "touches-customer-data");
+    const session = createSessionLayer();
+    editSessionDeleteClass(session, "touches-customer-data");
     assert.deepEqual(
-      usedCapabilityStats(state, capabilityRegistry(config, state)).map((entry) => entry.id),
+      usedCapabilityStats(state, capabilityRegistry(withSessionLayer(config, session))).map((entry) => entry.id),
       ["read-project", "touches-customer-data"],
       "the hits happened, so they stay visible after the class is gone",
     );

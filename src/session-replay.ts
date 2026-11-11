@@ -57,8 +57,8 @@ export interface DerivedRailState {
   /**
    * Per-class stats (hits/decided/outcomes/screen verdicts): the
    * "Capabilities seen this session" table. Only the stats HALF of
-   * state.capabilities — the settings half (overrides, preset, custom
-   * classes) is deliberately not here; see applyDerivedRailState.
+   * state.capabilities — the preset, and the session policy layer, are
+   * deliberately not here; see applyDerivedRailState.
    */
   capabilityStats: CapabilityState["stats"];
   sessionGuidance: string[] | undefined;
@@ -108,9 +108,11 @@ export function deriveRailState(entries: readonly SessionEntry[]): DerivedRailSt
  * state.capabilities splits down the middle: its stats half (hits, decided,
  * outcomes, screen verdicts — what the "Capabilities seen this session"
  * table shows) is a record of branch decisions and is replaced here, while
- * its settings half (disposition overrides, the preset, custom classes,
- * definition edits) is user configuration, not memory, and is never touched
- * by replay.
+ * the preset is user configuration, not memory, and is never touched by
+ * replay. So is the session policy layer (state.sessionPolicy: session
+ * grants, page edits): it is a setting the user chose, persisted as its own
+ * record kind and restored from the whole session file rather than the branch
+ * (src/session-policy.ts), so /tree neither undoes nor resurrects a grant.
  *
  * Stats consequently become per-branch: after navigation the counters
  * describe the current timeline, not everything the process ever did — which
@@ -126,8 +128,8 @@ export function applyDerivedRailState(state: RuntimeState, entries: readonly Ses
   const derived = deriveRailState(entries);
   state.stats = derived.stats;
   state.decisions = derived.decisions;
-  // Stats only: the surrounding CapabilityState (overrides/preset/custom
-  // classes) keeps its identity and its settings.
+  // Stats only: the surrounding CapabilityState (the preset) keeps its
+  // identity, and the session policy layer is never touched here.
   state.capabilities.stats = derived.capabilityStats;
   state.classifier.sessionGuidance = derived.sessionGuidance;
   // Traces carry per-stage detail (policy matches, namer evidence, dialog

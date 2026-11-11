@@ -91,7 +91,7 @@ describe("decision traces", () => {
     assert.match(exemption!.detail, /matches denyRead '\.env' → credentials/);
     const capabilities = trace.stages.find((s) => s.stage === "capabilities");
     assert.equal(capabilities?.outcome, "judge");
-    assert.match(capabilities!.detail, /credentials→judge \(default\)/);
+    assert.match(capabilities!.detail, /credentials→judge \[default\]/);
   });
 
   it("records the exempt-read condition for an in-cwd read", async () => {
@@ -121,7 +121,7 @@ describe("decision traces", () => {
     assert.match(allowlist!.detail, /`git status` → rule `git status \*` \(read-project\)/);
     const capabilities = trace.stages.find((s) => s.stage === "capabilities");
     assert.equal(capabilities?.outcome, "allow");
-    assert.match(capabilities!.detail, /read-project→allow \(default\) ⇒ allow/);
+    assert.match(capabilities!.detail, /read-project→allow \[default\] ⇒ allow/);
   });
 
   it("records a classify hit under its own stage, with the rule and the resolution", async () => {
@@ -187,7 +187,7 @@ describe("decision traces", () => {
     assert.match(namer!.detail, /model test\/fake-model/);
     const capabilities = trace.stages.find((s) => s.stage === "capabilities");
     assert.equal(capabilities?.outcome, "allow");
-    assert.match(capabilities!.detail, /run-dev-tools→allow \(default\) ⇒ allow/);
+    assert.match(capabilities!.detail, /run-dev-tools→allow \[default\] ⇒ allow/);
     assert.equal(lastRailDecision(state)?.decision, "allow");
     assert.deepEqual(lastRailDecision(state)?.labels, ["run-dev-tools"]);
   });

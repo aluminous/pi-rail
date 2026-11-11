@@ -87,7 +87,7 @@ describe("/rail test dry runs", () => {
     assert.match(report, /`grep foo src` → rule `grep \*` \(read-project\)/);
     assert.match(report, /`git status` → rule `git status \*` \(read-project\)/);
     assert.match(report, /namer: skipped — allowlisted while the sandbox enforces \(read-project\)/);
-    assert.match(report, /read-project → allow \(default\)/);
+    assert.match(report, /read-project → allow \[default\]/);
     assert.match(report, /severity-max ⇒ allow/);
   });
 
@@ -104,7 +104,7 @@ describe("/rail test dry runs", () => {
     assert.match(report, /`kubectl apply -f deploy\.yaml` → classify rule `kubectl \*` \(k8s-ops\)/);
     assert.match(report, /every segment matched — deterministic labels resolve to ask, decided without a namer call/);
     assert.match(report, /namer: skipped — deterministically classified k8s-ops ⇒ ask/);
-    assert.match(report, /k8s-ops → ask \(default\)/);
+    assert.match(report, /k8s-ops → ask \[default\]/);
     assert.match(report, /verdict: would ask the user/);
   });
 
@@ -156,8 +156,8 @@ describe("/rail test dry runs", () => {
     assert.match(report, /namer: credentials, off-machine-effects/);
     assert.match(report, /real naming call by test\/fake-model · 10 in \/ 5 out tokens/);
     // off-machine-effects (ask) outranks credentials (judge) under severity-max.
-    assert.match(report, /credentials → judge \(default\)/);
-    assert.match(report, /off-machine-effects → ask \(default\)/);
+    assert.match(report, /credentials → judge \[default\]/);
+    assert.match(report, /off-machine-effects → ask \[default\]/);
     assert.match(report, /severity-max ⇒ ask/);
     assert.match(report, /verdict: would ask the user/);
     assert.ok(notifications.some((n) => n.includes("running a real capability naming call")));
@@ -183,7 +183,7 @@ describe("/rail test dry runs", () => {
     ]);
     await createRailTest({ state, completeFn: complete })("rm -rf build", ctx);
     const report = reportOf(widgets);
-    assert.match(report, /local-destructive → judge \(default\)/);
+    assert.match(report, /local-destructive → judge \[default\]/);
     assert.match(report, /judge: would ask — deletes the build directory — destroys local build output/);
     assert.match(report, /verdict: would ask the user \(judge\)/);
   });
@@ -211,7 +211,7 @@ describe("/rail test dry runs", () => {
     await createRailTest({ state })("read .env", ctx);
     const report = reportOf(widgets);
     assert.match(report, /credentials label \(no longer a hard block\)/);
-    assert.match(report, /credentials → judge \(default\)/);
+    assert.match(report, /credentials → judge \[default\]/);
   });
 
   it("reports a path-policy block for a deny-listed write and skips the namer", async () => {
@@ -232,7 +232,7 @@ describe("/rail test dry runs", () => {
     await createRailTest({ state })(`write ${path.join(fixture.dir, "elsewhere", "out.txt")}`, ctx);
     const report = reportOf(widgets);
     assert.match(report, /\[ASK\] write outside allowed roots .+ → modify-system label/);
-    assert.match(report, /modify-system → ask \(default\)/);
+    assert.match(report, /modify-system → ask \[default\]/);
     assert.match(report, /verdict: would ask the user/);
   });
 

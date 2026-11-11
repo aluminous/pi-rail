@@ -9,7 +9,8 @@ import { capabilityName, resolveCapabilities, type CapabilityId, type Capability
 import { describeClassifierFailure } from "../classifier-protocol.ts";
 import { classifierEnabled, judgeModelSpec, judgeToolCall, nameToolCall, resolveClassifierModel, resolveJudgeModel, type CompleteFn, type NamerResult } from "../classifier.ts";
 import { describeSegmentMatch, explainCommandMatch, matchedCapabilities } from "../command-allowlist.ts";
-import { configSourceLabel, loadConfig, type ResolvedRailConfig } from "../config.ts";
+import { loadConfig, type ResolvedRailConfig } from "../config.ts";
+import { effectiveDispositionLabel } from "../policy-store.ts";
 import { screenToolCall } from "../content-screen.ts";
 import { INTERCEPTED_TOOLS } from "../intercepted-tools.ts";
 import { exemptReadCallReason } from "../interceptor.ts";
@@ -47,10 +48,9 @@ interface NamingPlan {
   input: unknown;
 }
 
+/** "global", "project · worktree-cleanup", "session", "read-only preset", "default". */
 function scopeLabel(entry: CapabilityResolution["effective"][number]): string {
-  if (entry.scope === "config") return configSourceLabel(entry.source ?? "config");
-  if (entry.scope === "preset") return `${entry.source} preset`;
-  return entry.scope;
+  return effectiveDispositionLabel(entry);
 }
 
 export function createRailTest(deps: RailTestDeps) {
@@ -97,7 +97,7 @@ export function createRailTest(deps: RailTestDeps) {
     if (labels.length === 0) return { lines: ["  no capability labels — nothing for the table to decide"] };
     const resolution = resolveCapabilities(config, state.capabilities, labels);
     const lines = [
-      ...resolution.effective.map((entry) => `  ${entry.id} → ${entry.disposition} (${scopeLabel(entry)})`),
+      ...resolution.effective.map((entry) => `  ${entry.id} → ${entry.disposition} [${scopeLabel(entry)}]`),
       `  severity-max ⇒ ${resolution.disposition} · decided by ${resolution.decidedBy.id} (${capabilityName(resolution.decidedBy.id)})`,
     ];
     if (resolution.disposition === "allow") return { lines, verdict: "would allow" };

@@ -3,12 +3,69 @@
   "backend": "seatbelt",
   "filesystem": {
     "enabled": true,
-    "allowWrite": [".", "/tmp"],
-    "denyWrite": [".git", ".pi", ".env", ".env.*", "*.pem", "*.key", "~/.ssh", "~/.aws", "~/.azure", "~/.gnupg", "~/.kube", "~/.docker", "~/.netrc"]
+    "allowWrite": {
+      "remove": [
+        "~/.cache",
+        "~/Library/Caches",
+        "~/.npm",
+        "~/.pnpm-store",
+        "~/.yarn",
+        "~/.cache/yarn",
+        "~/.cache/pnpm",
+        "~/.cargo/registry",
+        "~/.cargo/git",
+        "~/.gradle/caches",
+        "~/.gradle/wrapper",
+        "~/.m2/repository",
+        "~/go/pkg/mod",
+        "~/.cache/go-build",
+        "~/.cache/pip",
+        "~/Library/Caches/pip",
+        "~/.nuget/packages",
+        "~/.ivy2/cache",
+        "~/.cache/coursier",
+        "~/.cache/bazel",
+        "~/.cache/uv",
+        "~/.cache/ruff",
+        "~/.cache/pre-commit"
+      ]
+    },
+    "denyWrite": [
+      ".git"
+    ]
   },
   "network": {
     "enabled": true,
-    "allowedDomains": []
+    "allowedDomains": {
+      "remove": [
+        "github.com",
+        "*.github.com",
+        "*.githubusercontent.com",
+        "gitlab.com",
+        "*.gitlab.com",
+        "bitbucket.org",
+        "*.bitbucket.org",
+        "codeberg.org",
+        "*.codeberg.org",
+        "sr.ht",
+        "*.sr.ht",
+        "ghcr.io",
+        "*.ghcr.io",
+        "docker.io",
+        "*.docker.io",
+        "registry-1.docker.io",
+        "auth.docker.io",
+        "production.cloudflare.docker.com",
+        "quay.io",
+        "*.quay.io",
+        "gcr.io",
+        "*.gcr.io",
+        "*.pkg.dev",
+        "registry.k8s.io",
+        "mcr.microsoft.com",
+        "public.ecr.aws"
+      ]
+    }
   },
   "classifier": {
     "enabled": true,

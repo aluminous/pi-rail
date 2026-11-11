@@ -82,13 +82,15 @@ const KEYCHAIN_READ_ALLOWLIST = ["~/Library/Keychains", "/Library/Keychains", "/
  * The keychain paths this profile may read back out of the deny list. A
  * denyRead entry that a config file contributed is left standing: the user
  * asked for the keychain to be unreadable, and a built-in read-back would
- * silently undo it. Default-provenance entries — including ones an
- * `{"replace": false}` extension carried through — are pi-rail's own doing and
- * are the ones this lifts.
+ * silently undo it — and restating the default entry in a config file counts:
+ * a restatement claims a default (src/policy-store.ts, applyListAdd), so
+ * `"denyRead": ["~/Library/Keychains"]` keeps the keychain denied for bash.
+ * Entries still at default provenance are pi-rail's own doing and are the
+ * ones this lifts.
  */
 function keychainReadAllowlist(config: ResolvedRailConfig, cwd: string): string[] {
   const sources = config.provenance.lists["filesystem.denyRead"];
-  const configured = config.filesystem.denyRead.filter((pattern) => (sources[pattern] ?? "default") !== "default");
+  const configured = config.filesystem.denyRead.filter((pattern) => (sources[pattern]?.layer ?? "default") !== "default");
   return KEYCHAIN_READ_ALLOWLIST.filter((keychainPath) => findMatchingPattern(cwd, resolveConfigPath(cwd, keychainPath), configured) === undefined);
 }
 
