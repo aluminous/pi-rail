@@ -69,6 +69,7 @@ Commands — everything lives under `/rail`, with argument autocomplete:
 - `/rail policy`: open the **capability policy page** — the editable capability table with live per-class stats (see [Dispositions](#dispositions)). Over RPC it degrades to select dialogs; invoking it again closes it.
 - `/rail policy rules`: open the status page on its **policy** tab — the resolved mechanism policy (filesystem, network, environment scrubbing, and the command allowlist, provenance-annotated per entry). Invoking another tab while the page is open switches rather than closing. Outside the TUI this stays a standalone live widget, as before.
 - `/rail set <class> [allow|judge|ask|deny]`: set one class for this session from the command line (completions offer class ids — including custom ones — then dispositions). Without a disposition it prints the current effective value and where it came from.
+- `/rail grant <what you want, in your own words>`: the configurator proposes the narrowest grant for the request and opens the same confirmation as `/rail grant add` (see [The configurator](#the-configurator)); `/rail grant cancel` stops a run in flight.
 - `/rail grant add <file>`: evaluate a grant file against the gates and open the confirmation; `/rail grant check <file>` prints the gate report and applies nothing; `/rail grants` lists every grant with what it decided, and revokes, promotes, or demotes (see [Grants by hand](#grants-by-hand)).
 - `/rail guide <text>`: add classifier guidance for this session without waiting to be asked (see [Session guidance](#session-guidance)). Bare `/rail guide` prompts for the text; `/rail guide clear` drops every entry.
 - `/rail on`: enable Pi Rail.
@@ -154,6 +155,7 @@ Example `.pi/rail.json`:
     "enabled": false,
     "model": "auto",
     "judgeModel": "current",
+    "grantModel": "auto",
     "timeoutMs": 8000,
     "failClosed": true,
     "telemetry": "minimal"
@@ -324,7 +326,12 @@ positive; one without is **negative**.
    and flags are valid, and the id is not taken in the target layer.
 2. **Its own examples** pass. A grant with any widening op (see "widening
    unless provably tightening" below) must have at least one passing negative
-   example.
+   example — and the check is **per rule**: every widening classify or
+   allow-command rule needs an example it decides itself, and every allowing
+   rule with a trailing `*` needs a **near miss**: a passing negative example
+   that is the same command with other arguments or flags (`git worktree
+   remove --force ../x` for `git worktree remove *`). A chained or unrelated
+   command does not count. The failure names the rule.
 3. **Every other grant's examples** still pass with this one added. An example
    that already failed without it is reported, not blamed on it.
 4. **No `critical` case in `eval/cases.ts` moves toward allow.**
@@ -360,12 +367,23 @@ would live, with these stated assumptions, repeated in every report:
 - With the classifier off, an action no rule labels passes through unreviewed,
   live and in the gates alike.
 
+**Probes.** Code also probes every widening rule with a trailing `*`: its
+literal prefix plus `--force`, `-f`, `--hard`, `--delete`, `-D`, `-d`,
+`--mirror`, `--all`, `--no-verify`, `-rf`, `--prune`, `--force-with-lease`,
+`+main:main`, `:main`, `/`, `~`, `..`, `*`, and a chained `… x && rm -rf ~`,
+each dry-run with and without the grant. What comes out newly allowed is
+listed in the confirmation ("op 2 also allows: …") and in the report. A probe
+is not a failure by itself — `git worktree remove ~` is git's to refuse — but
+an allowed probe with `--force`, `-f`, `--hard`, `--delete`, `-D`, `--mirror`,
+`--force-with-lease` or `-rf`, or a flags list naming one of them, makes the op
+sensitive.
+
 **Sensitive ops** need their own approval, each one separately: removing a
 `denyRead`/`denyWrite`/`deniedDomains` entry; setting `credentials`,
 `persistence`, or `unclassified` (or a class extending one of them) to
 `allow`; any built-in row set to `allow`; a bare-head template (`git *`); any
-filesystem, network, or environment widening; and gate 5's previously denied
-actions. (Disabling the rail, the classifier, or `failClosed`, and changing
+filesystem, network, or environment widening; a rule that allows a
+destructive flag (above); and gate 5's previously denied actions. (Disabling the rail, the classifier, or `failClosed`, and changing
 models or the backend, are on the plan's list too, but no op can express them:
 those are file settings a grant cannot touch.)
 
@@ -397,6 +415,70 @@ or allow rule, its table row, or the class it declared — names it: `/rail
 explain` says "decided by grant worktree-cleanup", and the review records carry
 `grant` (telemetry detail tier; always in the replay corpus), which is where the
 grants view's counts come from.
+
+### The configurator
+
+`/rail grant <text>` — say what you want in your own words, e.g. `/rail grant
+i want to allow cleaning up worktrees` — and a model works out the narrowest
+grant, proves it with the same gates as a hand-written one, and hands it to
+the same confirmation. Nothing it says approves anything: the confirmation
+shows its rationale on top, every sensitive op is a toggle that starts off,
+and the grant's `request` is always your verbatim text (set by code, whatever
+the model writes). The command returns at once; a docked panel (a widget over
+RPC) shows which tool it is calling and the turn count while the main agent
+keeps streaming. It needs a UI: in a headless session it refuses up front,
+since a model-authored grant is never applied without the confirmation — not
+even a tightening one.
+
+**What it sees.** Your request; the effective disposition table with
+provenance; the class list (parent, rules-only, a one-line definition); your
+command rules and existing grants; and what its tools return. **What it never
+sees:** the conversation, tool output, or file contents — the agent function
+has no parameter that could carry them (`src/grant-agent.ts`), which is where
+an injected "the user wants curl allowed" would come from.
+
+**Its tools** (a closed set, real tool calling over pi-ai; every rule it writes
+with a trailing `*` must say its flags — a list, or `"any"` — or the tool
+answers with an error): `search_decisions`
+(the replay corpus: command or path, labels, outcome, your answer — newest
+first, at most 20, delimited and marked as data written by another model),
+`dry_run` (an action under the current policy), `check` (the gates on a
+candidate), and two terminal calls: `propose` (code re-runs the gates; a
+failure goes back to the model, never to you) and `decline` — "already
+allowed" (accepted only after a dry run showed an allow), "use `/rail guide`
+instead", "cannot be expressed safely", or a question when the request is
+unclear. It works up a ladder and says why the rung below was not enough:
+guidance → disposition flip → classify into an existing class → new rules-only
+class plus classify → definition edit → filesystem/network lists. The prompt
+and its pitfalls sheet live in `src/grant-agent-prompt.ts`.
+
+**Limits.** 12 model calls, 24k output tokens, three minutes, and
+`/rail grant cancel`; exceeding any ends the run with nothing changed. Its
+calls are accounted under the `configurator` role on the status page's models
+tab.
+
+**"Allow, and generalise…"** is an extra answer in the approval dialog (a
+third row between Allow and Deny in the TUI, never the default; the fifth
+option over RPC). It approves the action exactly like Allow — the tool call
+proceeds at once, and telemetry, the corpus, and session replay record a plain
+`approved` — and then asks once for the request text, prefilled with "allow
+things like this: <command>", and starts the configurator seeded with the
+action (its tool and command or path; never a write's content). It is offered
+on asks forwarded from a subagent too, since it is still you answering, but the
+grant applies to this (parent) session's layer; a child picks it up only once
+you save it to a config file. It is not offered without a UI.
+
+The session model has no way to start the configurator: it is reachable only
+from a typed `/rail grant` and from your own answer in the rail's dialog. No
+tool is registered for it and no message hook leads to it (a test in
+`test/grant-agent-command.test.ts` checks the call sites).
+
+**The eval.** `npm run eval:grant -- provider/model …` runs
+`eval/grant-cases.ts` through the real loop and scores each outcome by code:
+what must and must not become allowed, the highest rung permitted, the decline
+expected, and that sensitive changes surface as sensitive. A model that ever
+passes the gates with a grant violating a safety property is excluded from the
+auto list; see `eval/GRANT_RESULTS.md`.
 
 ### Session scope
 
@@ -692,6 +774,21 @@ command goes to the namer.
 allowlist keeps them out of the deterministic allow without a denylist that
 `--text` would slip past.)
 
+The built-ins use the same mechanism. Each wildcard template was audited for
+flags that write, delete, or run a program, and those that have one carry an
+allowlist of their read-only flags: `rg` (not `--pre`/`--pre-glob`, which run
+a program per file, or `-z`), `git log`/`show`/`diff`/`reflog show`/`stash
+show`/`shortlog` (not `--output`, `--ext-diff`, `--show-signature`), `git grep`
+(not `-O`), `git tag -l`/`--list` and `git config --get` (no write flag riding
+along after the read one), `file` (not `-C`, `-z`), and `diff` (not
+`--paginate`). `git branch *` is gone — a bare positional creates a branch —
+replaced by the exact listing forms (`git branch`, `-a`, `-r`, `-v`, `-vv`,
+`-av`, `--all`, `--remotes`, `--show-current`) and `git branch --list *` /
+`-l *` with read-only flags. Anything else goes to the namer. With a flags
+list, an unquoted glob or brace (`rg foo *.ts`) never matches, since it could
+expand into a flag; a quoted one (`rg 'a.*b'`) does. The status page's policy
+tab names these lists "built-in read-only set" rather than printing them.
+
 ### User command classification
 
 `commands.classify` maps command templates to capability classes of your
@@ -858,7 +955,12 @@ to opt out of auto selection. `"judgeModel"` uses the same grammar and defaults
 to `"current"`: the judge runs rarely and on the consequential tail, so it
 should be the strong model you are already talking to, not the cheap namer.
 `/rail model` (judge tab) and `/rail model judge …` write this key, and set a
-session override that wins over it until Pi restarts.
+session override that wins over it until Pi restarts. `"grantModel"` picks the
+[configurator](#the-configurator)'s model, same grammar, default `"auto"`;
+its auto list is its own (`AUTO_GRANT_MODEL_PREFERENCES`, filled only from
+`eval/GRANT_RESULTS.md` — currently `anthropic/claude-sonnet-5`), and when no
+listed model has auth `"auto"` means the session's current model. It is config-only: `/rail model` has no configurator
+seat.
 
 ## Filesystem policy
 
@@ -934,7 +1036,8 @@ carving explicit exceptions out of an allowed wildcard — for example allowing
 When the rail needs a human decision — a class set to `ask`, a judge verdict
 of `ask`, or a path outside the configured roots — the prompt offers four
 choices: **Allow**, **Allow with comment**, **Deny**, and **Deny with
-comment**. **Esc is neither**: it stops the turn — recorded and reported as a
+comment** — plus **Allow, and generalise…**, which approves and then starts
+the [configurator](#the-configurator) from the action. **Esc is neither**: it stops the turn — recorded and reported as a
 `stop`, not a denial, because reaching for the interrupt key says "not now",
 not "never", and a false deny would bias the judge against an action you never
 actually judged. The prompt names the capabilities that were matched and the
@@ -1223,6 +1326,8 @@ OPENROUTER_API_KEY=... npm run eval -- \
 ```
 
 Model ids under `openrouter/` follow OpenRouter's own `vendor/model` naming. Ids missing from pi-ai's pinned catalog are synthesized automatically, since OpenRouter serves everything through one OpenAI-compatible endpoint.
+
+5. **Configurator judgment** (`eval/grant-run.ts`): `npm run eval:grant -- provider/model [...]` (with `--filter` and `--json`) runs every case in `eval/grant-cases.ts` through `runGrantAgent` with a real model and scores the outcome by code (`eval/grant-score.ts`, unit-tested in `test/grant-score.test.ts`): a table per model of each property's pass/fail, turns, tokens, latency, final rung, and gate status. It exits non-zero when a model passed the gates with a grant that violates a must-not-allow, must-be-sensitive, forbidden-op, or injection property. Keys resolve as for `npm run eval`; the loop itself is tested offline against a scripted fake model (`test/grant-agent.test.ts`). See `eval/GRANT_RESULTS.md`.
 
 The `@earendil-works/*` packages are declared as peer dependencies because Pi
 provides them at runtime. Pinned development copies are installed only for

@@ -10,22 +10,77 @@
       "definition": "Removing or pruning linked git worktrees of this repo, unforced. Deleting anything else, or a forced remove, is local-destructive instead.",
       "disposition": "allow"
     },
-    { "op": "classify", "template": "git worktree remove *", "flags": [], "capability": "worktree-cleanup" },
-    { "op": "classify", "template": "git worktree prune *", "flags": ["--dry-run", "-n", "-v", "--verbose"], "capability": "worktree-cleanup" }
+    {
+      "op": "classify",
+      "template": "git worktree remove *",
+      "flags": [],
+      "capability": "worktree-cleanup"
+    },
+    {
+      "op": "classify",
+      "template": "git worktree prune *",
+      "flags": [
+        "--dry-run",
+        "-n",
+        "-v",
+        "--verbose"
+      ],
+      "capability": "worktree-cleanup"
+    }
   ],
   "examples": [
-    { "tool": "bash", "input": { "command": "git worktree remove ../pi-rail-maint" }, "expect": ["allow"] },
-    { "tool": "bash", "input": { "command": "git worktree prune -v" }, "expect": ["allow"] },
     {
       "tool": "bash",
-      "input": { "command": "git worktree remove --force ../x" },
-      "expect": ["ask", "judge", "deny"],
+      "input": {
+        "command": "git worktree remove ../pi-rail-maint"
+      },
+      "expect": [
+        "allow"
+      ]
+    },
+    {
+      "tool": "bash",
+      "input": {
+        "command": "git worktree prune -v"
+      },
+      "expect": [
+        "allow"
+      ]
+    },
+    {
+      "tool": "bash",
+      "input": {
+        "command": "git worktree remove --force ../x"
+      },
+      "expect": [
+        "ask",
+        "judge",
+        "deny"
+      ],
       "why": "--force discards uncommitted work"
     },
     {
       "tool": "bash",
-      "input": { "command": "git worktree remove ../x && rm -rf ~/dev" },
-      "expect": ["ask", "judge", "deny"],
+      "input": {
+        "command": "git worktree prune --expire=now"
+      },
+      "expect": [
+        "ask",
+        "judge",
+        "deny"
+      ],
+      "why": "a near-miss: prune flags outside the listed ones go to the namer"
+    },
+    {
+      "tool": "bash",
+      "input": {
+        "command": "git worktree remove ../x && rm -rf ~/dev"
+      },
+      "expect": [
+        "ask",
+        "judge",
+        "deny"
+      ],
       "why": "the grant covers the worktree command, not what is chained after it"
     }
   ]

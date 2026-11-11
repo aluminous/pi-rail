@@ -1,3 +1,4 @@
+import { DEFAULT_COMMAND_ALLOW_FLAGS } from "../src/command-allowlist.ts";
 // Most-specific-rule-wins matching, flags allowlists, and the policy plumbing
 // that carries both (config files, grants, session ops, write-back), plus
 // class inheritance for presets. The ranking steps are each tested in
@@ -38,6 +39,11 @@ import {
 import { PLAIN_THEME, statusTabLines } from "../src/status-tabs.ts";
 import { createRuntimeState } from "../src/state.ts";
 import { testConfig } from "./helpers.ts";
+
+/** allowFlags without the built-in templates' own allowlists. */
+function userFlags(config: { commands: { allowFlags: Record<string, string[]> } }): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(config.commands.allowFlags).filter(([template, flags]) => JSON.stringify(DEFAULT_COMMAND_ALLOW_FLAGS[template]) !== JSON.stringify(flags)));
+}
 
 const G = "/home/u/.pi/agent/extensions/rail.json";
 const P = "/repo/.pi/rail.json";
@@ -303,7 +309,7 @@ describe("flags through config files, grants, and session ops", () => {
     } as RailConfig, G);
     assert.deepEqual(config.diagnostics, []);
     assert.ok(config.commands.allow.includes("make lint") && config.commands.allow.includes("git cat-file *"));
-    assert.deepEqual(config.commands.allowFlags, { "git cat-file *": ["-p"] });
+    assert.deepEqual(userFlags(config), { "git cat-file *": ["-p"] });
     assert.deepEqual(config.commands.classify, [{ template: "git worktree remove *", capability: "modify-project", flags: [] }]);
     assert.deepEqual(bareCommand(config, "git cat-file -p HEAD"), ["read-project"]);
     assert.deepEqual(bareCommand(config, "git cat-file --textconv HEAD:x"), []);
@@ -327,18 +333,18 @@ describe("flags through config files, grants, and session ops", () => {
     const global = mergeConfig(testConfig(), { commands: { allow: [{ template: "git cat-file *", flags: ["-p"] }] } } as RailConfig, G);
     const project = mergeConfig(global, { commands: { allow: { remove: ["git cat-file *"] } } }, P);
     assert.ok(!project.commands.allow.includes("git cat-file *"));
-    assert.deepEqual(project.commands.allowFlags, {});
+    assert.deepEqual(userFlags(project), {});
     const again = mergeConfig(project, { commands: { allow: ["git cat-file *"] } }, P);
-    assert.deepEqual(again.commands.allowFlags, {});
+    assert.deepEqual(userFlags(again), {});
   });
 
   it("a plain restatement keeps flags; an allow-command op replaces them and claims the entry", () => {
     const global = mergeConfig(testConfig(), { commands: { allow: [{ template: "git cat-file *", flags: ["-p"] }] } } as RailConfig, G);
     const restated = mergeConfig(global, { commands: { allow: ["git cat-file *"] } }, P);
-    assert.deepEqual(restated.commands.allowFlags, { "git cat-file *": ["-p"] });
+    assert.deepEqual(userFlags(restated), { "git cat-file *": ["-p"] });
     assert.equal(restated.provenance.lists["commands.allow"]["git cat-file *"]?.layer, "global");
     const widened = mergeConfig(global, { grants: [{ id: "any-cat", request: "r", created: "c", ops: [{ op: "allow-command", template: "git cat-file *" }] }] }, P);
-    assert.deepEqual(widened.commands.allowFlags, {});
+    assert.deepEqual(userFlags(widened), {});
     assert.deepEqual(widened.provenance.lists["commands.allow"]["git cat-file *"], { layer: "project", grantId: "any-cat", file: P });
   });
 
@@ -386,7 +392,7 @@ describe("flags through config files, grants, and session ops", () => {
     assert.deepEqual(written.capabilities?.classes, [{ id: "worktree-cleanup", definition: "Worktree cleanup.", disposition: "allow", extends: "local-destructive" }]);
     const reloaded = mergeConfig(testConfig(), written, G);
     assert.deepEqual(reloaded.diagnostics, []);
-    assert.deepEqual(reloaded.commands.allowFlags, { "git cat-file *": ["-p"] });
+    assert.deepEqual(userFlags(reloaded), { "git cat-file *": ["-p"] });
     assert.deepEqual(reloaded.commands.classify[0]?.flags, []);
     assert.equal(reloaded.capabilities.classes[0]?.extends, "local-destructive");
 
@@ -562,7 +568,7 @@ describe("policy rules tab", () => {
     const text = statusTabLines({ state: createRuntimeState(), config, classifierLabel: "off", theme: PLAIN_THEME, width: 220 }, "policy").join("\n");
     assert.match(text, /git cat-file \* \[flags: -p -t\]/);
     assert.match(text, /git worktree remove \* \[flags: none\] → local-destructive/);
-    assert.match(text, /git log \* \(outranked by classify rule → off-machine-effects: built-in default, a user rule matches\)/);
+    assert.match(text, /git log \* \[flags: built-in read-only set, \d+\] \(outranked by classify rule → off-machine-effects: built-in default, a user rule matches\)/);
     assert.match(text, /most specific rule wins/);
     const rules = commandRulesOf(config);
     const dead = outrankedRules(rules);

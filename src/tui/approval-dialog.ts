@@ -10,17 +10,27 @@ export interface RailApprovalAnswer {
    * this into an aborted turn rather than a deny the agent would work around.
    */
   cancelled?: boolean;
+  /**
+   * "Allow, and generalise…": approved exactly like Allow, and the user asked
+   * for the grant configurator to start from this action afterwards. Callers
+   * treat the answer as a plain approval; only src/approvals.ts reads this.
+   */
+  generalise?: boolean;
 }
 
 interface ApprovalOption {
   label: string;
   approved: boolean;
+  generalise?: boolean;
 }
 
 export const APPROVAL_OPTIONS: ApprovalOption[] = [
   { label: "Allow", approved: true },
   { label: "Deny", approved: false },
 ];
+
+/** The extra row offered when the configurator can be seeded from this action. Never the default. */
+export const GENERALISE_OPTION: ApprovalOption = { label: "Allow, and generalise…", approved: true, generalise: true };
 
 /**
  * Renders the highlighted option with the shared comment inline, so the row
@@ -55,7 +65,8 @@ class InlineCommentRow implements Component {
 }
 
 /**
- * Two-way approval dialog for rail prompts: Allow / Deny, with a shared
+ * Approval dialog for rail prompts: Allow / Deny (plus "Allow, and
+ * generalise…" between them when the caller offers it), with a shared
  * inline comment. Typing while either option is highlighted edits a comment
  * rendered directly on that row; arrowing between the options keeps the
  * typed text. Enter resolves the highlighted option (attaching the trimmed
@@ -74,6 +85,7 @@ export class RailApprovalDialog extends Container {
   private theme: Theme;
   private keybindings: Keybindings;
   private done: (answer: RailApprovalAnswer) => void;
+  private options: ApprovalOption[];
 
   get focused() {
     return this._focused;
@@ -96,13 +108,16 @@ export class RailApprovalDialog extends Container {
     inputGraceMs?: number;
     /** Hands the caller a cancel that resolves the dialog as a plain deny (e.g. when the requester died). */
     onCancelHandle?: (cancel: () => void) => void;
+    /** Offer "Allow, and generalise…" (between Allow and Deny). */
+    offerGeneralise?: boolean;
   }) {
     super();
     this.theme = params.theme;
     this.keybindings = params.keybindings;
     this.done = params.done;
+    this.options = params.offerGeneralise ? [APPROVAL_OPTIONS[0]!, GENERALISE_OPTION, ...APPROVAL_OPTIONS.slice(1)] : [...APPROVAL_OPTIONS];
     if (params.defaultDeny) {
-      const deny = APPROVAL_OPTIONS.findIndex((option) => !option.approved);
+      const deny = this.options.findIndex((option) => !option.approved);
       if (deny >= 0) this.selectedIndex = deny;
     }
     if (params.inputGraceMs) this.readyAt = Date.now() + params.inputGraceMs;
@@ -127,16 +142,16 @@ export class RailApprovalDialog extends Container {
   }
 
   private decide(): void {
-    const option = APPROVAL_OPTIONS[this.selectedIndex];
+    const option = this.options[this.selectedIndex];
     if (!option) return;
     const comment = this.commentInput.getValue().trim();
-    this.finish(comment ? { approved: option.approved, comment } : { approved: option.approved });
+    this.finish({ approved: option.approved, ...(comment ? { comment } : {}), ...(option.generalise ? { generalise: true } : {}) });
   }
 
   private update(): void {
     this.dynamic.clear();
-    for (let i = 0; i < APPROVAL_OPTIONS.length; i++) {
-      const option = APPROVAL_OPTIONS[i];
+    for (let i = 0; i < this.options.length; i++) {
+      const option = this.options[i];
       if (!option) continue;
       if (i === this.selectedIndex) {
         this.dynamic.addChild(new InlineCommentRow(option.label, this.commentInput, this.theme));
@@ -149,12 +164,12 @@ export class RailApprovalDialog extends Container {
   handleInput(keyData: string): void {
     if (Date.now() < this.readyAt) return;
     if (this.keybindings.matches(keyData, "tui.select.up")) {
-      this.selectedIndex = this.selectedIndex === 0 ? APPROVAL_OPTIONS.length - 1 : this.selectedIndex - 1;
+      this.selectedIndex = this.selectedIndex === 0 ? this.options.length - 1 : this.selectedIndex - 1;
       this.update();
       return;
     }
     if (this.keybindings.matches(keyData, "tui.select.down")) {
-      this.selectedIndex = this.selectedIndex === APPROVAL_OPTIONS.length - 1 ? 0 : this.selectedIndex + 1;
+      this.selectedIndex = this.selectedIndex === this.options.length - 1 ? 0 : this.selectedIndex + 1;
       this.update();
       return;
     }

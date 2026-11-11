@@ -43,6 +43,8 @@ const SUBCOMMANDS: Array<{ value: string; description: string }> = [
   { value: "policy", description: "Open the capability policy page (edit rows and classes for this session; Ctrl+S saves)" },
   { value: "policy rules", description: "Open the status page on the resolved mechanism rules: filesystem, network, environment" },
   { value: "set", description: "Set one class for this session: set <class> [allow|judge|ask|deny]" },
+  { value: "grant", description: "Describe what you want allowed; the configurator proposes a grant for you to confirm: grant <text>" },
+  { value: "grant cancel", description: "Stop the configurator run in flight" },
   { value: "grant add", description: "Evaluate a grant file against the gates and confirm it: grant add <file>" },
   { value: "grant check", description: "Evaluate a grant file and print the gate report, applying nothing: grant check <file>" },
   { value: "grants", description: "List every grant: what each decided, revoke, promote, demote" },
@@ -79,6 +81,9 @@ export function createRailCommand(deps: RailCommandDeps) {
   });
 
   const grants = createGrantCommands({ state, notify: show, ...deps.grantDeps });
+  // "Allow, and generalise…" in the approval dialog starts the configurator
+  // through this hook — the dialog's own answer is its only caller.
+  state.startGeneralise = (ctx, seed) => grants.generalise(ctx, seed);
 
   /**
    * `/rail guide`: volunteer classifier guidance instead of waiting to be
@@ -371,7 +376,7 @@ export function createRailCommand(deps: RailCommandDeps) {
     if (sub === "smoke" && !rest) return deps.runRailSmoke(ctx);
     if (sub === "critique") return deps.runCritique(rest, ctx);
 
-    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|grant add|check <file>|grants|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|smoke|critique …]", "warning");
+    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|grant <text>|grant add|check <file>|grants|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|smoke|critique …]", "warning");
   }
 
   function getArgumentCompletions(argumentPrefix: string) {
@@ -411,5 +416,5 @@ export function createRailCommand(deps: RailCommandDeps) {
     return items.length > 0 ? items : null;
   }
 
-  return { handler, getArgumentCompletions, toggleForTurn };
+  return { handler, getArgumentCompletions, toggleForTurn, grants };
 }

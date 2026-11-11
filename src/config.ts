@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_CAPABILITY_IDS, DEFAULT_DISPOSITIONS, type CapabilityClass, type CapabilityId, type Disposition } from "./capabilities.ts";
-import { DEFAULT_COMMAND_ALLOWLIST, type CommandCapabilityRule } from "./command-allowlist.ts";
+import { DEFAULT_COMMAND_ALLOW_FLAGS, DEFAULT_COMMAND_ALLOWLIST, type CommandCapabilityRule } from "./command-allowlist.ts";
 import {
   applyLayer,
   compileConfigLayer,
@@ -27,6 +27,8 @@ export interface ClassifierConfig {
   model?: string;
   /** Model for the `judge` disposition's escalation review; "current" uses the session model. */
   judgeModel?: string;
+  /** Model for the grant configurator (`/rail grant <text>`); same grammar as `model`, default "auto". */
+  grantModel?: string;
   timeoutMs?: number;
   failClosed?: boolean;
   /** Decision telemetry written to pi's session log: off, minimal (truncated), or full. */
@@ -37,6 +39,7 @@ export interface ResolvedClassifierConfig {
   enabled: boolean;
   model: string;
   judgeModel: string;
+  grantModel: string;
   timeoutMs: number;
   failClosed: boolean;
   telemetry: "off" | "minimal" | "full";
@@ -355,7 +358,8 @@ const DEFAULTS_SANS_PROVENANCE: Omit<ResolvedRailConfig, "provenance"> = {
   },
   commands: {
     allow: [...DEFAULT_COMMAND_ALLOWLIST],
-    allowFlags: {},
+    // The built-ins' own flags allowlists (src/command-allowlist.ts audit).
+    allowFlags: structuredClone(DEFAULT_COMMAND_ALLOW_FLAGS),
     // No built-in classify rules: the whole point of the list is that the
     // classes it reaches are the ones this user decided to name.
     classify: [],
@@ -366,6 +370,7 @@ const DEFAULTS_SANS_PROVENANCE: Omit<ResolvedRailConfig, "provenance"> = {
     enabled: false,
     model: "auto",
     judgeModel: "current",
+    grantModel: "auto",
     timeoutMs: 8000,
     failClosed: true,
     telemetry: "minimal",

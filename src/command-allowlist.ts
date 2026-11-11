@@ -59,10 +59,155 @@ export interface CommandCapabilityRule {
  * toolchain probes are run-dev-tools; stash create/reapply is modify-project;
  * everything else here is read-project.
  */
+// ── Flags allowlists for the built-in templates ──────────────────────────────
+//
+// A wildcard built-in skips the namer for EVERY flag unless it carries a flags
+// allowlist, so each one was audited against the inclusion bar above. Where a
+// flag writes, deletes, or runs another program, the template lists the flags
+// that do not; everything else falls to the namer. Findings:
+//
+// - rg: --pre / --pre-glob run an arbitrary program per file; -z /
+//   --search-zip runs decompressors.
+// - git log / show / reflog show / stash show / diff: --output=<file> writes a
+//   file; --ext-diff runs an external diff program; --show-signature runs gpg.
+// - git grep: -O / --open-files-in-pager runs a pager program; --textconv
+//   runs configured filters.
+// - git shortlog: accepts log options (--output among them).
+// - git branch: -d/-D/--delete, -m/-M/--move, -c/-C/--copy, -f/--force,
+//   -u/--set-upstream-to, --unset-upstream, --edit-description all write —
+//   and a bare positional (`git branch newname`) CREATES a branch, which no
+//   flags allowlist can stop. So `git branch *` is gone: the plain listing
+//   forms are exact templates, and only `git branch --list *` / `-l *` (where
+//   positionals are patterns) keep a wildcard, with read-only flags.
+// - git tag -l / --list and git config --get: pinned to their read spellings
+//   already; their flags are now pinned too, so a write flag after the
+//   read flag (`git config --get --unset`, `git tag -l -d`) cannot ride along.
+// - file: -C compiles a magic file (writes); -z / -Z run decompressors.
+// - diff: -l / --paginate pipes through pr (runs a program); -D / --ifdef is
+//   output-only but kept off as a destructive-looking flag.
+// Everything else (grep, ls, cat, head, tail, wc, stat, du, df, cmp, comm, jq,
+// cut, tr, nl, column, od, hexdump, strings, the hashers, the path tools,
+// printenv, ps, uname, sw_vers, defaults read, sleep, which, type, echo,
+// git status/blame/describe/rev-parse/ls-files/merge-base/show-ref, the git
+// stash carve-out, npm ls) has no flag that writes, deletes, or executes, and
+// keeps "any flags".
+
+/** `--name=` entries also accept `--name <value>`: the value is a separate positional word. */
+function withBareLongForms(flags: readonly string[]): string[] {
+  const out = new Set(flags);
+  for (const flag of flags) if (flag.startsWith("--") && flag.endsWith("=")) out.add(flag.slice(0, -1));
+  return [...out];
+}
+
+const DIGIT_FLAGS = ["-0", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9"];
+
+const GIT_DIFF_OUTPUT_FLAGS = [
+  "-p", "-u", "--patch", "-s", "--no-patch", "-U", "--unified=", "--stat", "--stat=", "--numstat", "--shortstat", "--dirstat", "--dirstat=",
+  "--summary", "--compact-summary", "--name-only", "--name-status", "--raw", "--patch-with-stat", "--patch-with-raw", "-z",
+  "--color", "--color=", "--no-color", "--color-words", "--color-words=", "--word-diff", "--word-diff=", "--word-diff-regex=",
+  "--color-moved", "--color-moved=", "--no-color-moved", "--no-renames", "-M", "--find-renames", "--find-renames=", "-C", "--find-copies",
+  "--find-copies=", "-B", "--break-rewrites", "--diff-filter=", "-S", "-G", "--pickaxe-all", "--pickaxe-regex", "-R", "--relative",
+  "--relative=", "--no-relative", "-a", "--text", "-w", "--ignore-all-space", "-b", "--ignore-space-change", "--ignore-blank-lines",
+  "--ignore-cr-at-eol", "--ignore-space-at-eol", "--minimal", "--patience", "--histogram", "--diff-algorithm=", "--exit-code", "--quiet",
+  "--abbrev", "--abbrev=", "--full-index", "--binary", "--src-prefix=", "--dst-prefix=", "--no-prefix", "--check", "--ws-error-highlight=",
+  "-W", "--function-context", "--inter-hunk-context=", "--no-ext-diff", "--no-textconv", "--submodule", "--submodule=",
+  "--ignore-submodules", "--ignore-submodules=", "--full-diff",
+];
+
+/** git diff: output flags, the comparison modes, and the merge-stage digits. No --output, no --ext-diff. */
+export const GIT_DIFF_FLAGS = withBareLongForms([...GIT_DIFF_OUTPUT_FLAGS, "--cached", "--staged", "--merge-base", "--no-index", "--base", "--ours", "--theirs", ...DIGIT_FLAGS]);
+
+/** git log / show / reflog show: revision walking and formatting on top of the diff output flags. No --output, --ext-diff, or --show-signature. */
+export const GIT_LOG_FLAGS = withBareLongForms([
+  ...GIT_DIFF_OUTPUT_FLAGS,
+  "--oneline", "--graph", "--decorate", "--decorate=", "--no-decorate", "--all", "--branches", "--branches=", "--tags", "--tags=", "--remotes",
+  "--remotes=", "-n", "--max-count=", "--skip=", "--since=", "--after=", "--until=", "--before=", "--author=", "--committer=", "--grep=",
+  "--invert-grep", "-i", "--regexp-ignore-case", "-E", "--extended-regexp", "-F", "--fixed-strings", "-P", "--perl-regexp", "--all-match",
+  "--merges", "--no-merges", "--min-parents=", "--max-parents=", "--first-parent", "--reverse", "--follow", "--format=", "--pretty",
+  "--pretty=", "--abbrev-commit", "--no-abbrev-commit", "--date=", "--relative-date", "--source", "--left-right", "--cherry-pick",
+  "--cherry-mark", "--cherry", "--boundary", "--ancestry-path", "--simplify-by-decoration", "--full-history", "--topo-order",
+  "--date-order", "--author-date-order", "--notes", "--notes=", "--no-notes", "--mailmap", "--use-mailmap", "--no-mailmap", "--encoding=",
+  "-m", "--cc", "-c", "--no-walk", "--do-walk", "--parents", "--children", "-L", "--log-size", "-g", "--walk-reflogs", ...DIGIT_FLAGS,
+]);
+
+/** git stash show: diff output only. */
+export const GIT_STASH_SHOW_FLAGS = withBareLongForms([...GIT_DIFF_OUTPUT_FLAGS, "--include-untracked", "-u", "--only-untracked"]);
+
+/** git grep: matching and output flags. No -O / --open-files-in-pager, no --textconv. */
+export const GIT_GREP_FLAGS = withBareLongForms([
+  "-i", "--ignore-case", "-I", "-w", "--word-regexp", "-v", "--invert-match", "-n", "--line-number", "--column", "-l", "--files-with-matches",
+  "--name-only", "-L", "--files-without-match", "-c", "--count", "-h", "-H", "--full-name", "-e", "-E", "--extended-regexp", "-G",
+  "--basic-regexp", "-F", "--fixed-strings", "-P", "--perl-regexp", "--and", "--or", "--not", "--all-match", "-q", "--quiet", "--heading",
+  "--break", "-p", "--show-function", "-W", "--function-context", "-A", "-B", "-C", "--after-context=", "--before-context=", "--context=",
+  "--color", "--color=", "--no-color", "--cached", "--untracked", "--no-index", "--exclude-standard", "--no-exclude-standard",
+  "--recurse-submodules", "--max-depth=", "-r", "--recursive", "--no-recursive", "-o", "--only-matching", "-z", "--null", "-m",
+  "--max-count=", "--threads=", "-f", "-a", "--text", "--no-textconv", ...DIGIT_FLAGS,
+]);
+
+/** git shortlog: grouping and revision limiting. */
+export const GIT_SHORTLOG_FLAGS = withBareLongForms([
+  "-n", "--numbered", "-s", "--summary", "-e", "--email", "-c", "--committer", "--group=", "--format=", "-w", "--all", "--since=", "--after=",
+  "--until=", "--before=", "--no-merges", "--merges", "--author=", "--branches", "--tags", "--remotes", "--first-parent", "--reverse",
+]);
+
+/** git branch --list / -l: read-only listing flags (positionals are patterns in list mode). */
+export const GIT_BRANCH_LIST_FLAGS = withBareLongForms([
+  "-a", "-r", "-v", "--all", "--remotes", "--verbose", "--list", "-l", "--merged", "--no-merged", "--contains", "--no-contains",
+  "--points-at", "--sort=", "--format=", "--color", "--color=", "--no-color", "--column", "--column=", "--no-column", "-i", "--ignore-case",
+  "--omit-empty", "--abbrev=", "--no-abbrev",
+]);
+
+/** git tag -l / --list: listing flags. */
+export const GIT_TAG_LIST_FLAGS = withBareLongForms([
+  "-l", "--list", "-n", "--sort=", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format=", "--column",
+  "--column=", "--no-column", "--color", "--color=", "-i", "--ignore-case", "--omit-empty", ...DIGIT_FLAGS,
+]);
+
+/** git config --get: scope and type flags for reading. */
+export const GIT_CONFIG_GET_FLAGS = withBareLongForms([
+  "--get", "--get-all", "--get-regexp", "--global", "--system", "--local", "--worktree", "--file=", "-f", "--blob=", "--type=", "--bool",
+  "--int", "--bool-or-int", "--path", "--expiry-date", "--null", "-z", "--show-origin", "--show-scope", "--default=", "--includes",
+  "--no-includes", "--name-only",
+]);
+
+/** rg: search and output flags. No --pre / --pre-glob (run a program), no -z / --search-zip (run decompressors). */
+export const RG_FLAGS = withBareLongForms([
+  "-i", "--ignore-case", "-S", "--smart-case", "-s", "--case-sensitive", "-w", "--word-regexp", "-x", "--line-regexp", "-v",
+  "--invert-match", "-n", "--line-number", "-N", "--no-line-number", "-l", "--files-with-matches", "--files-without-match", "-c", "--count",
+  "--count-matches", "-o", "--only-matching", "-A", "-B", "-C", "--after-context=", "--before-context=", "--context=", "-e", "--regexp=",
+  "-f", "--file=", "-F", "--fixed-strings", "-U", "--multiline", "--multiline-dotall", "-g", "--glob=", "--iglob=",
+  "--glob-case-insensitive", "-t", "--type=", "-T", "--type-not=", "--type-list", "--hidden", "-.", "--no-ignore", "--no-ignore-vcs",
+  "--no-ignore-dot", "--no-ignore-parent", "--no-ignore-global", "-u", "--unrestricted", "-L", "--follow", "-m", "--max-count=",
+  "--max-depth=", "-d", "--max-filesize=", "--files", "--json", "--vimgrep", "--heading", "--no-heading", "-H", "--with-filename", "-I",
+  "--no-filename", "--column", "--no-column", "--color=", "--colors=", "-p", "--pretty", "-q", "--quiet", "--sort=", "--sortr=", "-0",
+  "--null", "--null-data", "--trim", "-M", "--max-columns=", "--max-columns-preview", "--stats", "-j", "--threads=", "-E", "--encoding=",
+  "-P", "--pcre2", "--no-pcre2-unicode", "--no-messages", "-r", "--replace=", "--passthru", "-a", "--text", "-b", "--byte-offset",
+  "--line-buffered", "--block-buffered", "--crlf", "--engine=", "--include-zero", "-h", "--help", "-V", "--version",
+]);
+
+/** file: identification flags. No -C (compiles a magic file: writes), no -z / -Z (run decompressors). */
+export const FILE_FLAGS = withBareLongForms([
+  "-b", "--brief", "-i", "-I", "--mime", "--mime-type", "--mime-encoding", "-L", "--dereference", "-h", "--no-dereference", "-s",
+  "--special-files", "-k", "--keep-going", "-n", "--no-buffer", "-N", "--no-pad", "-0", "--print0", "-E", "-e", "--exclude=", "--extension",
+  "--apple", "-r", "--raw", "-m", "--magic-file=", "-f", "--files-from=", "-F", "--separator=", "-v", "--version", "--help",
+]);
+
+/** diff: comparison and output flags. No -l / --paginate (runs pr), no -D / --ifdef. */
+export const DIFF_FLAGS = withBareLongForms([
+  "-u", "-U", "--unified", "--unified=", "-c", "-C", "--context", "--context=", "-q", "--brief", "-s", "--report-identical-files", "-r",
+  "--recursive", "-N", "--new-file", "--unidirectional-new-file", "-i", "--ignore-case", "-w", "--ignore-all-space", "-b",
+  "--ignore-space-change", "-B", "--ignore-blank-lines", "-E", "--ignore-tab-expansion", "-Z", "--ignore-trailing-space",
+  "--strip-trailing-cr", "-I", "--ignore-matching-lines=", "-a", "--text", "-y", "--side-by-side", "-W", "--width=", "--left-column",
+  "--suppress-common-lines", "-t", "--expand-tabs", "-T", "--initial-tab", "--tabsize=", "--color", "--color=", "-x", "--exclude=", "-X",
+  "--exclude-from=", "-S", "--starting-file=", "--label=", "-p", "--show-c-function", "-F", "--show-function-line=", "-d", "--minimal",
+  "--speed-large-files", "--horizon-lines=", "-e", "--ed", "-n", "--rcs", "--normal", "--from-file=", "--to-file=", "--no-dereference",
+  "--ignore-file-name-case", "--no-ignore-file-name-case",
+]);
+
 export const DEFAULT_COMMAND_ALLOW_RULES: CommandCapabilityRule[] = [
   // File and text inspection (stdout-only)
   { template: "grep *", capability: "read-project" },
-  { template: "rg *", capability: "read-project" },
+  { template: "rg *", capability: "read-project", flags: RG_FLAGS },
   { template: "ls *", capability: "read-project" },
   { template: "cat *", capability: "read-project" },
   { template: "head *", capability: "read-project" },
@@ -71,12 +216,12 @@ export const DEFAULT_COMMAND_ALLOW_RULES: CommandCapabilityRule[] = [
   { template: "pwd", capability: "read-project" },
   { template: "which *", capability: "read-system" },
   { template: "type *", capability: "read-system" },
-  { template: "file *", capability: "read-project" },
+  { template: "file *", capability: "read-project", flags: FILE_FLAGS },
   { template: "stat *", capability: "read-project" },
   { template: "echo *", capability: "read-project" },
   { template: "du *", capability: "read-project" },
   { template: "df *", capability: "read-system" },
-  { template: "diff *", capability: "read-project" },
+  { template: "diff *", capability: "read-project", flags: DIFF_FLAGS },
   { template: "cmp *", capability: "read-project" },
   { template: "comm *", capability: "read-project" },
   { template: "basename *", capability: "read-project" },
@@ -110,13 +255,24 @@ export const DEFAULT_COMMAND_ALLOW_RULES: CommandCapabilityRule[] = [
   { template: "sleep *", capability: "read-system" },
   // Git, read-only spellings only
   { template: "git status *", capability: "read-project" },
-  { template: "git log *", capability: "read-project" },
-  { template: "git diff *", capability: "read-project" },
-  { template: "git show *", capability: "read-project" },
-  { template: "git branch *", capability: "read-project" },
+  { template: "git log *", capability: "read-project", flags: GIT_LOG_FLAGS },
+  { template: "git diff *", capability: "read-project", flags: GIT_DIFF_FLAGS },
+  { template: "git show *", capability: "read-project", flags: GIT_LOG_FLAGS },
+  // Not `git branch *`: a bare positional creates a branch (see the audit above).
+  { template: "git branch", capability: "read-project" },
+  { template: "git branch --show-current", capability: "read-project" },
+  { template: "git branch -a", capability: "read-project" },
+  { template: "git branch -r", capability: "read-project" },
+  { template: "git branch -v", capability: "read-project" },
+  { template: "git branch -vv", capability: "read-project" },
+  { template: "git branch -av", capability: "read-project" },
+  { template: "git branch --all", capability: "read-project" },
+  { template: "git branch --remotes", capability: "read-project" },
+  { template: "git branch --list *", capability: "read-project", flags: GIT_BRANCH_LIST_FLAGS },
+  { template: "git branch -l *", capability: "read-project", flags: GIT_BRANCH_LIST_FLAGS },
   { template: "git blame *", capability: "read-project" },
-  { template: "git grep *", capability: "read-project" },
-  { template: "git shortlog *", capability: "read-project" },
+  { template: "git grep *", capability: "read-project", flags: GIT_GREP_FLAGS },
+  { template: "git shortlog *", capability: "read-project", flags: GIT_SHORTLOG_FLAGS },
   { template: "git describe *", capability: "read-project" },
   { template: "git rev-parse *", capability: "read-project" },
   { template: "git ls-files *", capability: "read-project" },
@@ -125,20 +281,20 @@ export const DEFAULT_COMMAND_ALLOW_RULES: CommandCapabilityRule[] = [
   { template: "git remote", capability: "read-project" },
   { template: "git remote -v", capability: "read-project" },
   { template: "git stash list", capability: "read-project" },
-  { template: "git stash show *", capability: "read-project" },
+  { template: "git stash show *", capability: "read-project", flags: GIT_STASH_SHOW_FLAGS },
   { template: "git stash", capability: "modify-project" },
   { template: "git stash push *", capability: "modify-project" },
   { template: "git stash pop *", capability: "modify-project" },
   { template: "git stash apply *", capability: "modify-project" },
   { template: "git worktree list", capability: "read-project" },
   { template: "git tag", capability: "read-project" },
-  { template: "git tag -l *", capability: "read-project" },
-  { template: "git tag --list *", capability: "read-project" },
+  { template: "git tag -l *", capability: "read-project", flags: GIT_TAG_LIST_FLAGS },
+  { template: "git tag --list *", capability: "read-project", flags: GIT_TAG_LIST_FLAGS },
   { template: "git config --list", capability: "read-project" },
   { template: "git config -l", capability: "read-project" },
-  { template: "git config --get *", capability: "read-project" },
+  { template: "git config --get *", capability: "read-project", flags: GIT_CONFIG_GET_FLAGS },
   { template: "git reflog", capability: "read-project" },
-  { template: "git reflog show *", capability: "read-project" },
+  { template: "git reflog show *", capability: "read-project", flags: GIT_LOG_FLAGS },
   // Toolchain probes
   { template: "git --version", capability: "run-dev-tools" },
   { template: "node --version", capability: "run-dev-tools" },
@@ -162,6 +318,18 @@ const DEFAULT_TEMPLATE_CAPABILITIES = new Map<string, CapabilityId>(
 );
 
 export const DEFAULT_COMMAND_ALLOWLIST: string[] = DEFAULT_COMMAND_ALLOW_RULES.map((rule) => rule.template);
+
+/** The built-in templates' flags allowlists, keyed by template (the shape of `commands.allowFlags`). */
+export const DEFAULT_COMMAND_ALLOW_FLAGS: Record<string, string[]> = Object.fromEntries(
+  DEFAULT_COMMAND_ALLOW_RULES.flatMap((rule) => (rule.flags ? [[rule.template, [...rule.flags]]] : [])),
+);
+
+/** Same flags allowlist (both absent, or the same set). */
+function sameFlagSet(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  const left = new Set(a);
+  return left.size === new Set(b).size && b.every((flag) => left.has(flag));
+}
 
 /**
  * The capability a matched template resolves to. Config keeps `commands.allow`
@@ -241,17 +409,19 @@ export function commandFlagsProblem(template: string, flags: unknown): string | 
  * commandFlagsProblem for the accepted shapes; anything that starts with `-`
  * and is not `-` or `--` is a flag, so `-1` must be listed to pass.
  *
- * A word carrying glob or brace characters is refused too, whatever it
- * starts with: the parser keeps quote-removed text and cannot say whether
- * `*` or `{a,b}` was quoted, and unquoted the shell expands them — `*` in a
- * directory holding a file named `--force`, or `{--force,x}`, becomes a
- * flag the allowlist never saw. After `--` an expansion can only produce
- * positionals, so the check stops there like the flag check does.
+ * A word carrying UNQUOTED glob or brace characters is refused too,
+ * whatever it starts with: the shell expands them — `*` in a directory
+ * holding a file named `--force`, or `{--force,x}`, becomes a flag the
+ * allowlist never saw. `globbed` says per word whether the parser saw such a
+ * character outside quotes (ShellWord.glob); without it every word holding
+ * one is refused, quoted or not, which is the safe reading of plain strings.
+ * After `--` an expansion can only produce positionals, so the check stops
+ * there like the flag check does.
  */
-export function flagRejection(words: readonly string[], flags: ReadonlySet<string>): string | undefined {
-  for (const word of words) {
+export function flagRejection(words: readonly string[], flags: ReadonlySet<string>, globbed?: readonly boolean[]): string | undefined {
+  for (const [index, word] of words.entries()) {
     if (word === "--") return undefined;
-    if (/[*?[{]/.test(word)) return word;
+    if (globbed ? globbed[index] === true : /[*?[{]/.test(word)) return word;
     if (word === "-" || !word.startsWith("-")) continue;
     if (word.startsWith("--")) {
       const eq = word.indexOf("=");
@@ -327,8 +497,9 @@ function ruleSetFromLists(lists: CommandRuleLists): CommandRuleSet {
     rules.push({ template: rule.template, capability: rule.capability, ...(rule.flags ? { flags: rule.flags } : {}), source: "classify", rank: [1] });
   }
   for (const template of lists.allow) {
-    const flags = lists.allowFlags?.[template.trim()];
-    const builtin = DEFAULT_TEMPLATE_CAPABILITIES.has(template.trim()) && !flags;
+    // A built-in template listed without its own flags keeps the built-in allowlist.
+    const flags = lists.allowFlags?.[template.trim()] ?? DEFAULT_COMMAND_ALLOW_FLAGS[template.trim()];
+    const builtin = DEFAULT_TEMPLATE_CAPABILITIES.has(template.trim()) && sameFlagSet(flags, DEFAULT_COMMAND_ALLOW_FLAGS[template.trim()]);
     rules.push({ template, capability: capabilityForTemplate(template), ...(flags ? { flags } : {}), source: "allow", rank: [builtin ? 0 : 1] });
   }
   return { rules, disposition: defaultDispositionOf };
@@ -370,12 +541,12 @@ function prepareRules(set: CommandRuleSet): PreparedRule[] {
  * `flag` names the word that stopped a template match that would otherwise
  * have held, so explanations can say why a narrower rule stood down.
  */
-function matchRule(argv: string[], rule: PreparedRule): { matched: boolean; flag?: string } {
+function matchRule(argv: string[], rule: PreparedRule, globbed?: readonly boolean[]): { matched: boolean; flag?: string } {
   const { literals, anyArgs } = rule;
   if (anyArgs ? argv.length < literals.length : argv.length !== literals.length) return { matched: false };
   if (!literals.every((token, index) => argv[index] === token)) return { matched: false };
   if (!rule.flags) return { matched: true };
-  const flag = flagRejection(argv.slice(literals.length), rule.flags);
+  const flag = flagRejection(argv.slice(literals.length), rule.flags, globbed?.slice(literals.length));
   return flag === undefined ? { matched: true } : { matched: false, flag };
 }
 
@@ -505,17 +676,19 @@ function segmentVerdict(command: ShellCommand, set: CommandRuleSet, rules: Prepa
     return { command: text, refusal: "expansions in assignments are never allowlisted" };
   }
   const argv: string[] = [];
+  const globbed: boolean[] = [];
   for (const word of command.argv) {
     const literal = literalWordText(word);
     if (literal === undefined) return { command: text, refusal: "expansions ($VAR, $(…), `…`) are never allowlisted" };
     argv.push(literal);
+    globbed.push(word.glob === true);
   }
   if (argv.length === 0) return { command: text, refusal: "bare assignments have no command head to judge" };
 
   const matching: PreparedRule[] = [];
   const flagMisses: FlagMiss[] = [];
   for (const rule of rules) {
-    const result = matchRule(argv, rule);
+    const result = matchRule(argv, rule, globbed);
     if (result.matched) matching.push(rule);
     else if (result.flag !== undefined) flagMisses.push({ rule: rule.text, flag: result.flag });
   }
@@ -646,6 +819,12 @@ export function outrankedRules(set: CommandRuleSet): Map<CommandRule, OutrankedR
         result.set(rule.rule, { rule: other.text, capability: other.rule.capability, source: other.rule.source, ...(other.rule.origin ? { origin: other.rule.origin } : {}), reason: "built-in default, a user rule matches" });
         break;
       }
+      // A user rule on the same template beats a built-in whatever its flags
+      // (tier first), so it shadows the built-in when it accepts at least as much.
+      if (!isUserRule(rule.rule) && isUserRule(other.rule) && (!other.flags || (!!rule.flags && [...rule.flags].every((flag) => other.flags!.has(flag))))) {
+        result.set(rule.rule, { rule: other.text, capability: other.rule.capability, source: other.rule.source, ...(other.rule.origin ? { origin: other.rule.origin } : {}), reason: "built-in default, a user rule matches" });
+        break;
+      }
       // `other` must accept everything `rule` does: no flags list, or (when
       // both have one) a superset — a rule with flags never loses to one
       // without, (c), so that pairing cannot be a full shadow.
@@ -658,4 +837,70 @@ export function outrankedRules(set: CommandRuleSet): Map<CommandRule, OutrankedR
     }
   }
   return result;
+}
+
+// ── Single-rule matching, for the grant gates ────────────────────────────────
+
+/** One simple command's literal argv, with which words hold an unquoted glob character. */
+export interface CommandWords {
+  argv: string[];
+  globbed: boolean[];
+}
+
+/**
+ * Every simple command of `command` as literal words, in order; undefined
+ * when it does not parse, holds a subshell, or any argv word is an expansion —
+ * the shapes no rule can match anyway.
+ */
+export function simpleCommandWords(command: string): CommandWords[] | undefined {
+  const parsed = parseShellCommand(command);
+  if (!parsed.ok) return undefined;
+  const out: CommandWords[] = [];
+  for (const chain of parsed.script.chains) {
+    for (const pipeline of chain.pipelines) {
+      for (const cmd of pipeline.commands) {
+        if (cmd.kind !== "command") return undefined;
+        const argv: string[] = [];
+        const globbed: boolean[] = [];
+        for (const word of cmd.argv) {
+          const literal = literalWordText(word);
+          if (literal === undefined) return undefined;
+          argv.push(literal);
+          globbed.push(word.glob === true);
+        }
+        out.push({ argv, globbed });
+      }
+    }
+  }
+  return out;
+}
+
+/** Whether one rule (template plus optional flags allowlist) matches one simple command, by the matcher's own test. */
+export function ruleMatchesWords(template: string, flags: readonly string[] | undefined, words: CommandWords): boolean {
+  const [prepared] = prepareRules({ rules: [{ template, capability: "unclassified", ...(flags ? { flags } : {}), source: "classify", rank: [1] }], disposition: defaultDispositionOf });
+  return !!prepared && matchRule(words.argv, prepared, words.globbed).matched;
+}
+
+/** A template's literal words (without the trailing `*`) and whether it takes further arguments. */
+export function templateShape(template: string): { literals: string[]; wildcard: boolean } {
+  const tokens = templateTokens(template);
+  const wildcard = tokens.at(-1) === "*";
+  return { literals: wildcard ? tokens.slice(0, -1) : tokens, wildcard };
+}
+
+/**
+ * Whether `command` is a near miss of a rule with these literal words: ONE
+ * simple command (no chain, pipe, or subshell) whose first words are exactly
+ * the literals and that has more after them — other arguments or flags,
+ * literal or not, or a redirect. Unparseable text is not a near miss.
+ */
+export function isNearMiss(command: string, literals: readonly string[]): boolean {
+  const parsed = parseShellCommand(command);
+  if (!parsed.ok || parsed.script.chains.length !== 1) return false;
+  const chain = parsed.script.chains[0]!;
+  if (chain.pipelines.length !== 1 || chain.pipelines[0]!.commands.length !== 1) return false;
+  const cmd = chain.pipelines[0]!.commands[0]!;
+  if (cmd.kind !== "command") return false;
+  if (!literals.every((token, index) => cmd.argv[index] !== undefined && literalWordText(cmd.argv[index]!) === token)) return false;
+  return cmd.argv.length > literals.length || cmd.redirects.length > 0;
 }

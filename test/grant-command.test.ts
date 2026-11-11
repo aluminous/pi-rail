@@ -104,13 +104,24 @@ function decide(state: RuntimeState, command: string, cwd: string) {
   return dryRunAction(state.config!, { tool: "bash", input: { command } }, { cwd });
 }
 
-/** The worktree grant plus a sensitive bare-head allow (`yq *`), optionally with an example that needs it. */
+/**
+ * The worktree grant plus one sensitive op: a network widening that nothing
+ * else depends on, or (exampleNeedsJq) a bare-head allow `yq *` with the
+ * examples its rule needs, so dropping it leaves its positive example failing.
+ */
 function withYq(exampleNeedsJq: boolean): Grant {
+  if (!exampleNeedsJq) {
+    return { ...WORKTREE, id: "worktree-and-domain", ops: [...WORKTREE.ops, { op: "add-to-list", list: "network.allowedDomains", values: ["example.org"] }] };
+  }
   return {
     ...WORKTREE,
     id: "worktree-and-yq",
     ops: [...WORKTREE.ops, { op: "allow-command", template: "yq *" }],
-    examples: [...WORKTREE.examples!, ...(exampleNeedsJq ? [{ tool: "bash", input: { command: "yq . package.json" }, expect: ["allow" as const] }] : [])],
+    examples: [
+      ...WORKTREE.examples!,
+      { tool: "bash", input: { command: "yq . package.json" }, expect: ["allow" as const] },
+      { tool: "bash", input: { command: "yq . $FILE" }, expect: ["ask" as const, "judge" as const, "deny" as const] },
+    ],
   };
 }
 
@@ -207,13 +218,13 @@ describe("/rail grant add — the confirmation", () => {
       const first = setup(dropped.ctx);
       await first.commands.runGrant(`add ${writeGrantFile(agentDir, withYq(false))}`, dropped.ctx);
       const page = dropped.panel() as GrantConfirmPage;
-      assert.match(page.render(140).join("\n"), /\[ \] op 4: `yq \*` exempts every yq command from review/);
+      assert.match(page.render(140).join("\n"), /\[ \] op 4: widens network access: add example\.org/);
       assert.deepEqual(page.selectedRow(), { kind: "answer", value: "session" }, "Enter starts on an answer, never a toggle");
       page.handleInput(ENTER);
       await settled();
       const applied = first.state.sessionPolicy.grants[0]!;
       assert.equal(applied.ops.length, 3, "the sensitive op is really dropped");
-      assert.ok(!first.state.config!.commands.allow.includes("yq *"));
+      assert.ok(!first.state.config!.network.allowedDomains.includes("example.org"));
       assert.match(dropped.notes.join("\n"), /dropped unapproved sensitive op 4/);
 
       const kept = makeCtx(cwd, "tui");
@@ -230,7 +241,7 @@ describe("/rail grant add — the confirmation", () => {
       toggles.handleInput(ENTER);
       await settled();
       assert.equal(second.state.sessionPolicy.grants[0]!.ops.length, 4);
-      assert.ok(second.state.config!.commands.allow.includes("yq *"));
+      assert.ok(second.state.config!.network.allowedDomains.includes("example.org"));
     });
   });
 
@@ -245,7 +256,7 @@ describe("/rail grant add — the confirmation", () => {
       page.handleInput(ENTER);
       await settled();
       assert.deepEqual(state.sessionPolicy.grants, [], "nothing applied");
-      assert.match(page.render(160).join("\n"), /Without the unapproved sensitive op 4, the grant fails its gates: example 5 \(`yq \. package\.json`\)/);
+      assert.match(page.render(160).join("\n"), /Without the unapproved sensitive op 4, the grant fails its gates: example 6 \(`yq \. package\.json`\)/);
     });
   });
 
@@ -277,7 +288,7 @@ describe("/rail grant add — the confirmation", () => {
       const first = setup(dropping.ctx);
       await first.commands.runGrant(`add ${writeGrantFile(agentDir, withYq(false))}`, dropping.ctx);
       assert.deepEqual(dropping.asked[0]?.labels, ["Drop this op", "Approve this op"]);
-      assert.match(dropping.asked[0]!.title, /Sensitive op 4: `yq \*` exempts every yq command/);
+      assert.match(dropping.asked[0]!.title, /Sensitive op 4: widens network access: add example\.org/);
       assert.equal(first.state.sessionPolicy.grants[0]?.ops.length, 3);
 
       const approving = makeCtx(cwd, "rpc", { answers: ["Approve this op", "Apply for this session"] });

@@ -36,7 +36,7 @@ import {
   type CapabilityState,
   type Disposition,
 } from "./capabilities.ts";
-import { capabilityForTemplate, describeFlags } from "./command-allowlist.ts";
+import { capabilityForTemplate, describeFlags, isNearMiss, ruleMatchesWords, simpleCommandWords, templateShape } from "./command-allowlist.ts";
 import type { ResolvedRailConfig } from "./config.ts";
 import { screenToolCall } from "./content-screen.ts";
 import { addTraceStage, type DecisionTrace, type DecisionTraceStage } from "./decision-trace.ts";
@@ -622,7 +622,8 @@ export type SensitiveKind =
   | "filesystem-widening"
   | "network-widening"
   | "environment-widening"
-  | "previously-denied";
+  | "previously-denied"
+  | "allows-destructive-flag";
 
 /** One reason an op needs its own explicit approval in the rail's dialog. */
 export interface SensitiveItem {
@@ -821,8 +822,116 @@ export interface GrantReport {
   summary?: string;
   /** Every failure across gates 1–4, in gate order — what the agent iterates on. */
   failures: string[];
+  /**
+   * Code-generated probes of each widening wildcard rule: its literal prefix
+   * plus dangerous-looking arguments, dry-run under the candidate. Not
+   * failures in themselves; an allowed destructive one makes its op sensitive.
+   */
+  probes: RuleProbe[];
   /** nameFn calls spent. */
   namerCalls: number;
+}
+
+// ── Rule probes ──────────────────────────────────────────────────────────────
+
+/** One probe of a widening wildcard rule. */
+export interface RuleProbe {
+  opIndex: number;
+  template: string;
+  command: string;
+  outcome: EvalOutcome;
+  /** Allowed under the candidate and not before it: what this rule newly lets through. */
+  newlyAllowed: boolean;
+  /** The probe's argument is in the destructive set (DESTRUCTIVE_PROBE_ARGS). */
+  destructive: boolean;
+}
+
+/** Arguments every widening wildcard rule is probed with (after its literal prefix). */
+export const PROBE_ARGS = [
+  "--force", "-f", "--hard", "--delete", "-D", "-d", "--mirror", "--all", "--no-verify", "-rf", "--prune", "--force-with-lease",
+  "+main:main", ":main", "/", "~", "..", "*",
+];
+
+/**
+ * Probe flags that destroy or force: a rule whose probe with one of them
+ * comes out newly allowed — or whose flags list names one — is a sensitive
+ * op. Positional shapes (`+main:main`, `:main`) are probed and reported but do
+ * not make an op sensitive: what a positional means is the command's business
+ * (`:main` is a branch delete to git push and a plain path to git worktree).
+ */
+export const DESTRUCTIVE_PROBE_ARGS = ["--force", "-f", "--hard", "--delete", "-D", "--mirror", "--force-with-lease", "-rf"];
+
+/** A rule op's template and flags, when it is one. */
+function ruleOf(op: PolicyOp): { template: string; flags?: string[] } | undefined {
+  if (op.op === "classify" || op.op === "allow-command") return { template: op.template, ...(op.flags ? { flags: op.flags } : {}) };
+  return undefined;
+}
+
+/** The probes of every widening wildcard rule in the grant. */
+export function probeRules(grant: Grant, directions: readonly OpDirection[], before: ResolvedRailConfig, after: ResolvedRailConfig, options: { cwd: string; classifierEnabled?: boolean; enforcing?: boolean }): RuleProbe[] {
+  const probes: RuleProbe[] = [];
+  grant.ops.forEach((op, opIndex) => {
+    const rule = ruleOf(op);
+    if (!rule || directions[opIndex] !== "widening") return;
+    const shape = templateShape(rule.template);
+    if (!shape.wildcard) return;
+    const prefix = shape.literals.join(" ");
+    const commands = [...PROBE_ARGS.map((arg) => ({ command: `${prefix} ${arg}`, arg })), { command: `${prefix} x && rm -rf ~`, arg: "&&" }];
+    for (const { command, arg } of commands) {
+      const action = { tool: "bash", input: { command } };
+      const now = dryRunAction(after, action, options);
+      const was = dryRunAction(before, action, options);
+      const newlyAllowed = now.outcome === "allow" && was.outcome !== "allow";
+      probes.push({ opIndex, template: rule.template, command, outcome: now.outcome, newlyAllowed, destructive: DESTRUCTIVE_PROBE_ARGS.includes(arg) });
+    }
+  });
+  return probes;
+}
+
+/** "this rule would also allow: …", per op, for the agent and the confirmation. */
+export function probeSummaries(report: Pick<GrantReport, "probes">, cap = 6): Array<{ opIndex: number; template: string; commands: string[]; more: number }> {
+  const byOp = new Map<number, { template: string; commands: string[] }>();
+  for (const probe of report.probes) {
+    if (!probe.newlyAllowed) continue;
+    const entry = byOp.get(probe.opIndex) ?? { template: probe.template, commands: [] };
+    entry.commands.push(probe.command);
+    byOp.set(probe.opIndex, entry);
+  }
+  return [...byOp.entries()].map(([opIndex, entry]) => ({ opIndex, template: entry.template, commands: entry.commands.slice(0, cap), more: Math.max(0, entry.commands.length - cap) }));
+}
+
+// ── Per-rule examples ────────────────────────────────────────────────────────
+
+/**
+ * Gate 2's per-rule requirement for every widening rule: (a) an example the
+ * rule itself decides — one that passed and that the rule matches — and, for
+ * a wildcard rule whose class resolves to allow, (b) a near-miss: a passing
+ * negative example that is ONE command starting with the rule's literal
+ * prefix (the same command with other arguments, flags, an expansion or a
+ * redirect), not an unrelated command or a chain. With "any flags" the only
+ * near misses left are expansions and redirects — and such a rule's probes
+ * (`--force` allowed) make it sensitive anyway. Returns one failure per unmet requirement, naming the rule.
+ */
+export function ruleExampleFailures(grant: Grant, directions: readonly OpDirection[], results: readonly ExampleResult[], after: ResolvedRailConfig): string[] {
+  const failures: string[] = [];
+  const parsed = (grant.examples ?? []).map((example) => (example.tool === "bash" && typeof example.input.command === "string" ? simpleCommandWords(example.input.command) : undefined));
+  grant.ops.forEach((op, opIndex) => {
+    const rule = ruleOf(op);
+    if (!rule || directions[opIndex] !== "widening") return;
+    const shape = templateShape(rule.template);
+    const capability = op.op === "classify" ? op.capability : capabilityForTemplate(rule.template);
+    const allows = getEffectiveDisposition(after, undefined, capability).disposition === "allow";
+    const name = `op ${opIndex + 1} (\`${rule.template}\`${rule.flags ? ` flags ${describeFlags(rule.flags)}` : " any flags"})`;
+    const decided = results.some((result, index) => result.passed && result.verdict === "pass" && (parsed[index] ?? []).some((words) => ruleMatchesWords(rule.template, rule.flags, words)));
+    if (!decided) failures.push(`${name} has no example it decides: add one the rule matches${allows ? ` (expect ["allow"])` : ""}, e.g. \`${shape.literals.join(" ")}${shape.wildcard ? " <args>" : ""}\``);
+    if (!shape.wildcard || !allows) return;
+    const nearMiss = results.some((result, index) => {
+      const example = grant.examples?.[index];
+      return result.negative && result.passed && example?.tool === "bash" && typeof example.input.command === "string" && isNearMiss(example.input.command, shape.literals);
+    });
+    if (!nearMiss) failures.push(`${name} has no near-miss negative example: add one that is the same command with other arguments or flags (e.g. \`${shape.literals.join(" ")} --force …\`) and expects ask/judge/deny — a chained or unrelated command does not count`);
+  });
+  return failures;
 }
 
 function gate(): GateResult {
@@ -1029,6 +1138,7 @@ export async function evaluateGrant(candidate: unknown, ctx: GrantEvalContext): 
     sensitive: [],
     failures: [],
     namerCalls: 0,
+    probes: [],
   };
 
   // Gate 1: structure. Strict where config loading is tolerant: a grant with
@@ -1107,7 +1217,21 @@ export async function evaluateGrant(candidate: unknown, ctx: GrantEvalContext): 
     const which = directions.map((value, index) => (value === "widening" ? index + 1 : 0)).filter(Boolean).join(", ");
     fail(examples, `the grant widens policy (op${which.includes(",") ? "s" : ""} ${which}) but has no passing negative example — add at least one example whose expect excludes "allow" (e.g. the forced or chained form of the command it allows)`);
   }
+  for (const failure of ruleExampleFailures(grant, directions, examples.results, after)) fail(examples, failure);
   for (const result of critical.results) if (!result.ok) fail(critical, result.message);
+
+  // Probes: what each widening wildcard rule would also let through. A
+  // destructive one allowed — or a destructive flag in the flags list — makes
+  // the op sensitive: it needs its own toggle in the confirmation.
+  report.probes = probeRules(grant, directions, before, after, checkOptions);
+  grant.ops.forEach((op, opIndex) => {
+    const rule = ruleOf(op);
+    if (!rule) return;
+    const hits = report.probes.filter((probe) => probe.opIndex === opIndex && probe.newlyAllowed && probe.destructive).map((probe) => probe.command);
+    const listed = (rule.flags ?? []).filter((flag) => DESTRUCTIVE_PROBE_ARGS.includes(flag));
+    if (hits.length > 0) sensitive.push({ opIndex, kind: "allows-destructive-flag", reason: `\`${rule.template}\` would also allow ${hits.slice(0, 3).map((command) => `\`${command}\``).join(", ")}${hits.length > 3 ? ` and ${hits.length - 3} more` : ""}` });
+    else if (listed.length > 0) sensitive.push({ opIndex, kind: "allows-destructive-flag", reason: `\`${rule.template}\` lists ${listed.join(", ")} among its allowed flags` });
+  });
 
   // Gate 3: every existing grant's examples still pass.
   const regression = report.gates.regression;
@@ -1217,6 +1341,12 @@ export function formatGrantReport(report: GrantReport): string[] {
     if (diff.changes.length > 20 || diff.changesTruncated > 0) lines.push(`  … ${diff.changes.length - 20 + diff.changesTruncated} more`);
     lines.push("");
   }
+  const probed = probeSummaries(report, 20);
+  if (probed.length > 0) {
+    lines.push("## Probes: what each wildcard rule would also allow");
+    for (const probe of probed) lines.push(`  op ${probe.opIndex + 1} \`${probe.template}\`: ${probe.commands.map((command) => `\`${command}\``).join(", ")}${probe.more > 0 ? ` (+${probe.more} more)` : ""}`);
+    lines.push("");
+  }
   if (report.sensitive.length > 0) {
     lines.push("## Sensitive ops (each needs its own approval in the rail's dialog)");
     for (const item of report.sensitive) lines.push(`  op ${item.opIndex + 1}: ${item.reason}`);
@@ -1247,6 +1377,9 @@ export function confirmationLines(report: GrantReport): string[] {
         : result.outcome === "indeterminate" ? "needs the namer" : result.outcome;
       lines.push(`  ${mark} \`${result.subject}\` → ${got} (expect ${result.expect.join("|")})`);
     }
+  }
+  for (const probe of probeSummaries(report)) {
+    lines.push(`  op ${probe.opIndex + 1} also allows: ${probe.commands.map((command) => `\`${command}\``).join(", ")}${probe.more > 0 ? ` (+${probe.more} more)` : ""}`);
   }
   if (report.summary) lines.push(`Corpus: ${report.summary}`);
   if (report.corpus && report.corpus.deniedBecomeAllow.length > 0) lines.push(`  ${report.corpus.deniedBecomeAllow.length} action${report.corpus.deniedBecomeAllow.length === 1 ? "" : "s"} you denied would now be allowed`);

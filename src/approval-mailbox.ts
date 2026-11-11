@@ -59,7 +59,16 @@ export interface ForwardedAskMeta {
   access?: AccessKind;
   path?: string;
   labels?: string[];
+  /**
+   * The command under review (bash asks). Optional and additive to the
+   * protocol: the parent uses it only to seed "Allow, and generalise…" — the
+   * configurator then treats it as data, like any decision record.
+   */
+  command?: string;
 }
+
+/** Longest command a request carries for the generalise seed. */
+const SEED_COMMAND_CHARS = 4000;
 
 export type ForwardFailure = "no-mailbox" | "parent-gone" | "rejected" | "cancelled";
 
@@ -185,6 +194,7 @@ export async function forwardAskToParent(params: {
       ...(params.meta.access ? { access: params.meta.access } : {}),
       ...(params.meta.path ? { path: textPrefix(params.meta.path, 1024) } : {}),
       ...(params.meta.labels ? { labels: params.meta.labels.slice(0, 16).map((label) => textPrefix(label, 64)) } : {}),
+      ...(params.meta.command ? { command: textPrefix(params.meta.command, SEED_COMMAND_CHARS) } : {}),
       title: textPrefix(params.title, 200),
       message: textPrefix(params.message, 8000),
     });
@@ -393,6 +403,8 @@ interface ParsedRequest {
   from: string;
   title: string;
   message: string;
+  /** The child's action, for "Allow, and generalise…": the tool and its command or path. */
+  seed?: { tool: string; input: Record<string, unknown> };
 }
 
 async function serviceRequests(params: { dir: string; token: string; state: RuntimeState; ask: RailAsk }): Promise<void> {
@@ -482,6 +494,10 @@ async function serviceOne(
     onCancelHandle: (fn) => {
       cancel = fn;
     },
+    // Still this session's user answering, so the generalise answer is
+    // offered; the grant it leads to applies to THIS (parent) session's layer.
+    // A child picks it up only once it is saved to a config file.
+    ...(parsed.seed ? { generaliseSeed: parsed.seed } : {}),
   };
   // Auto-resolve the dialog if the child dies while it is open, so a moot
   // question cannot block live children queued behind it.
@@ -567,10 +583,16 @@ function parseRequest(file: string, token: string): ParsedRequest | "unreadable"
     ? `subagent ${agent}${runId ? ` (run ${runId.slice(0, 8)})` : ""}`
     : `pi child${childPid ? ` (pid ${childPid})` : ""}`;
   const toolName = typeof parsed.toolName === "string" ? sanitizeForDialog(textPrefix(parsed.toolName, 128)) : "tool";
+  const seed = typeof parsed.command === "string" && parsed.command
+    ? { tool: toolName, input: { command: textPrefix(parsed.command, SEED_COMMAND_CHARS) } }
+    : typeof parsed.path === "string" && parsed.path
+      ? { tool: toolName, input: { path: textPrefix(parsed.path, 1024) } }
+      : undefined;
   return {
     requestId: parsed.requestId,
     childPid,
     toolName,
+    ...(seed ? { seed } : {}),
     from,
     title: `Rail approval — ${from}`,
     message: `From ${from}, ${toolName} in a headless child:\n\n${sanitizeForDialog(textPrefix(parsed.message, 8000))}`,

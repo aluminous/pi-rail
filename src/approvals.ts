@@ -7,12 +7,26 @@ import { textPrefix } from "./util.ts";
 export type { RailApprovalAnswer } from "./tui/approval-dialog.ts";
 
 const OPTION_LABELS = ["Allow", "Allow with comment", "Deny", "Deny with comment"] as const;
+const GENERALISE_LABEL = "Allow, and generalise…";
+
+/** The action an "Allow, and generalise…" answer seeds the grant configurator with. */
+export interface GeneraliseSeed {
+  tool: string;
+  input: Record<string, unknown>;
+}
 
 /** How the dialog is presented; set by the mailbox servicer for background-popped dialogs. */
 export interface AskPresentationOptions {
   defaultDeny?: boolean;
   inputGraceMs?: number;
   onCancelHandle?: (cancel: () => void) => void;
+  /**
+   * The action under review. Given (and with the configurator wired, see
+   * RuntimeState.startGeneralise), the dialog offers "Allow, and generalise…",
+   * which approves exactly like Allow and then starts the configurator seeded
+   * with it — after the dialog returns, so the tool call is not held up.
+   */
+  generaliseSeed?: GeneraliseSeed;
 }
 
 export interface AskOptions extends AskPresentationOptions {
@@ -42,7 +56,7 @@ export type RailAsk = typeof askRailApproval;
  * fight over the editor area. Lives on RuntimeState (not module scope) so a
  * session reset or a test fixture starts with a clean queue.
  */
-async function withDialogLock<T>(state: RuntimeState, fn: () => Promise<T>): Promise<T> {
+export async function withDialogLock<T>(state: RuntimeState, fn: () => Promise<T>): Promise<T> {
   const run = state.dialogQueue.then(fn, fn);
   state.dialogQueue = run.then(
     () => undefined,
@@ -129,6 +143,18 @@ export async function askRailApproval(
     const answer = await withBlockedSignal(state, blockedLabel(title, options), () =>
       withDialogLock(state, () => presentDialog(ctx, state, title, message, options)),
     );
+    // The user's own answer in the rail's own dialog is the only thing that
+    // starts the configurator from an approval. It runs on a later tick, after
+    // the dialog lock is released and the caller has let the tool call go.
+    const seed = options.generaliseSeed;
+    const start = state.startGeneralise;
+    if (answer.approved && answer.generalise && seed && start) {
+      setTimeout(() => {
+        Promise.resolve()
+          .then(() => start(ctx, seed))
+          .catch(() => undefined);
+      }, 0);
+    }
     return { kind: "answered", answer, forwarded: false };
   }
   if (options.forwardMeta) {
@@ -146,6 +172,7 @@ async function presentDialog(
   message: string,
   options: AskPresentationOptions,
 ): Promise<RailApprovalAnswer> {
+  const offerGeneralise = !!options.generaliseSeed && !!state.startGeneralise;
   if (ctx.mode === "tui") {
     // The status/policy panel and this dialog share the editor area; close the
     // panel first so the two non-overlay customs never fight over it.
@@ -161,16 +188,19 @@ async function presentDialog(
           defaultDeny: options.defaultDeny,
           inputGraceMs: options.inputGraceMs,
           onCancelHandle: options.onCancelHandle,
+          offerGeneralise,
         }),
     );
     return answer ?? { approved: false };
   }
   // RPC clients answer per-request by id, and get no cancel handle: a
   // forwarded ask serviced by an RPC parent stays open until answered.
-  const picked = await ctx.ui.select(`${title}\n\n${message}`, [...OPTION_LABELS]);
+  const labels: string[] = offerGeneralise ? [OPTION_LABELS[0], OPTION_LABELS[1], GENERALISE_LABEL, OPTION_LABELS[2], OPTION_LABELS[3]] : [...OPTION_LABELS];
+  const picked = await ctx.ui.select(`${title}\n\n${message}`, labels);
   // A dismissed select is the RPC form of Escape: stop the turn, don't deny.
   if (picked === undefined) return { approved: false, cancelled: true };
   if (picked === "Allow") return { approved: true };
+  if (picked === GENERALISE_LABEL) return { approved: true, generalise: true };
   if (picked === "Allow with comment" || picked === "Deny with comment") {
     const comment = (await ctx.ui.input("Comment for the rail (kept as session guidance)"))?.trim();
     return { approved: picked === "Allow with comment", comment: comment || undefined };

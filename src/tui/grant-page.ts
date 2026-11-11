@@ -41,6 +41,11 @@ export interface GrantConfirmParams {
   /** Whether a trusted project config dir exists, for the project answer. */
   projectAvailable: boolean;
   /**
+   * Lines shown above the report — the configurator's rationale for a grant it
+   * proposed. Display only: nothing in them approves anything.
+   */
+  preface?: string[];
+  /**
    * Applies the grant with the approved sensitive ops (indexes into the
    * grant's ops); returns an error to keep the panel open and show it — e.g.
    * the grant fails its gates once unapproved sensitive ops are dropped.
@@ -101,9 +106,10 @@ export class GrantConfirmPage extends Container {
     const report = this.params.report;
     this.body.clear();
     this.body.addChild(new Text(theme.fg("accent", theme.bold(`Rail grant · ${report.ok ? "passes its gates" : "rejected"}`)), 0, 0));
+    for (const line of this.params.preface ?? []) this.body.addChild(new Text(theme.fg("muted", line), 0, 0));
     const lines = confirmationLines(report);
     const rows = this.groups.length + this.answers.length;
-    const room = Math.max(6, this.params.tui.terminal.rows - rows - 10);
+    const room = Math.max(6, this.params.tui.terminal.rows - rows - 10 - (this.params.preface?.length ?? 0));
     for (const line of lines.slice(0, room)) this.body.addChild(new Text(line.startsWith("✗") ? theme.fg("error", line) : line, 0, 0));
     if (lines.length > room) this.body.addChild(new Text(theme.fg("muted", `  … ${lines.length - room} more lines — /rail grant check <file> prints the full report`), 0, 0));
     if (!report.ok) this.body.addChild(new Text(theme.fg("warning", "  This grant cannot be applied: fix what failed above and run /rail grant add again."), 0, 0));

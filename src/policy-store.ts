@@ -684,6 +684,7 @@ export function compileConfigLayer(rawConfig: Partial<RailConfig>, name: FileLay
     if (typeof classifier.enabled === "boolean") next.enabled = classifier.enabled;
     if (typeof classifier.model === "string" && classifier.model.trim()) next.model = classifier.model.trim();
     if (typeof classifier.judgeModel === "string" && classifier.judgeModel.trim()) next.judgeModel = classifier.judgeModel.trim();
+    if (typeof classifier.grantModel === "string" && classifier.grantModel.trim()) next.grantModel = classifier.grantModel.trim();
     if (typeof classifier.timeoutMs === "number" && Number.isFinite(classifier.timeoutMs) && classifier.timeoutMs > 0) {
       next.timeoutMs = Math.floor(classifier.timeoutMs);
     } else if (classifier.timeoutMs !== undefined) {

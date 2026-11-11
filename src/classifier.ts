@@ -30,7 +30,7 @@ import {
   type JudgeResult,
   type NamerResult,
 } from "./classifier-protocol.ts";
-import { resolveAutoClassifierModel } from "./classifier-models.ts";
+import { resolveAutoClassifierModel, resolveAutoGrantModel } from "./classifier-models.ts";
 import { screenLexiconSummary } from "./content-screen.ts";
 import { IdleTimeoutError, streamingComplete } from "./streaming-complete.ts";
 import { formatError, textPrefix } from "./util.ts";
@@ -151,11 +151,25 @@ export function resolveJudgeModel(ctx: ExtensionContext, config: ResolvedRailCon
   return resolveModelSpec(ctx, judgeModelSpec(config, state));
 }
 
-function resolveModelSpec(ctx: ExtensionContext, spec: string): Model<Api> | undefined {
+/**
+ * The grant configurator's model (`classifier.grantModel`, same grammar).
+ * "auto" reads its own known-good list (AUTO_GRANT_MODEL_PREFERENCES), not the
+ * namer's: writing policy is a different job from labelling one action, and a
+ * model earns that list only through eval/grant-run.ts.
+ */
+export function resolveGrantModel(ctx: ExtensionContext, config: ResolvedRailConfig): Model<Api> | undefined {
+  return resolveModelSpec(ctx, config.classifier.grantModel, resolveAutoGrantModel);
+}
+
+function resolveModelSpec(
+  ctx: ExtensionContext,
+  spec: string,
+  auto: (available: Model<Api>[]) => Model<Api> | undefined = resolveAutoClassifierModel,
+): Model<Api> | undefined {
   if (spec === "auto") {
     // Best known-good model among those with configured auth; falls back to
     // the session's current model when none of the preferences is available.
-    return resolveAutoClassifierModel(ctx.modelRegistry.getAvailable()) ?? currentModel(ctx);
+    return auto(ctx.modelRegistry.getAvailable()) ?? currentModel(ctx);
   }
   if (spec === "current") return currentModel(ctx);
   const slash = spec.indexOf("/");
@@ -354,7 +368,7 @@ async function completeText<T>(params: {
  * is the one field a provider may not report at all; carrying it through as an
  * optional keeps "unpriced" distinguishable from "free" in the per-model view.
  */
-function toClassifierUsage(usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } | undefined): ClassifierTokenUsage | undefined {
+export function toClassifierUsage(usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } | undefined): ClassifierTokenUsage | undefined {
   if (!usage) return undefined;
   const cost = usage.cost?.total;
   return {

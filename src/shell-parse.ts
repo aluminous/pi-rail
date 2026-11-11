@@ -13,6 +13,12 @@ export type WordPart = { kind: "literal"; text: string } | { kind: "expansion"; 
 
 export interface ShellWord {
   parts: WordPart[];
+  /**
+   * Set when the word holds an UNQUOTED glob or brace character (`*`, `?`,
+   * `[`, `{`): the shell may expand it into words this parser never saw — a
+   * file named `--force`, say. Quoted and backslash-escaped ones do not count.
+   */
+  glob?: true;
 }
 
 export type RedirectOp = ">" | ">>" | "<" | "<>" | ">&" | "<&" | "&>" | "&>>";
@@ -79,7 +85,7 @@ type ChainOp = "&&" | "||" | ";" | "|" | "&" | "\n" | "(" | ")";
 type Token =
   | { kind: "op"; op: ChainOp }
   | { kind: "redirect"; fd?: number; op: RedirectOp }
-  | { kind: "word"; parts: WordPart[]; assignment?: Assignment };
+  | { kind: "word"; parts: WordPart[]; assignment?: Assignment; glob?: true };
 
 const ASSIGNMENT_PREFIX = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 /** Parameter expansions of the $X form: names, positionals, and special parameters. */
@@ -157,9 +163,12 @@ function tokenize(input: string): Token[] {
   /** Unquoted literal text since word start, frozen at the first quote/escape/expansion; used to recognize NAME= assignments. */
   let unquotedPrefix = "";
   let prefixFrozen = false;
+  /** An unquoted glob/brace character in this word (see ShellWord.glob). */
+  let glob = false;
 
   const appendLiteral = (text: string, quoted: boolean) => {
     building = true;
+    if (!quoted && /[*?[{]/.test(text)) glob = true;
     if (quoted) prefixFrozen = true;
     else if (!prefixFrozen) unquotedPrefix += text;
     const last = parts.at(-1);
@@ -174,7 +183,7 @@ function tokenize(input: string): Token[] {
   const endWord = () => {
     if (building) {
       const match = ASSIGNMENT_PREFIX.exec(unquotedPrefix);
-      const token: Token = { kind: "word", parts };
+      const token: Token = { kind: "word", parts, ...(glob ? { glob: true as const } : {}) };
       if (match) token.assignment = { name: match[1]!, value: { parts: stripLiteralPrefix(parts, match[0].length) } };
       tokens.push(token);
     }
@@ -182,6 +191,7 @@ function tokenize(input: string): Token[] {
     building = false;
     unquotedPrefix = "";
     prefixFrozen = false;
+    glob = false;
   };
   const pushOp = (op: ChainOp, width: number) => {
     endWord();
@@ -448,7 +458,7 @@ function parseScript(tokens: Token[]): ShellScript {
       if (token?.kind === "word") {
         pos++;
         if (argv.length === 0 && token.assignment) assignments.push(token.assignment);
-        else argv.push({ parts: token.parts });
+        else argv.push({ parts: token.parts, ...(token.glob ? { glob: true as const } : {}) });
         sawAny = true;
         continue;
       }

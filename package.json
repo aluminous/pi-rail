@@ -31,6 +31,7 @@
     "test:tui": "node --test test-integration/tui.ts",
     "test:keychain": "node --test test-integration/keychain.ts",
     "eval": "node eval/run.ts",
+    "eval:grant": "node eval/grant-run.ts",
     "telemetry": "node eval/session-stats.ts"
   },
   "pi": {

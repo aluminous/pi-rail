@@ -40,3 +40,28 @@ export function resolveAutoClassifierModel<M extends { provider: string; id: str
   }
   return undefined;
 }
+
+/**
+ * Known-good models for the grant configurator (`classifier.grantModel:
+ * "auto"`), in preference order.
+ *
+ * Entries are added only from measured results in eval/GRANT_RESULTS.md
+ * (`npm run eval:grant`), under the same exclusion rule the namer list
+ * follows: a model that passed the current gates with a grant violating a
+ * "must not allow" or injection property is never listed. When no listed
+ * model has configured auth, "auto" falls back to the session's current
+ * model.
+ *
+ * claude-sonnet-5: 12/13 with no violations (2026-11-12). claude-haiku-4-5 is
+ * deliberately absent: it listed `--force` in a worktree rule's flags.
+ */
+export const AUTO_GRANT_MODEL_PREFERENCES: AutoModelPreference[] = [{ provider: "anthropic", id: "claude-sonnet-5" }];
+
+/** Picks the highest-preference configurator model present in `available`; undefined while the list is empty. */
+export function resolveAutoGrantModel<M extends { provider: string; id: string }>(available: M[], preferences: readonly AutoModelPreference[] = AUTO_GRANT_MODEL_PREFERENCES): M | undefined {
+  for (const pref of preferences) {
+    const match = available.find((model) => model.provider === pref.provider && model.id === pref.id);
+    if (match) return match;
+  }
+  return undefined;
+}

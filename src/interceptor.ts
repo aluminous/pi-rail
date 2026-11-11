@@ -237,6 +237,7 @@ async function askPathApproval(params: {
     {
       forwardMeta: { toolName: params.toolName, site: "path", access: params.kind, path: params.path },
       signal: params.ctx.signal,
+      generaliseSeed: { tool: params.toolName, input: params.input },
     },
   );
   if (outcome.kind === "unanswerable") {
@@ -265,7 +266,7 @@ async function askPathApproval(params: {
   if (answer.comment) {
     addSessionGuidance(params.state.classifier, answer.approved ? "allowed" : "denied", params.toolName, `${params.kind} ${params.path}`, answer.comment);
   }
-  addTraceStage(params.trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"} ${params.kind} ${params.path}${answer.comment ? " with a comment" : ""}${via}`);
+  addTraceStage(params.trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"} ${params.kind} ${params.path}${answer.comment ? " with a comment" : ""}${answer.generalise ? ", and asked to generalise" : ""}${via}`);
   appendRailTelemetry(params.state, {
     kind: "approval",
     tool: params.toolName,
@@ -946,8 +947,14 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
     judge ? "Rail judge asks for approval" : "Rail asks for approval",
     `${subject}\n\n${capabilityLine}\n\n${explanation}${evidenceLine}\n\nAllow?`,
     {
-      forwardMeta: { toolName: event.toolName, site: "capability", labels: resolution.labels },
+      forwardMeta: {
+        toolName: event.toolName,
+        site: "capability",
+        labels: resolution.labels,
+        ...(event.toolName === "bash" && typeof (event.input as Record<string, unknown>).command === "string" ? { command: (event.input as Record<string, unknown>).command as string } : {}),
+      },
       signal: ctx.signal,
+      generaliseSeed: { tool: event.toolName, input: event.input as Record<string, unknown> },
     },
   );
   if (outcome.kind === "unanswerable") {
@@ -971,7 +978,10 @@ async function enforceCapabilities(params: EnforceParams): Promise<ToolCallBlock
   if (answer.comment) {
     addSessionGuidance(state.classifier, answer.approved ? "allowed" : "denied", event.toolName, guidanceSubject, answer.comment);
   }
-  addTraceStage(trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"}${answer.comment ? " with a comment" : ""}${via}`);
+  // "Allow, and generalise…" is a plain approval here — telemetry, the corpus
+  // and session replay record userAnswer "approved" — so replay is unaffected;
+  // only the trace notes that the configurator was started from it.
+  addTraceStage(trace, "ask", answer.approved ? "approved" : "denied", `user ${answer.approved ? "approved" : "denied"}${answer.comment ? " with a comment" : ""}${answer.generalise ? ", and asked to generalise" : ""}${via}`);
   if (answer.approved) {
     return finish({ decision: "allow", outcome: judge ? "judge-ask" : "ask-approved", userAnswer: "approved", userComment: answer.comment, forwarded: forwarded || undefined });
   }

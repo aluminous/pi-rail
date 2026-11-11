@@ -13,7 +13,7 @@ import type { EffectivePolicy } from "./backends/types.ts";
 import { capabilityRegistry, getEffectiveDisposition, usedCapabilityStats, type CapabilityStats } from "./capabilities.ts";
 import { classifierEnabled, judgeModelSpec } from "./classifier.ts";
 import { configSourceLabel, type ProvenanceListKey, type ResolvedRailConfig } from "./config.ts";
-import { describeFlags, outrankedRules, type CommandRule } from "./command-allowlist.ts";
+import { DEFAULT_COMMAND_ALLOW_FLAGS, describeFlags, outrankedRules, type CommandRule } from "./command-allowlist.ts";
 import { commandRulesOf, effectiveDispositionLabel, provenanceLabel, withSessionLayer, type Provenance } from "./policy-store.ts";
 import { getPersistentConfigPath } from "./persistent-settings.ts";
 import { resolveConfigPath } from "./policy.ts";
@@ -542,7 +542,10 @@ function listSection(view: StatusView, title: string, listKey: ProvenanceListKey
  * decide anything does not read as if it did.
  */
 function ruleEntry(rule: CommandRule, outranked: ReturnType<typeof outrankedRules>): string {
-  const flags = rule.flags ? ` [flags: ${describeFlags(rule.flags)}]` : "";
+  // A built-in's own audited allowlist is long; name it rather than print it.
+  const builtinFlags = rule.source === "allow" ? DEFAULT_COMMAND_ALLOW_FLAGS[rule.template] : undefined;
+  const isBuiltinSet = !!rule.flags && !!builtinFlags && rule.flags.length === builtinFlags.length && rule.flags.every((flag) => builtinFlags.includes(flag));
+  const flags = rule.flags ? ` [flags: ${isBuiltinSet ? `built-in read-only set, ${rule.flags.length}` : describeFlags(rule.flags)}]` : "";
   const target = rule.source === "classify" ? ` → ${rule.capability}` : "";
   const loser = outranked.get(rule);
   const note = loser ? ` (outranked by ${loser.source === "classify" ? "classify rule" : "rule"} → ${loser.capability}: ${loser.reason})` : "";

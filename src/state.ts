@@ -28,8 +28,11 @@ export interface RailEvent {
   reason: string;
 }
 
-/** Which reviewer made a model call: the cheap namer, or the judge the table escalates to. */
-export type ReviewerRole = "namer" | "judge";
+/**
+ * Which rail model seat made a call: the cheap namer, the judge the table
+ * escalates to, or the grant configurator (`/rail grant <text>`).
+ */
+export type ReviewerRole = "namer" | "judge" | "configurator";
 
 /**
  * Token, dollar, and latency accounting for one model in one reviewer role.
@@ -267,6 +270,16 @@ export interface RuntimeState {
    * `grant` field it would read is telemetry detail (absent with telemetry off).
    */
   grantDecisions: Record<string, number>;
+  /**
+   * Starts the grant configurator seeded with an action the user just
+   * approved ("Allow, and generalise…"). Wired once by the /rail command
+   * (src/commands/rail.ts); called only from the approval dialog's own answer
+   * (src/approvals.ts), never from anything the session model can reach.
+   * Process-lifetime: resetSessionState leaves it alone.
+   */
+  startGeneralise?: (ctx: ExtensionContext, seed: { tool: string; input: Record<string, unknown> }) => void | Promise<void>;
+  /** The configurator run in flight, if any (one at a time); `/rail grant cancel` aborts it. */
+  grantAgentRun?: { request: string; abort(): void };
 }
 
 export function createRailStats(): RailStats {
@@ -356,6 +369,8 @@ export function resetSessionState(state: RuntimeState): void {
   state.subagentAckWarned = new Set();
   state.dialogQueue = Promise.resolve();
   state.grantDecisions = {};
+  state.grantAgentRun?.abort();
+  state.grantAgentRun = undefined;
 }
 
 /**
@@ -492,7 +507,7 @@ export function recordModelCall(
 
 /** Per-model rows in a stable order: namer before judge, then busiest first. */
 export function modelUsageRows(stats: RailStats): ModelUsageStats[] {
-  const roleOrder: Record<ReviewerRole, number> = { namer: 0, judge: 1 };
+  const roleOrder: Record<ReviewerRole, number> = { namer: 0, judge: 1, configurator: 2 };
   return Object.values(stats.modelUsage).sort(
     (a, b) => roleOrder[a.role] - roleOrder[b.role] || b.calls - a.calls || a.model.localeCompare(b.model),
   );

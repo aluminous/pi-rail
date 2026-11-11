@@ -385,7 +385,7 @@ describe("evaluateGrant gates", () => {
       assert.equal(report.ok, true, report.failures.join("\n"));
       assert.equal(report.widening, true);
       assert.deepEqual(report.sensitive, []);
-      assert.deepEqual(report.gates.examples.results.map((result) => result.verdict), ["pass", "pass", "outside-grant", "outside-grant"]);
+      assert.deepEqual(report.gates.examples.results.map((result) => result.verdict), ["pass", "pass", "outside-grant", "outside-grant", "outside-grant"]);
       assert.ok(report.assumptions.some((line) => /Seatbelt is assumed enforcing/.test(line)));
       assert.doesNotThrow(() => JSON.parse(JSON.stringify(report)), "the report is plain data");
     }
@@ -415,7 +415,7 @@ describe("evaluateGrant gates", () => {
     const wrong = { ...WORKTREE_GRANT, examples: [...WORKTREE_GRANT.examples!, { tool: "bash", input: { command: "git worktree remove ../y" }, expect: ["deny" as const] }] };
     const report = await evaluateGrant(wrong, evalContext());
     assert.equal(report.ok, false);
-    assert.match(report.gates.examples.failures.join("\n"), /example 5 \(`git worktree remove \.\.\/y`\): expected deny, got allow/);
+    assert.match(report.gates.examples.failures.join("\n"), /example 6 \(`git worktree remove \.\.\/y`\): expected deny, got allow/);
   });
 
   it("gate 2 fails a positive example only the namer would decide", async () => {

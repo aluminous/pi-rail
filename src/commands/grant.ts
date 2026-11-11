@@ -1,5 +1,7 @@
-// /rail grant add <file>, /rail grant check <file>, and /rail grants: grants by
-// hand (GRANTS_PLAN phase 3). A grant file is evaluated by the gates
+// /rail grant add <file>, /rail grant check <file>, /rail grants: grants by
+// hand (GRANTS_PLAN phase 3); and /rail grant <free text> plus the approval
+// dialog's "Allow, and generalise…": the configurator agent (phase 5), whose
+// proposal goes through exactly the same confirmation. A grant file is evaluated by the gates
 // (src/grant-eval.ts) against the live session; `check` prints the report and
 // changes nothing, `add` opens the confirmation, and `grants` lists every named
 // grant with revoke / promote / demote.
@@ -13,9 +15,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { EVAL_CASES } from "../../eval/cases.ts";
-import { classifierEnabled } from "../classifier.ts";
+import { withDialogLock, type GeneraliseSeed } from "../approvals.ts";
+import { classifierEnabled, modelSpec, resolveGrantModel, type CompleteFn } from "../classifier.ts";
+import { DEFAULT_GRANT_AGENT_LIMITS, runGrantAgent, seedSubject, type GrantAgentLimits, type GrantAgentParams, type GrantAgentResult } from "../grant-agent.ts";
+import { streamingComplete } from "../streaming-complete.ts";
 import { globalRailConfigPath, loadConfig, loadPolicyLayers, projectRailConfigPath, type ResolvedRailConfig } from "../config.ts";
 import {
   confirmationLines,
@@ -32,7 +38,7 @@ import { addGrantToConfigFile, removeGrantFromConfigFile } from "../persistent-s
 import { SESSION_EDITS_GRANT_ID, type Grant, type GrantLayerName, type PolicyLayer } from "../policy-store.ts";
 import { readCorpus, type CorpusRecord } from "../replay-corpus.ts";
 import { addSessionGrant, demoteGrantToSession, promoteSessionGrant, reloadBaseConfig, revokeGrant, type GrantFileOps } from "../session-policy.ts";
-import type { RuntimeState } from "../state.ts";
+import { recordModelCall, type RuntimeState } from "../state.ts";
 import {
   GrantConfirmPage,
   GrantsPage,
@@ -45,7 +51,7 @@ import {
   type GrantRow,
 } from "../tui/grant-page.ts";
 import { pickFromList, type SelectItem } from "../tui/select-list.ts";
-import { formatError } from "../util.ts";
+import { formatError, textPrefix } from "../util.ts";
 
 export interface GrantCommandDeps {
   state: RuntimeState;
@@ -63,6 +69,12 @@ export interface GrantCommandDeps {
   /** Optional namer re-run hook for the gates (no production caller yet). */
   nameFn?: NameFn;
   today?: () => string;
+  /** The configurator's completion function; default pi-ai streaming with an idle timeout. */
+  complete?: CompleteFn;
+  /** Resolves the configurator's model; default classifier.grantModel via resolveGrantModel. */
+  resolveModel?: (ctx: ExtensionContext, config: ResolvedRailConfig) => Model<Api> | undefined;
+  /** Configurator limits (turns, tokens, wall clock). */
+  agentLimits?: Partial<GrantAgentLimits>;
 }
 
 /** A grant file as read: the raw object with `created` defaulted, or why it cannot be used. */
@@ -236,16 +248,26 @@ export function createGrantCommands(deps: GrantCommandDeps) {
       return;
     }
 
+    await confirm(ctx, report, records);
+  }
+
+  /**
+   * The confirmation — the one approval path for every grant, hand-written or
+   * proposed by the configurator: the docked panel in the TUI, a select flow
+   * over RPC. `preface` (the configurator's rationale) is display only.
+   */
+  async function confirm(ctx: ExtensionContext, report: GrantReport, records: readonly CorpusRecord[], preface: string[] = []): Promise<void> {
     const projectAvailable = projectConfigAvailable(ctx);
     const opened = showRailPanel(ctx, state, "grant", (host) => new GrantConfirmPage({
       ...host,
       report,
       projectAvailable,
+      preface,
       apply: (answer, approved) => apply(ctx, report, records, answer, approved),
       discard: () => notify(ctx, `Grant ${report.grant?.id ?? ""} discarded; nothing applied.`),
     }));
     if (opened) return;
-    await runConfirmSelect(ctx, report, records, projectAvailable);
+    await runConfirmSelect(ctx, report, records, projectAvailable, preface);
   }
 
   /**
@@ -253,8 +275,8 @@ export function createGrantCommands(deps: GrantCommandDeps) {
    * first, default answer drops it), then the answers. A pick is a deliberate
    * action in the rail's dialog, like the TUI toggle.
    */
-  async function runConfirmSelect(ctx: ExtensionContext, report: GrantReport, records: readonly CorpusRecord[], projectAvailable: boolean): Promise<void> {
-    const title = ["Rail grant", ...confirmationLines(report)].join("\n");
+  async function runConfirmSelect(ctx: ExtensionContext, report: GrantReport, records: readonly CorpusRecord[], projectAvailable: boolean, preface: string[] = []): Promise<void> {
+    const title = ["Rail grant", ...preface, ...confirmationLines(report)].join("\n");
     if (!report.ok) {
       showRailView(ctx, state, "report", () => formatGrantReport(report));
       notify(ctx, `Grant ${report.grant?.id ?? ""} rejected by its gates; nothing applied.`, "warning");
@@ -395,14 +417,202 @@ export function createGrantCommands(deps: GrantCommandDeps) {
     }
   }
 
-  /** `/rail grant <add|check> <file>`. */
+  // ── The configurator ────────────────────────────────────────────────────────
+
+  /** What the configurator was told and what it is doing, for the docked progress panel. */
+  interface AgentProgressView {
+    request: string;
+    seed?: string;
+    model: string;
+    turn: number;
+    maxTurns: number;
+    step: string;
+    steps: string[];
+  }
+
+  function progressLines(view: AgentProgressView): string[] {
+    return [
+      "# Rail configurator",
+      "",
+      `Request: ${view.request}`,
+      ...(view.seed ? [`Seeded with: ${textPrefix(view.seed, 200)}`] : []),
+      `Model: ${view.model}`,
+      "",
+      `turn ${view.turn}/${view.maxTurns} · ${view.step}`,
+      ...view.steps.slice(-8).map((line) => `  ${line}`),
+      "",
+      "It sees your request, the policy, past decisions and dry runs — never the conversation or file contents.",
+      "Nothing is applied without the confirmation. Esc hides this panel; /rail grant cancel stops the run.",
+    ];
+  }
+
+  function outcomeLines(result: Exclude<GrantAgentResult, { kind: "proposed" }>, request: string, model: string): string[] {
+    const head = result.kind === "declined" ? `# Rail configurator declined (${result.declineKind})` : "# Rail configurator stopped";
+    const body = result.kind === "declined"
+      ? [result.reason, ...(result.alternative ? ["", `Instead: ${result.alternative}`] : [])]
+      : [`Why: ${result.reason}`];
+    return [
+      head,
+      "",
+      `Request: ${request}`,
+      `Model: ${model} · ${plural(result.turns, "turn")} · ↑${result.usage.input} ↓${result.usage.output} tokens`,
+      "",
+      ...body,
+      "",
+      "Nothing was applied.",
+      "",
+      "## What it did",
+      ...(result.transcriptSummary.length > 0 ? result.transcriptSummary.map((line) => `  ${line}`) : ["  (no tool calls)"]),
+    ];
+  }
+
+  /**
+   * `/rail grant <free text>` and the generalise answer: runs the configurator
+   * (the main agent keeps streaming), then hands a proposal to the same
+   * confirmation `/rail grant add` uses. Needs a UI: a model-authored grant is
+   * never applied without that confirmation — not even a tightening one.
+   */
+  async function runAgent(request: string, ctx: ExtensionContext, seed?: GeneraliseSeed): Promise<void> {
+    const text = request.trim();
+    if (!text) {
+      notify(ctx, "Usage: /rail grant <what you want allowed, in your own words>", "warning");
+      return;
+    }
+    if (!ctx.hasUI) {
+      notify(ctx, "/rail grant <text> needs an interactive session: a grant the configurator proposes is applied only through the rail's confirmation dialog. Write a grant file and use /rail grant check <file> here instead.", "warning");
+      return;
+    }
+    if (state.grantAgentRun) {
+      notify(ctx, `The configurator is already working on "${textPrefix(state.grantAgentRun.request, 80)}". /rail grant cancel stops it.`, "warning");
+      return;
+    }
+    const base = effective(ctx);
+    const model = (deps.resolveModel ?? resolveGrantModel)(ctx, base);
+    if (!model) {
+      notify(ctx, `No configurator model: classifier.grantModel is "${base.classifier.grantModel}" and nothing resolves (select a pi model, or set classifier.grantModel to provider/id).`, "error");
+      return;
+    }
+    const spec = modelSpec(model);
+    let auth: NonNullable<GrantAgentParams["auth"]>;
+    try {
+      const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!resolved.ok || !resolved.apiKey) {
+        notify(ctx, resolved.ok ? `No API key for ${model.provider} (configurator model ${spec}).` : resolved.error, "error");
+        return;
+      }
+      auth = { apiKey: resolved.apiKey, ...(resolved.headers ? { headers: resolved.headers } : {}) };
+    } catch (error) {
+      notify(ctx, `Could not get credentials for ${spec}: ${formatError(error)}`, "error");
+      return;
+    }
+
+    const records = corpus();
+    const limits = { ...DEFAULT_GRANT_AGENT_LIMITS, ...deps.agentLimits };
+    const controller = new AbortController();
+    const run = { request: text, abort: () => controller.abort() };
+    state.grantAgentRun = run;
+    const view: AgentProgressView = { request: text, ...(seed ? { seed: seedSubject(seed) } : {}), model: spec, turn: 0, maxTurns: limits.maxTurns, step: "starting", steps: [] };
+    showRailView(ctx, state, "report", () => progressLines(view));
+    let result: GrantAgentResult;
+    try {
+      const context = evalContext(ctx, records);
+      result = await runGrantAgent({
+        request: text,
+        ...(seed ? { seedAction: seed } : {}),
+        config: context.base,
+        ...(context.session ? { session: context.session } : {}),
+        corpusRecords: records,
+        existingGrants: context.existingGrants,
+        evalCases: context.evalCases,
+        cwd: ctx.cwd,
+        classifierEnabled: context.classifierEnabled,
+        complete: deps.complete ?? streamingComplete({ idleTimeoutMs: Math.max(30_000, base.classifier.timeoutMs) }),
+        model,
+        auth,
+        limits,
+        signal: controller.signal,
+        today: today(),
+        onProgress: (progress) => {
+          view.turn = progress.turn;
+          view.step = progress.step;
+          if (progress.step !== "thinking") view.steps.push(`turn ${progress.turn}: ${progress.step}`);
+          state.liveView?.refresh();
+        },
+        onCall: (usage, latencyMs) => recordModelCall(state, { role: "configurator", model: spec, latencyMs, usage }),
+      });
+    } catch (error) {
+      result = { kind: "failed", reason: formatError(error), transcriptSummary: [], usage: { calls: 0, input: 0, output: 0 }, turns: view.turn };
+    } finally {
+      if (state.grantAgentRun === run) state.grantAgentRun = undefined;
+    }
+
+    if (result.kind !== "proposed") {
+      showRailView(ctx, state, "report", () => outcomeLines(result, text, spec));
+      notify(ctx, result.kind === "declined" ? `Rail configurator declined: ${textPrefix(result.reason, 160)}` : `Rail configurator stopped (${result.reason}); nothing applied.`, result.kind === "declined" ? "info" : "warning");
+      return;
+    }
+    // The gates again, by code, against the policy as it is now — it may have
+    // moved while the agent worked — before anything is shown.
+    const fresh = await evaluateGrant(result.grant, evalContext(ctx, corpus()));
+    const preface = [
+      `Proposed by the configurator (${spec}, rung ${result.rung}, ${plural(result.turns, "turn")}):`,
+      ...result.rationale.split("\n").map((line) => `  ${line}`),
+      "Nothing it wrote approves anything: sensitive ops below are off until you toggle them.",
+    ];
+    await confirm(ctx, fresh, records, preface);
+  }
+
+  /**
+   * "Allow, and generalise…": the action was already approved and has run (or
+   * is running); this asks once for the request text, prefilled, then starts
+   * the configurator seeded with the action.
+   */
+  async function generalise(ctx: ExtensionContext, seed: GeneraliseSeed): Promise<void> {
+    if (!ctx.hasUI) return;
+    const subject = seedSubject(seed);
+    const edited = await withDialogLock(state, async () => {
+      if (ctx.mode === "tui") state.liveView?.close();
+      return ctx.ui.editor("Rail: what should the rail allow from now on? (edit, then submit; empty cancels)", `allow things like this: ${subject}`);
+    });
+    const request = edited?.trim();
+    if (!request) {
+      notify(ctx, "Generalise cancelled; the action was approved once, nothing else changed.");
+      return;
+    }
+    await runAgent(request, ctx, seed);
+  }
+
+  /** The latest configurator run started from `/rail grant <text>` (tests await it). */
+  let inflight: Promise<void> = Promise.resolve();
+
+  /** `/rail grant cancel`: stops the configurator run in flight. */
+  function cancelAgent(ctx: ExtensionContext): void {
+    const run = state.grantAgentRun;
+    if (!run) {
+      notify(ctx, "No configurator run in flight.");
+      return;
+    }
+    run.abort();
+    notify(ctx, `Stopping the configurator ("${textPrefix(run.request, 80)}"); nothing will be applied.`);
+  }
+
+  /** `/rail grant <add|check> <file>`, `/rail grant cancel`, and `/rail grant <free text>`. */
   async function runGrant(args: string, ctx: ExtensionContext): Promise<void> {
-    const [sub = "", ...rest] = args.trim().split(/\s+/);
+    const trimmed = args.trim();
+    const [sub = "", ...rest] = trimmed.split(/\s+/);
     const file = rest.join(" ");
     if (sub === "add") return runAdd(file, ctx);
     if (sub === "check") return runCheck(file, ctx);
-    notify(ctx, "Usage: /rail grant add <file> | /rail grant check <file> — /rail grants lists them", "warning");
+    if (trimmed === "cancel") return cancelAgent(ctx);
+    if (trimmed) {
+      // Not awaited: the command returns at once and the run reports through
+      // its docked panel, so typing and the main agent are never held up.
+      const pending = runAgent(trimmed, ctx).catch((error: unknown) => notify(ctx, `Rail configurator failed: ${formatError(error)}`, "error"));
+      inflight = Promise.all([inflight, pending]).then(() => undefined);
+      return;
+    }
+    notify(ctx, "Usage: /rail grant <what you want, in your own words> | /rail grant add <file> | /rail grant check <file> | /rail grant cancel — /rail grants lists them", "warning");
   }
 
-  return { runGrant, openGrants, grantRows };
+  return { runGrant, openGrants, grantRows, generalise, agentSettled: () => inflight };
 }
