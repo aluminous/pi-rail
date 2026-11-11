@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import type { Api, AssistantMessage, Context, Model, ToolResultMessage } from "@earendil-works/pi-ai/compat";
+import type { Api, AssistantMessage, Context, Model, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai/compat";
 import { EVAL_CASES } from "../eval/cases.ts";
 import type { CompleteFn } from "../src/classifier.ts";
 import { GRANT_AGENT_PITFALLS, GRANT_AGENT_SYSTEM_PROMPT } from "../src/grant-agent-prompt.ts";
@@ -23,6 +23,9 @@ const WORKTREE: Grant = JSON.parse(readFileSync(new URL("../examples/grants/work
 const CANDIDATE = { id: WORKTREE.id, ops: WORKTREE.ops, examples: WORKTREE.examples };
 const POSITIVE_ONLY = { ...CANDIDATE, examples: WORKTREE.examples!.filter((example) => example.expect.includes("allow")) };
 
+// `args` stays loose: fixtures stand in for whatever a provider sends,
+// malformed included. ToolCall["arguments"] is Record<string, any> in pi-ai
+// 0.84 and JsonObject later; the assertion below is valid against both.
 type Call = { name: string; args: Record<string, unknown> };
 type Step = Call[] | string | ((context: Context, signal?: AbortSignal) => Promise<AssistantMessage> | AssistantMessage);
 
@@ -32,7 +35,7 @@ function assistant(content: Call[] | string, output = 50): AssistantMessage {
     role: "assistant",
     content: typeof content === "string"
       ? [{ type: "text", text: content }]
-      : content.map((call) => ({ type: "toolCall" as const, id: `call-${++callIds}`, name: call.name, arguments: call.args })),
+      : content.map((call) => ({ type: "toolCall" as const, id: `call-${++callIds}`, name: call.name, arguments: call.args as ToolCall["arguments"] })),
     api: "anthropic-messages",
     provider: "test",
     model: "fake",
@@ -419,10 +422,11 @@ describe("classifier.grantModel", () => {
     const { resolveGrantModel } = await import("../src/classifier.ts");
     const { compileConfigLayer } = await import("../src/policy-store.ts");
     assert.equal(testConfig().classifier.grantModel, "auto");
-    assert.deepEqual(AUTO_GRANT_MODEL_PREFERENCES, [{ provider: "anthropic", id: "claude-sonnet-5" }]);
+    assert.deepEqual(AUTO_GRANT_MODEL_PREFERENCES.map((m) => m.id), ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5"]);
     assert.equal(compileConfigLayer({ classifier: { grantModel: "anthropic/claude-sonnet-5" } }, "global", "rail.json").settings.classifier?.grantModel, "anthropic/claude-sonnet-5");
     const available = [{ provider: "anthropic", id: "claude-haiku-4-5" }];
     assert.equal(resolveAutoGrantModel(available), undefined);
+    assert.deepEqual(resolveAutoGrantModel([...available, { provider: "anthropic", id: "claude-haiku-5-5" }]), { provider: "anthropic", id: "claude-haiku-5-5" });
     assert.equal(resolveAutoGrantModel(available, [{ provider: "anthropic", id: "claude-haiku-4-5" }]), available[0]);
     const current = { provider: "openai", id: "gpt-5.4" };
     const ctx = { model: current, modelRegistry: { getAvailable: () => available, find: (p: string, id: string) => ({ provider: p, id }) } };

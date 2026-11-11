@@ -512,7 +512,8 @@ describe("DispositionPage class editing", () => {
     page.handleInput("e");
     // Narrow enough that read-project's paragraph must wrap several times.
     const lines = page.render(60);
-    const rules = lines.filter((line) => line.includes("<borderMuted>─</borderMuted>"));
+    // Older pi-tui colours each rule cell, newer ones the whole run.
+    const rules = lines.filter((line) => /<borderMuted>─+<\/borderMuted>/.test(line));
     assert.equal(rules.length, 2, "the editor draws the chat input's rules above and below");
     // The two rule lines render identically, so find them from opposite ends.
     const top = lines.indexOf(rules[0]!);

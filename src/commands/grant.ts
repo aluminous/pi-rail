@@ -526,7 +526,10 @@ export function createGrantCommands(deps: GrantCommandDeps) {
         evalCases: context.evalCases,
         cwd: ctx.cwd,
         classifierEnabled: context.classifierEnabled,
-        complete: deps.complete ?? streamingComplete({ idleTimeoutMs: Math.max(30_000, base.classifier.timeoutMs) }),
+        // 90s, not the namer's few seconds: a model composing one large propose
+        // call can go quiet for a long stretch (seen live: 30s was not enough),
+        // and the run's own wall clock already bounds the whole thing.
+        complete: deps.complete ?? streamingComplete({ idleTimeoutMs: Math.max(90_000, base.classifier.timeoutMs) }),
         model,
         auth,
         limits,

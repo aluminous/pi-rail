@@ -958,7 +958,7 @@ should be the strong model you are already talking to, not the cheap namer.
 session override that wins over it until Pi restarts. `"grantModel"` picks the
 [configurator](#the-configurator)'s model, same grammar, default `"auto"`;
 its auto list is its own (`AUTO_GRANT_MODEL_PREFERENCES`, filled only from
-`eval/GRANT_RESULTS.md` — currently `anthropic/claude-sonnet-5`), and when no
+`eval/GRANT_RESULTS.md` — currently Anthropic's `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-sonnet-5`, in that order), and when no
 listed model has auth `"auto"` means the session's current model. It is config-only: `/rail model` has no configurator
 seat.
 

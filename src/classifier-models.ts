@@ -52,12 +52,18 @@ export function resolveAutoClassifierModel<M extends { provider: string; id: str
  * model has configured auth, "auto" falls back to the session's current
  * model.
  *
- * claude-sonnet-5: 12/13 with no violations (2026-11-12). claude-haiku-4-5 is
- * deliberately absent: it listed `--force` in a worktree rule's flags.
+ * Order is by eval score, then speed (2026-11-12): claude-sonnet-5-5 13/13,
+ * claude-haiku-5-5 12/13, claude-sonnet-5 12/13 — none with a violation.
+ * claude-haiku-4-5 is deliberately absent: it listed `--force` in a worktree
+ * rule's flags. Ids the running pi does not know are skipped.
  */
-export const AUTO_GRANT_MODEL_PREFERENCES: AutoModelPreference[] = [{ provider: "anthropic", id: "claude-sonnet-5" }];
+export const AUTO_GRANT_MODEL_PREFERENCES: AutoModelPreference[] = [
+  { provider: "anthropic", id: "claude-sonnet-5-5" },
+  { provider: "anthropic", id: "claude-haiku-5-5" },
+  { provider: "anthropic", id: "claude-sonnet-5" },
+];
 
-/** Picks the highest-preference configurator model present in `available`; undefined while the list is empty. */
+/** Picks the highest-preference configurator model present in `available`. */
 export function resolveAutoGrantModel<M extends { provider: string; id: string }>(available: M[], preferences: readonly AutoModelPreference[] = AUTO_GRANT_MODEL_PREFERENCES): M | undefined {
   for (const pref of preferences) {
     const match = available.find((model) => model.provider === pref.provider && model.id === pref.id);

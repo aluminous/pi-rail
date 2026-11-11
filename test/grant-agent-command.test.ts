@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { after, describe, it } from "node:test";
-import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai/compat";
+import type { Api, AssistantMessage, Context, Model, ToolCall } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { forwardAskToParent, startApprovalMailbox } from "../src/approval-mailbox.ts";
 import { askRailApproval, type AskOptions, type RailAsk } from "../src/approvals.ts";
@@ -39,11 +39,14 @@ const settled = async () => {
   for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
 };
 
+// `args` stays loose: fixtures stand in for whatever a provider sends,
+// malformed included. ToolCall["arguments"] is Record<string, any> in pi-ai
+// 0.84 and JsonObject later; the assertion below is valid against both.
 type Call = { name: string; args: Record<string, unknown> };
 function assistant(calls: Call[]): AssistantMessage {
   return {
     role: "assistant",
-    content: calls.map((call, index) => ({ type: "toolCall" as const, id: `c${index}-${Math.random()}`, name: call.name, arguments: call.args })),
+    content: calls.map((call, index) => ({ type: "toolCall" as const, id: `c${index}-${Math.random()}`, name: call.name, arguments: call.args as ToolCall["arguments"] })),
     api: "anthropic-messages",
     provider: "test",
     model: "fake",
@@ -269,7 +272,7 @@ describe("Allow, and generalise…", () => {
 
   it("is a third row in the TUI dialog, between Allow and Deny, never the default", () => {
     const offered = dialog(true);
-    assert.deepEqual(offered.component.render(80).filter((line) => /Allow|Deny/.test(line)).map((line) => line.replace(/\x1B\[[0-9;]*m/g, "").replace(/^(→ |  )/, "").trim()), ["Allow", "Allow, and generalise…", "Deny"]);
+    assert.deepEqual(offered.component.render(80).filter((line) => /Allow|Deny/.test(line)).map((line) => line.replace(/\x1B\[[0-9;]*m|\x1B_[^\x07]*\x07/g, "").replace(/^(→ |  )/, "").trim()), ["Allow", "Allow, and generalise…", "Deny"]);
     offered.component.handleInput("<down>");
     offered.component.handleInput("<enter>");
     assert.deepEqual(offered.answers, [{ approved: true, generalise: true }]);
