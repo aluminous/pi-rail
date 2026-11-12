@@ -14,6 +14,7 @@ import { StatusPage } from "../tui/status-page.ts";
 import { pickFromList, type SelectItem } from "../tui/select-list.ts";
 import { formatError } from "../util.ts";
 import { createDispositionCommands } from "./dispositions.ts";
+import { createEvalCommands } from "./eval.ts";
 import { createGrantCommands } from "./grant.ts";
 import { runModelCommand } from "./model.ts";
 import { createRailTest } from "./test.ts";
@@ -36,6 +37,8 @@ export interface RailCommandDeps {
   postRailNotice?(content: string): void;
   /** Grant command seams (config loading, file writers, the corpus); tests override them. */
   grantDeps?: Omit<Parameters<typeof createGrantCommands>[0], "state" | "notify">;
+  /** `/rail eval` seams (completion function, history file, limits); tests override them. */
+  evalDeps?: Omit<Parameters<typeof createEvalCommands>[0], "state" | "notify">;
 }
 
 const SUBCOMMANDS: Array<{ value: string; description: string }> = [
@@ -60,6 +63,9 @@ const SUBCOMMANDS: Array<{ value: string; description: string }> = [
   { value: "off session", description: "Disable until the session ends (no rail!)" },
   { value: "readonly", description: "Toggle read-only mode: write/edit blocked, bash restricted" },
   { value: "model", description: "Reviewer models for this session: picker (namer/judge/configurator tabs, Ctrl+S saves), or model [judge|configurator] <spec>" },
+  { value: "eval", description: "Check this session's namer and judge on the quick suite, next to past runs" },
+  { value: "eval history", description: "The past /rail eval runs, without running anything" },
+  { value: "eval cancel", description: "Stop the /rail eval run in flight" },
   { value: "smoke", description: "Run sandbox and namer smoke tests" },
   { value: "critique", description: "Critique the capability classes and content screen with a model" },
 ];
@@ -81,6 +87,7 @@ export function createRailCommand(deps: RailCommandDeps) {
   });
 
   const grants = createGrantCommands({ state, notify: show, ...deps.grantDeps });
+  const evals = createEvalCommands({ state, notify: show, ...deps.evalDeps });
   // "Allow, and generalise…" in the approval dialog starts the configurator
   // through this hook — the dialog's own answer is its only caller.
   state.startGeneralise = (ctx, seed) => grants.generalise(ctx, seed);
@@ -271,7 +278,7 @@ export function createRailCommand(deps: RailCommandDeps) {
     }
   }
 
-  type PanelAction = "on" | "off-turn" | "off-session" | "readonly" | "model" | "statusline" | "smoke" | "critique" | "status" | "dispositions" | "grants" | "policy-rules" | "explain";
+  type PanelAction = "on" | "off-turn" | "off-session" | "readonly" | "model" | "eval" | "statusline" | "smoke" | "critique" | "status" | "dispositions" | "grants" | "policy-rules" | "explain";
 
   async function openPanel(ctx: ExtensionContext): Promise<void> {
     const items: SelectItem<PanelAction>[] = [];
@@ -286,6 +293,7 @@ export function createRailCommand(deps: RailCommandDeps) {
     items.push(
       { value: "readonly", label: `Read-only mode: ${state.readOnly ? "on" : "off"}`, searchText: "readonly read only ro toggle mode", description: "Block write/edit and restrict bash to read-only commands" },
       { value: "model", label: "Reviewer models…", searchText: "model namer judge configurator classifier auto choose select", description: "Pick the namer, judge, and configurator models for this session (Tab switches; Ctrl+S saves)" },
+      { value: "eval", label: "Check reviewer models", searchText: "eval evaluate check test models namer judge quick suite benchmark", description: "Run the quick suite through this session's namer and judge; shows past runs beside it" },
       { value: "statusline", label: "Statusline visibility…", searchText: "statusline status line visibility always never auto hide show", description: "Show the rail statusline always, never, or only when notable" },
       { value: "smoke", label: "Run smoke tests", searchText: "smoke test verify sandbox namer classifier", description: "Verify sandboxed execution and capability naming end to end" },
       { value: "critique", label: "Critique capabilities", searchText: "critique capabilities classes screen rules review improve", description: "Have Pi's current model review the class definitions, table, and screen" },
@@ -312,6 +320,8 @@ export function createRailCommand(deps: RailCommandDeps) {
         return toggleReadOnly(ctx);
       case "model":
         return runModelCommand("", ctx, state, () => updateRailStatus(ctx, state));
+      case "eval":
+        return evals.runEval("", ctx);
       case "statusline":
         return chooseStatusLine(ctx);
       case "smoke":
@@ -373,10 +383,11 @@ export function createRailCommand(deps: RailCommandDeps) {
     }
     if ((sub === "readonly" || sub === "ro") && !rest) return toggleReadOnly(ctx);
     if (sub === "model") return runModelCommand(rest, ctx, state, () => updateRailStatus(ctx, state));
+    if (sub === "eval") return evals.runEval(rest, ctx);
     if (sub === "smoke" && !rest) return deps.runRailSmoke(ctx);
     if (sub === "critique") return deps.runCritique(rest, ctx);
 
-    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|grant <text>|grant add|check <file>|grants|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|smoke|critique …]", "warning");
+    show(ctx, "Usage: /rail [status|policy [rules]|set <class> [disposition]|grant <text>|grant add|check <file>|grants|guide <text>|guide clear|explain [n]|test …|why|on|off|off session|readonly|model …|eval [history|cancel]|smoke|critique …]", "warning");
   }
 
   function getArgumentCompletions(argumentPrefix: string) {
@@ -418,5 +429,5 @@ export function createRailCommand(deps: RailCommandDeps) {
     return items.length > 0 ? items : null;
   }
 
-  return { handler, getArgumentCompletions, toggleForTurn, grants };
+  return { handler, getArgumentCompletions, toggleForTurn, grants, evals };
 }

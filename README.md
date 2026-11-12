@@ -89,8 +89,45 @@ Commands — everything lives under `/rail`, with argument autocomplete:
 - `/rail model configurator auto|current|provider/model-id`: set the [configurator](#the-configurator) for this session; its `auto` is its own eval-derived list.
 - `/rail model save`: write this session's reviewer models to the global config — the text form of Ctrl+S.
 - `/rail model status`: print every seat's setting (unsaved session values marked), what it resolves to, and the available models.
+- `/rail eval`: check the namer and judge this session would use (see [Checking your models](#checking-your-models-rail-eval)); `/rail eval history` shows past runs without running anything, `/rail eval cancel` stops a run.
 - `/rail smoke`: run the command-containment and namer smoke tests.
 - `/rail critique [provider/model-id]`: critique the capability class definitions, the disposition table, and the content screen with Pi's current model or a specific one.
+
+### Checking your models: `/rail eval`
+
+`/rail model` picks the seats; `/rail eval` tells you whether the pair you
+picked is any good and how slow it is. It runs a short fixed suite — the
+eight cases tagged `quick` in `eval/cases.ts`: routine allows, credential
+exfiltration, injection, authorization planting, off-machine, destructive,
+and an unanticipated intent, four of them reaching the judge — through the session's **current namer and
+judge together** (unsaved picker choices included), exactly as the live rail
+would: content screen, namer, the **built-in** disposition table (never
+yours, so runs stay comparable), judge when the table escalates. It first
+says what it will spend ("8 cases, about 12 model calls on your accounts"),
+then runs two cases at a time under a 90s limit without holding up the main
+agent; progress (`case 5/8`) and then the report show in a docked panel.
+
+The report puts critical misses (a critical case that ended in allow) first,
+then each seat's share: a case is *decided by the namer* when the table
+resolves its labels without the judge, and *decided by the judge* otherwise,
+so a failing case names the seat that got it wrong, and an errored one names
+the seat, the failure kind and the provider's reason (`! judge error on
+subtle-authority-in-docs: server error (529 Overloaded)`). Latency and tokens
+are per seat call (input counts what was sent, with the cached part shown when
+there is one); wall time and cost are per run (cost from pi's model registry,
+blank when a price is unknown — never guessed — and a `≥` lower bound when a
+call failed). Below it, past runs of the
+same suite, newest first with each pair together; to compare another model,
+pick it in `/rail model` and run `/rail eval` again.
+
+Runs are kept in `~/.pi/agent/rail-evals.jsonl` (private to you, newest 300):
+numbers and model ids only, no commands, prompts, or model output. Each
+carries a suite id — a hash of the quick cases and their expectations — and
+runs of a changed suite are listed apart as not comparable. Eval calls show
+under their own `eval` role in the status page's models tab and touch nothing
+else: no telemetry, replay corpus, decision traces, or session guidance.
+Headless (`pi -p "/rail eval"`), it runs to completion and prints the report.
+It needs the classifier on and both seats resolvable, and says so otherwise.
 
 Rail reports are **never placed into the conversation**: pi delivers custom
 messages to the LLM as user messages, and a status or policy report is a map
@@ -1398,7 +1435,7 @@ The reviewers are verified at four layers, and only the last one touches a live 
 1. **Protocol** (`test/classifier-protocol.test.ts`): projection building, payload construction, response parsing, and error classification are pure functions in `src/classifier-protocol.ts`. The key property pinned here is fail-closed parsing — any model output outside the exact JSON schema throws instead of being interpreted, while unknown class ids are dropped and an empty label set becomes `unclassified`.
 2. **Screen** (`test/content-screen.test.ts`): the deterministic write/edit screen. The load-bearing case is the regression test that imports the round-2 `subtle-*` cases from `eval/cases.ts` and asserts every one trips the screen — those cases are exactly what a path-only exemption misses, so a screen that lets one through is a broken screen.
 3. **Orchestration** (`test/classifier-flow.test.ts`, `test/interceptor.test.ts`, `test/capabilities.test.ts`): the single-call namer, the judge, the shared retry budget, backoff, timeout, auth failures, deterministic label routing, and severity-max table resolution run against scripted fakes, so they are deterministic. No LLM is involved.
-4. **Judgment** (`eval/`): whether a real model names and judges well is measured, not asserted. `npm run eval -- provider/model [provider/model ...]` runs the golden dataset in `eval/cases.ts` through the production path — namer, built-in disposition table, judge when the table escalates — and reports decision agreement, critical misses (a "critical" case decided as allow), the labels each case got, judge rate, latency, and token usage. Pass several models to compare them. One model plays both seats there; in production the judge defaults to the session model. API keys come from the usual env vars (`ANTHROPIC_API_KEY`, etc). The eval exits non-zero if any critical case was allowed. It is intentionally not part of `npm test`.
+4. **Judgment** (`eval/`): whether a real model names and judges well is measured, not asserted. `npm run eval -- provider/model [provider/model ...]` runs the golden dataset in `eval/cases.ts` through the production path — namer, built-in disposition table, judge when the table escalates — and reports decision agreement, critical misses (a "critical" case decided as allow), the labels each case got, judge rate, latency, and token usage. Pass several models to compare them. One model plays both seats there; in production the judge defaults to the session model. API keys come from the usual env vars (`ANTHROPIC_API_KEY`, etc). The eval exits non-zero if any critical case was allowed. It is intentionally not part of `npm test`. `--quick` runs only the `/rail eval` suite (the cases tagged `quick`), two at a time under the same wall clock, prints the `/rail eval` report after the table, and appends one run per model to the same history file `/rail eval` keeps (the path is printed); `--filter` and `--json` combine with it, and a filtered quick run gets its own suite id. The CLI and the command share one runner (`src/rail-eval.ts`); a write whose content screens clean takes the screen's deterministic label without a namer call in both, as it does live.
 
 Keys resolve from the provider env var first, then fall back to pi's own auth store (`auth.json` in the pi agent dir) for providers you logged into via pi with an API key — so if `/login` in pi works for a provider, the eval usually needs no extra setup. OAuth-based pi logins (like Claude Pro/Max) are not usable here; those providers still need an env var.
 
