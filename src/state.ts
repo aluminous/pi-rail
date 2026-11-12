@@ -30,9 +30,11 @@ export interface RailEvent {
 
 /**
  * Which rail model seat made a call: the cheap namer, the judge the table
- * escalates to, or the grant configurator (`/rail grant <text>`).
+ * escalates to, the grant configurator (`/rail grant <text>`), or `/rail eval`
+ * — whose namer and judge calls are kept apart from the live seats' so the cost
+ * tab never bills a model check to classification.
  */
-export type ReviewerRole = "namer" | "judge" | "configurator";
+export type ReviewerRole = "namer" | "judge" | "configurator" | "eval";
 
 /**
  * Token, dollar, and latency accounting for one model in one reviewer role.
@@ -280,6 +282,8 @@ export interface RuntimeState {
   startGeneralise?: (ctx: ExtensionContext, seed: { tool: string; input: Record<string, unknown> }) => void | Promise<void>;
   /** The configurator run in flight, if any (one at a time); `/rail grant cancel` aborts it. */
   grantAgentRun?: { request: string; abort(): void };
+  /** The `/rail eval` run in flight, if any (one at a time); `/rail eval cancel` aborts it. */
+  evalRun?: { abort(): void };
 }
 
 export function createRailStats(): RailStats {
@@ -371,6 +375,8 @@ export function resetSessionState(state: RuntimeState): void {
   state.grantDecisions = {};
   state.grantAgentRun?.abort();
   state.grantAgentRun = undefined;
+  state.evalRun?.abort();
+  state.evalRun = undefined;
 }
 
 /**
@@ -507,7 +513,7 @@ export function recordModelCall(
 
 /** Per-model rows in a stable order: namer before judge, then busiest first. */
 export function modelUsageRows(stats: RailStats): ModelUsageStats[] {
-  const roleOrder: Record<ReviewerRole, number> = { namer: 0, judge: 1, configurator: 2 };
+  const roleOrder: Record<ReviewerRole, number> = { namer: 0, judge: 1, configurator: 2, eval: 3 };
   return Object.values(stats.modelUsage).sort(
     (a, b) => roleOrder[a.role] - roleOrder[b.role] || b.calls - a.calls || a.model.localeCompare(b.model),
   );

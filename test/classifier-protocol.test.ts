@@ -253,6 +253,16 @@ describe("retryFailureKind", () => {
     assert.equal(retryFailureKind(new Error("429 slow down")), "rate limit");
   });
 
+  it("recognises a dropped stream and a provider error stop that arrive without their cause", () => {
+    // pi-ai keeps only error.message: undici's "terminated" loses "other side closed".
+    assert.equal(retryFailureKind(new Error("terminated")), "connection: stream dropped");
+    assert.equal(classifierRetryClass(new Error("terminated")), "delayed");
+    assert.equal(retryFailureKind(new Error("Provider returned an error stop reason")), "server error (provider error stop)");
+    assert.equal(retryFailureKind(new Error("An unknown error occurred")), "server error (provider error stop)");
+    assert.equal(classifierRetryClass(new Error("Provider finish_reason: error")), "delayed");
+    assert.equal(retryFailureKind(new Error("boom")), "unrecognized error");
+  });
+
   it("names non-transport failures for what they are", () => {
     assert.equal(retryFailureKind(new Error("reviewer did not return JSON")), "invalid response");
     assert.equal(retryFailureKind(new Error("400 invalid request body")), "client error (400)");
@@ -292,8 +302,8 @@ describe("describeClassifierFailure", () => {
   });
 
   it("falls back to the caller's model and omits attempts it never learned", () => {
-    assert.equal(describeClassifierFailure(new Error("boom"), { model: "test/fake" }), "error on test/fake: boom");
-    assert.equal(describeClassifierFailure(new Error("boom")), "error: boom");
+    assert.equal(describeClassifierFailure(new Error("boom"), { model: "test/fake" }), "unrecognized error on test/fake: boom");
+    assert.equal(describeClassifierFailure(new Error("boom")), "unrecognized error: boom");
   });
 
   it("survives a frozen error without losing the message", () => {

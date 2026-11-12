@@ -341,7 +341,7 @@ function modelsTab(view: StatusView): string[] {
           ...note(theme, width, `cache ${formatTokens(rows.reduce((sum, row) => sum + row.cacheRead, 0))} read / ${formatTokens(cacheWrite)} written · in excludes cached tokens`),
         ]),
     "",
-    ...note(theme, width, "namer rows are the per-action labelling calls; judge rows are the escalations the table delegated"),
+    ...note(theme, width, "namer rows are the per-action labelling calls; judge rows are the escalations the table delegated; eval rows are /rail eval checks, not decisions"),
   ];
 }
 

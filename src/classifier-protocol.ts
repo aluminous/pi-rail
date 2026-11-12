@@ -388,6 +388,12 @@ const SERVER_ERROR_PHRASES = [
   "upstream connect error",
 ];
 
+/** A stream cut mid-response, as undici and node phrase it once the cause chain is gone. */
+const DROPPED_STREAM_PHRASES = ["terminated", "other side closed", "premature close", "ended unexpectedly"];
+
+/** pi-ai's own wording for a provider error stop that carried no message. */
+const PROVIDER_ERROR_STOP_PHRASES = ["provider returned an error", "an unknown error occurred", "finish_reason: error", "returned an error with no message"];
+
 /**
  * A bare 3-digit 4xx/5xx in the message. Bounded on both sides so the numbers
  * that surround a transport failure do not read as statuses: "after 15000ms"
@@ -479,6 +485,12 @@ export function classifyClassifierFailure(error: unknown): ClassifierFailure {
   }
 
   if (text.includes("timed out") || text.includes("timeout")) return failure("timeout", "timeout");
+  // pi-ai keeps only error.message when a stream fails, so undici's cause
+  // chain ("terminated" ← "other side closed") arrives as the bare outer word.
+  if (DROPPED_STREAM_PHRASES.some((phrase) => text.includes(phrase))) return failure("connection", "connection: stream dropped");
+  // A provider's error stop with no detail of its own is a remote failure,
+  // not something a second identical request is certain to repeat.
+  if (PROVIDER_ERROR_STOP_PHRASES.some((phrase) => text.includes(phrase))) return failure("server error", "server error (provider error stop)");
   if (text.includes("rate limit") || text.includes("too many requests")) return failure("rate limit", "rate limit");
   if (SERVER_ERROR_PHRASES.some((phrase) => text.includes(phrase))) return failure("server error", "server error");
   if (text.includes("getaddrinfo") || text.includes("dns")) return failure("dns", "dns/network");
@@ -500,7 +512,9 @@ export function classifyClassifierFailure(error: unknown): ClassifierFailure {
     return failure("invalid response", "invalid response");
   }
   if (text.includes("review aborted") || chain.some((node) => node.name === "AbortError")) return failure("aborted", "aborted");
-  return failure("error", "error");
+  // Nothing above recognised it. Say so: a bare "error" kind reads like a
+  // classification when it is the absence of one.
+  return failure("error", "unrecognized error");
 }
 
 /** The kind shown in retry and failure messages. */
